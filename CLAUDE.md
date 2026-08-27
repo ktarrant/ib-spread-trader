@@ -137,6 +137,51 @@ row, because an option that cannot be filled against is not tradeable. A
 defective *underlying* quote only nulls `mid` and keeps the bar, because the
 trades close still drives indicators.
 
+## Fills cross the spread, in both directions
+
+Opening a long leg pays the ask; opening a short leg receives the bid; closing
+reverses both. Nothing fills at the midpoint, and mid pricing is not offered as
+an option.
+
+This is measurable rather than assumed only because the capture stores `bid` and
+`ask` as *separate* bar series instead of a blended `bid_ask`. It matters more
+than it looks: SPY calls average a 2.45% relative spread and a vertical crosses
+it four times over a round trip. `an_instant_round_trip_loses_the_spread_not_zero`
+pins the size of what mid pricing would have invented — on the test's quotes,
+open-and-immediately-close loses $40, where mid-to-mid scores it at exactly zero.
+
+Commission is per **leg** per contract (~$0.65), never per order. A 1-lot
+vertical is ~$2.60 round trip, material against a $2-wide spread.
+
+Two consequences to expect rather than debug:
+
+- **Equity drops the instant a trade opens**, by the width of the book plus
+  round-trip commission. A position entered at the ask and marked at the bid is
+  genuinely worth less than it cost.
+- **A position the current bar cannot price is held at entry cost**, not marked
+  to zero. Wings stop printing; writing them off would invent a total loss the
+  market never showed.
+
+`Spread::payoff_bounds` derives max profit and max loss generically, by sampling
+the strikes and both tails, rather than special-casing verticals — so a butterfly
+or condor added later gets correct bounds for free. It returns `None` for a
+structure with a runaway tail (a naked call, either side), because a profit
+target expressed as a percentage of max profit is meaningless there. Naked
+**puts** are bounded: the underlying cannot go below zero.
+
+## Expiry settlement is reported apart from traded P&L
+
+The option tape stops the day *before* expiry — the reference snapshot's last
+option bar is 2026-08-20 for a 2026-08-21 chain — so a position that hit neither
+its target nor its stop cannot be closed on a quote. It settles at intrinsic
+against the stock's own expiry-day print, which the capture does have.
+
+`Portfolio::realized_split` keeps that separate from trades that closed on a real
+quote, because settlement is the one part of a result the tape never priced. No
+commission is charged to settle (IB does not bill exercise or assignment on US
+equity options), which does mean a deep-ITM spread settles more cleanly here than
+in life, where both legs assign and pin risk is real.
+
 ## Conventions from the capture side that this repo must not re-learn
 
 - **Timestamps are RFC3339 text with a literal `+00:00`.** Lexicographic `BETWEEN`
