@@ -222,6 +222,9 @@ fn reason_key(reason: ExitReason) -> &'static str {
     match reason {
         ExitReason::ProfitTarget => "profit_target",
         ExitReason::StopLoss => "stop_loss",
+        ExitReason::UnderlyingPastShortStrike => "underlying_past_short",
+        ExitReason::TimeDecay => "time_decay",
+        ExitReason::BeforeExpiry => "before_expiry",
         ExitReason::Expiry => "expiry_settlement",
     }
 }

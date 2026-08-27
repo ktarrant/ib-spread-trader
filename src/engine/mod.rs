@@ -179,7 +179,13 @@ pub fn run_symbol(
                 continue; // A bar that cannot price a position cannot exit it.
             };
             let gross = credit - position.entry_debit;
-            if let Some(reason) = config.exits.triggered(position, gross) {
+            let ctx = exits::ExitContext {
+                gross_pnl: gross,
+                underlying_price: bar.underlying.price(),
+                bar_ts: bar.ts,
+                expiry_instant: series.expiry_instant(),
+            };
+            if let Some(reason) = config.exits.triggered(position, &ctx) {
                 exiting.push(Intent::Close {
                     id: position.id,
                     reason,
@@ -459,6 +465,7 @@ mod tests {
             exits: ExitRules {
                 profit_target_pct: Some(50.0),
                 stop_loss_pct: Some(100.0),
+                ..Default::default()
             },
             ..Default::default()
         }

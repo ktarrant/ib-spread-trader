@@ -20,6 +20,12 @@ use crate::spread::{CONTRACT_MULTIPLIER, Side, Spread};
 pub enum ExitReason {
     ProfitTarget,
     StopLoss,
+    /// The underlying crossed the short strike — near max profit, close it.
+    UnderlyingPastShortStrike,
+    /// Too much of the time to expiry has elapsed.
+    TimeDecay,
+    /// Hard cutoff: close before getting too close to expiration.
+    BeforeExpiry,
     /// Ran out of option bars and settled at intrinsic. Reported separately from
     /// traded P&L, because it is the one leg of the result the tape did not price.
     Expiry,

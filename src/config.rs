@@ -173,6 +173,15 @@ pub struct ExitConfig {
     /// Percentage of the debit paid at which to give up.
     #[serde(default)]
     pub stop_loss_pct: Option<f64>,
+    /// Close when the underlying crosses the short strike.
+    #[serde(default)]
+    pub underlying_past_short_strike: bool,
+    /// Close after this percentage of the time from entry to expiry has elapsed.
+    #[serde(default)]
+    pub max_time_pct: Option<f64>,
+    /// Close at least this many calendar days before expiration.
+    #[serde(default)]
+    pub min_days_before_expiry: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -255,6 +264,9 @@ impl StrategyConfig {
             exits: ExitRules {
                 profit_target_pct: self.exit.profit_target_pct,
                 stop_loss_pct: self.exit.stop_loss_pct,
+                underlying_past_short_strike: self.exit.underlying_past_short_strike,
+                max_time_pct: self.exit.max_time_pct,
+                min_days_before_expiry: self.exit.min_days_before_expiry,
             },
             max_open_positions: self.execution.max_open_positions,
         }
