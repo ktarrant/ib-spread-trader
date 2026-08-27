@@ -182,6 +182,38 @@ commission is charged to settle (IB does not bill exercise or assignment on US
 equity options), which does mean a deep-ITM spread settles more cleanly here than
 in life, where both legs assign and pin risk is real.
 
+## Indicators are incremental, and warm-up is suppressed on purpose
+
+Each indicator is fed one value per bar and carries its own state. The parked
+`algorithm-api` branch rebuilt its indicator from the whole close history on
+every bar — the same O(n²) mistake as its context cloning.
+
+**The warm-up guard is not cosmetic.** `ta`'s RSI returns a value from the very
+first `next()` call: 50.0 on bar one, computed from no price change at all. Left
+unsuppressed, that reading alone fires a "crossed up through 30" trigger at the
+start of every backtest. `Rsi` withholds readings until `period + 1` bars have
+been seen (n changes need n+1 prices) and `Sma` until its window is full;
+`the_unsuppressed_first_reading_would_have_been_a_false_signal` pins exactly what
+that guard prevents.
+
+`CrossDetector` remembers only the last **non-zero** sign, so a value sitting
+exactly on the level is a touch rather than a crossing — otherwise one move
+through the level fires twice, once arriving and once leaving.
+
+Two behaviours that look like bugs the first time and are not:
+
+- **The first comparison is a baseline, not a crossing.** A signal that starts
+  mid-trend misses the crossing that trend began with, because the averages only
+  become comparable once the slow one is warm.
+- **Both averages must be advanced unconditionally.** An early `?` on the fast
+  one starves the slow one, which then never warms and the signal fires nothing
+  ever. Pinned by `nothing_fires_before_the_slow_average_is_warm`.
+
+A signal sees one bar at a time and keeps its own state, so it cannot reach back
+into history it was not given — look-ahead is structurally impossible here rather
+than merely avoided. `evaluate` must be called **once per bar, in order**;
+skipping or replaying a bar silently corrupts every reading after it.
+
 ## Conventions from the capture side that this repo must not re-learn
 
 - **Timestamps are RFC3339 text with a literal `+00:00`.** Lexicographic `BETWEEN`
