@@ -135,7 +135,7 @@ mod tests {
         let mut rsi = Rsi::new(14).unwrap();
         for (i, value) in FIXTURE.iter().enumerate() {
             let reading = rsi.next(*value);
-            if i + 1 <= 14 {
+            if i < 14 {
                 assert_eq!(reading, None, "bar {} should be suppressed", i + 1);
             } else {
                 assert!(reading.is_some(), "bar {} should report", i + 1);

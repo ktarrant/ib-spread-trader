@@ -10,6 +10,14 @@
 //! rate and a dividend yield. The carry is already inside the forward, which is
 //! what makes the resulting vol free of any rate or dividend assumption.
 
+//! `clippy::neg_cmp_op_on_partial_ord` is allowed deliberately throughout this
+//! module. `!(x > 0.0)` and `x <= 0.0` are **not** equivalent for `f64`: the
+//! first is true for NaN and the second is false. Every negated comparison here
+//! guards a degenerate or unsolvable input, and NaN is exactly the input it must
+//! catch — rewriting them the way clippy suggests would let NaN through into the
+//! pricer.
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
+
 /// sqrt(2*pi)
 const SQRT_2PI: f64 = 2.5066282746310002;
 

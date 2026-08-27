@@ -72,7 +72,7 @@ impl Structure for Vertical {
     }
 
     fn build(&self, trigger: &Trigger, _view: &MarketView<'_>) -> Option<StructureSpec> {
-        agrees(self.right, trigger.direction).then(|| StructureSpec::Vertical {
+        agrees(self.right, trigger.direction).then_some(StructureSpec::Vertical {
             right: self.right,
             long: LegTarget::Delta {
                 target: self.long_delta,

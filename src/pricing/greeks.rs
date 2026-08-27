@@ -9,6 +9,14 @@
 //! basis, which the capture's own numbers put at +0.05–0.15% — well inside the
 //! `delta_tolerance` any strike selector uses.
 
+//! `clippy::neg_cmp_op_on_partial_ord` is allowed deliberately throughout this
+//! module. `!(x > 0.0)` and `x <= 0.0` are **not** equivalent for `f64`: the
+//! first is true for NaN and the second is false. Every negated comparison here
+//! guards a degenerate or unsolvable input, and NaN is exactly the input it must
+//! catch — rewriting them the way clippy suggests would let NaN through into the
+//! pricer.
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
+
 use super::black76::norm_cdf;
 
 /// dPrice/dForward. Positive for calls, negative for puts.
