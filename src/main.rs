@@ -149,6 +149,15 @@ fn main() -> Result<()> {
             }
             if let Some(dir) = &out {
                 report::write_csvs(dir, &built, &runs)?;
+                // Always write the full JSON (with trades) for downstream tools.
+                let mut full = serde_json::to_value(&built)?;
+                if let Some(obj) = full.as_object_mut() {
+                    obj.insert("config".into(), serde_json::to_value(&strategy_config)?);
+                }
+                std::fs::write(
+                    dir.join("backtest.json"),
+                    serde_json::to_string_pretty(&full)?,
+                )?;
             }
 
             let mut value = serde_json::to_value(&built)?;
