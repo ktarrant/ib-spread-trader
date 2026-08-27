@@ -372,4 +372,18 @@ exactly as predicted. META alone accounts for 16 rejections, AMD for 28.
   user-facing validation.
 - Logic lives in library modules under `src/`; `main.rs` is a thin clap dispatcher
   so everything stays unit-testable.
-- Tests are inline `#[cfg(test)] mod tests` blocks.
+- Tests are inline `#[cfg(test)] mod tests` blocks. The one exception is
+  `tests/golden.rs`, which runs against the real snapshot and **skips cleanly
+  when none is present** — the file is 213 MB and lives outside the repo.
+
+## When a golden test fails
+
+`tests/golden.rs` pins values confirmed by hand: SPY's parity forward at a known
+bar, the quality account, META's rejection count, and the reference strategy's
+full run down to the cent. They are deterministic.
+
+So decide which happened before touching one: a regression, or a deliberate
+change to the model. Only the second is a reason to edit the expected value, and
+the commit should say which. If `the_catalog_reports_one_expiry_across_twelve_symbols`
+fails, a *different snapshot* is being tested and every other pinned value should
+be re-confirmed by hand rather than adjusted to fit.

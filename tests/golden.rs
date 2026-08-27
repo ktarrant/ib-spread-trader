@@ -1,0 +1,297 @@
+//! Golden tests against the real capture snapshot.
+//!
+//! These pin values confirmed by hand, so a refactor that quietly changes the
+//! maths fails loudly rather than drifting. They **skip cleanly when no snapshot
+//! is present** — following `~/ib-option-viz/tests/test_golden.py`, since the
+//! snapshot is a 213 MB file that lives outside the repo and cannot be checked in.
+//!
+//! Set `$IB_SNAPSHOT` to test against a specific file; otherwise the newest in
+//! `~/Documents/Options Database` is used.
+//!
+//! When one of these fails, decide which happened before touching it:
+//! a regression, or a deliberate change to the model. Only the second is a
+//! reason to edit the expected value, and the commit should say so.
+
+use chrono::{DateTime, NaiveDate, Utc};
+use ib_spread_trader::config::StrategyConfig;
+use ib_spread_trader::data::{ChainSeries, Snapshot, chain_coverage};
+use ib_spread_trader::domain::OptionRight;
+use ib_spread_trader::{engine, report};
+
+/// The bar every hand-checked value below was taken at.
+const PINNED_TS: &str = "2026-08-19T15:00:00+00:00";
+const EXPIRY: (i32, u32, u32) = (2026, 8, 21);
+
+fn expiry() -> NaiveDate {
+    NaiveDate::from_ymd_opt(EXPIRY.0, EXPIRY.1, EXPIRY.2).unwrap()
+}
+
+fn pinned_ts() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(PINNED_TS)
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
+/// `None` means "no snapshot here" — the caller returns and the test passes.
+fn snapshot() -> Option<Snapshot> {
+    let path = match std::env::var_os("IB_SNAPSHOT") {
+        Some(path) => std::path::PathBuf::from(path),
+        None => ib_spread_trader::data::snapshot::default_snapshot_path().ok()?,
+    };
+    match Snapshot::open(&path) {
+        Ok(snapshot) => Some(snapshot),
+        Err(err) => {
+            eprintln!("skipping golden test: {err}");
+            None
+        }
+    }
+}
+
+macro_rules! snapshot_or_skip {
+    () => {
+        match snapshot() {
+            Some(snapshot) => snapshot,
+            None => {
+                eprintln!("skipping: no capture snapshot available");
+                return;
+            }
+        }
+    };
+}
+
+/// The shape of the reference capture. If this changes, a *different* snapshot
+/// is being tested and every other value below should be re-confirmed by hand
+/// rather than adjusted to fit.
+#[test]
+fn the_catalog_reports_one_expiry_across_twelve_symbols() {
+    let snapshot = snapshot_or_skip!();
+    let chains = chain_coverage(&snapshot).unwrap();
+
+    assert_eq!(chains.len(), 12, "expected 12 tradeable chains");
+    assert!(
+        chains.iter().all(|c| c.expiry == "2026-08-21"),
+        "the reference snapshot has option bars on exactly one expiry"
+    );
+    assert!(chains.iter().all(|c| c.is_tradeable()));
+
+    let spy = chains.iter().find(|c| c.symbol == "SPY").unwrap();
+    assert_eq!(spy.timestamps, 581);
+    assert_eq!(spy.paired_strikes, 45);
+    // SPY options trade to 20:00 UTC, past the equity close, so ~7% of their
+    // bars have no stock print to join.
+    assert_eq!(spy.stock_ts_overlap, 539);
+    assert!(spy.stock_ts_overlap < spy.timestamps);
+
+    // AAPL, AMZN, COIN and NVDA quote strikes on one side only.
+    let amzn = chains.iter().find(|c| c.symbol == "AMZN").unwrap();
+    assert_eq!((amzn.strikes, amzn.paired_strikes), (36, 24));
+}
+
+/// The number that validates the whole pricing stack: the forward recovered from
+/// 30 strikes by put-call parity, against the underlying's own printed mid.
+#[test]
+fn spys_parity_forward_matches_its_real_spot_to_the_carry_basis() {
+    let snapshot = snapshot_or_skip!();
+    let series = ChainSeries::load(&snapshot, "SPY", expiry()).unwrap();
+    let bar = series
+        .snapshot_at(pinned_ts())
+        .expect("the pinned bar exists");
+
+    assert_eq!(bar.paired_strikes, 30);
+    assert!((bar.forward - 771.405).abs() < 1e-9, "{}", bar.forward);
+    assert!(
+        (bar.residual_mad - 0.02).abs() < 1e-9,
+        "{}",
+        bar.residual_mad
+    );
+
+    let spot = bar
+        .underlying
+        .mid
+        .expect("a mid-session bar has a stock print");
+    assert!((spot - 771.12).abs() < 1e-9, "{spot}");
+
+    // +0.037%: the right sign and size for carry, and the reason the forward is
+    // a sound fallback on the 20:00 bars that have no spot at all.
+    let basis = 100.0 * (bar.forward / spot - 1.0);
+    assert!((0.02..0.06).contains(&basis), "carry basis was {basis}%");
+}
+
+/// Call and put IV at the same strike are computed from different prices, so
+/// their agreement is an independent check on the inversion.
+#[test]
+fn call_and_put_implied_vol_agree_at_the_money() {
+    let snapshot = snapshot_or_skip!();
+    let series = ChainSeries::load(&snapshot, "SPY", expiry()).unwrap();
+    let bar = series.snapshot_at(pinned_ts()).unwrap();
+
+    let at = |right| {
+        bar.quotes
+            .iter()
+            .find(|q| q.strike == 771.0 && q.right == right)
+            .and_then(|q| q.implied_vol)
+            .expect("strike 771 is quoted on both sides")
+    };
+    let (call, put) = (at(OptionRight::Call), at(OptionRight::Put));
+    assert!((call - 0.1071).abs() < 5e-5, "{call}");
+    assert!((put - 0.1067).abs() < 5e-5, "{put}");
+    assert!((call - put).abs() < 0.001, "{call} vs {put}");
+}
+
+/// Deep-ITM calls quoting at or below intrinsic have no solvable vol. They are
+/// *unusable*, not zero-delta, and must stay out of the selectable set — this is
+/// the guard that keeps a delta selector from picking a strike whose distance
+/// from the money is unknown.
+#[test]
+fn deep_itm_calls_have_no_delta_and_are_not_selectable() {
+    let snapshot = snapshot_or_skip!();
+    let series = ChainSeries::load(&snapshot, "SPY", expiry()).unwrap();
+    let bar = series.snapshot_at(pinned_ts()).unwrap();
+
+    for strike in [719.0, 723.0, 748.0, 751.0] {
+        let quote = bar
+            .quotes
+            .iter()
+            .find(|q| q.strike == strike && q.right == OptionRight::Call)
+            .unwrap_or_else(|| panic!("strike {strike} is quoted"));
+        assert_eq!(quote.implied_vol, None, "strike {strike} should not solve");
+        assert_eq!(quote.delta, None);
+    }
+
+    let selectable: Vec<f64> = bar
+        .selectable(OptionRight::Call)
+        .map(|q| q.strike)
+        .collect();
+    assert!(!selectable.contains(&719.0));
+    assert!(selectable.contains(&771.0), "the money is still selectable");
+}
+
+/// The tape's own defects, pinned so a change in the cleaning rules shows up.
+#[test]
+fn spys_quality_account_matches_the_capture() {
+    let snapshot = snapshot_or_skip!();
+    let series = ChainSeries::load(&snapshot, "SPY", expiry()).unwrap();
+
+    assert_eq!(series.len(), 581);
+    assert_eq!(series.option_quality.rows_read, 48_660);
+    assert_eq!(series.option_quality.dropped_crossed, 11);
+    assert_eq!(series.option_quality.dropped_unpaired, 0);
+    assert_eq!(series.option_quality.dropped_nonpositive, 0);
+
+    // The stock tape is spotless on every symbol.
+    assert_eq!(series.underlying_quality.rows_read, 806);
+    assert_eq!(series.underlying_quality.rows_kept(), 806);
+}
+
+/// The option tape stops the day before expiry, so settlement depends on a stock
+/// print that lands after the last option bar.
+#[test]
+fn the_underlying_still_prints_after_the_last_option_bar() {
+    let snapshot = snapshot_or_skip!();
+    let series = ChainSeries::load(&snapshot, "SPY", expiry()).unwrap();
+
+    let last_option_bar = series.timestamps().last().unwrap();
+    assert_eq!(last_option_bar.to_rfc3339(), "2026-08-20T20:00:00+00:00");
+    assert!(last_option_bar < series.expiry_instant());
+
+    let settlement = series.underlying_asof(series.expiry_instant()).unwrap();
+    assert!(
+        settlement.price().is_some(),
+        "expiry-day stock print exists"
+    );
+}
+
+/// The whole pipeline, pinned end to end. These numbers are deterministic; a
+/// change to any of them means the model changed, intentionally or otherwise.
+#[test]
+fn the_reference_strategy_reproduces_its_recorded_run() {
+    let snapshot = snapshot_or_skip!();
+    let config = StrategyConfig::load("strategies/rsi_bull_call.toml").unwrap();
+    let run_config = config.run_config();
+
+    let mut runs = Vec::new();
+    for symbol in &config.symbols {
+        let series = ChainSeries::load(&snapshot, symbol, config.expiry).unwrap();
+        let mut strategy = config.strategy().unwrap();
+        runs.push(engine::run_symbol(&series, &mut strategy, &run_config).unwrap());
+    }
+    let built = report::build(&config.name, config.expiry, &runs);
+    let totals = &built.totals;
+
+    assert_eq!(totals.symbols, 12);
+    assert_eq!(totals.trades, 22);
+    assert_eq!(totals.census.triggers, 495);
+    assert_eq!(
+        totals.census.declined, 246,
+        "bearish crossings a call structure declines"
+    );
+    assert_eq!(totals.census.at_position_limit, 163);
+    assert_eq!(totals.census.unfillable_intents, 0);
+
+    assert_eq!(totals.census.rejections["debit_above_limit"], 44);
+    assert_eq!(totals.census.rejections["no_strike_near_target_delta"], 20);
+
+    assert!(
+        (totals.total_pnl - 3903.40).abs() < 0.01,
+        "{}",
+        totals.total_pnl
+    );
+    assert!(
+        (totals.traded_pnl - 3131.00).abs() < 0.01,
+        "{}",
+        totals.traded_pnl
+    );
+    assert!(
+        (totals.settled_pnl - 772.40).abs() < 0.01,
+        "{}",
+        totals.settled_pnl
+    );
+    assert!((totals.commission_paid - 41.60).abs() < 0.01);
+
+    // Every trade closed one way or another; nothing was left marked.
+    assert_eq!(totals.exits_by_reason["expiry_settlement"], 12);
+    assert_eq!(totals.exits_by_reason["profit_target"], 8);
+    assert_eq!(totals.exits_by_reason["stop_loss"], 2);
+
+    // Cash, the trade log and the curve have to agree or the report is decoration.
+    let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
+    assert!((totals.total_pnl - booked).abs() < 1e-6);
+    let curve = report::combined_curve(&runs);
+    assert!((curve.last().unwrap().1 - totals.final_equity).abs() < 1e-6);
+}
+
+/// META's ladder reaches barely above the money on many bars, which is the real
+/// case selector rejection exists for. If this ever stops rejecting, check
+/// whether the ladder changed before assuming the selector improved.
+#[test]
+fn metas_truncated_ladder_rejects_the_far_leg() {
+    let snapshot = snapshot_or_skip!();
+    let config = StrategyConfig::load("strategies/rsi_bull_call.toml").unwrap();
+    let series = ChainSeries::load(&snapshot, "META", config.expiry).unwrap();
+    let mut strategy = config.strategy().unwrap();
+    let run = engine::run_symbol(&series, &mut strategy, &config.run_config()).unwrap();
+
+    assert_eq!(run.census.total_rejections(), 16);
+    let example = &run.census.rejection_examples["no_strike_near_target_delta"];
+    assert!(example.contains("0.30 delta"), "{example}");
+    assert!(example.contains("closest quoted"), "{example}");
+}
+
+/// A strategy that never fires must return exactly its capital — no drift, no
+/// stray commission — even over the full real chain.
+#[test]
+fn a_never_firing_strategy_returns_its_capital_exactly_on_real_data() {
+    let snapshot = snapshot_or_skip!();
+    // An RSI level of 0 is unreachable, so the signal cannot cross it.
+    let config: StrategyConfig = toml::from_str(
+        "symbols = [\"SPY\"]\nexpiry = \"2026-08-21\"\n[signal]\nkind = \"rsi_cross\"\nlevel = 0.0",
+    )
+    .unwrap();
+    let series = ChainSeries::load(&snapshot, "SPY", config.expiry).unwrap();
+    let mut strategy = config.strategy().unwrap();
+    let run = engine::run_symbol(&series, &mut strategy, &config.run_config()).unwrap();
+
+    assert_eq!(run.census.triggers, 0);
+    assert_eq!(run.final_equity, run.initial_cash);
+    assert!(run.equity_curve.iter().all(|&(_, e)| e == run.initial_cash));
+}
