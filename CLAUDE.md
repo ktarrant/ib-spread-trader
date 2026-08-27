@@ -245,6 +245,58 @@ declined rather than inverted. Declines are counted separately from selector
 rejections, because they mean different things: one is "not for this trigger",
 the other is "the market could not supply it".
 
+## The bar loop: decide on N, fill on N+1
+
+A signal is computed from a bar's own close, and nobody can trade at a price they
+are still waiting to observe — so a decision made on bar N executes against bar
+N+1's quotes. `Timing::SameBar` exists only to measure what that costs.
+
+**`SameBar` is not guaranteed to score better, and a test asserting it would be
+asserting something untrue.** Look-ahead is an unfair advantage in expectation,
+not on any single path: entering a bar earlier changes the entry price *and*
+which bar the exit lands on, and the two interact. What is pinned instead is the
+mechanism — the same signal opens the same trade exactly one bar apart, at a
+different price.
+
+Exits queue the same way. In life a profit target is a resting limit order and
+would fill sooner, so next-bar exits are pessimistic — the right direction to err.
+
+Order within a bar: execute yesterday's decisions, then mark, then evaluate
+exits, then evaluate the signal. Exits are queued ahead of entries so a bar that
+both closes and opens frees the slot first.
+
+**A signal must be evaluated on every bar, in order, whether or not the result
+can be acted on** — its indicators are stateful, and skipping bars when the
+position cap is full would silently corrupt every later reading.
+
+## The census is part of the result
+
+`Census` records why bars produced no trade, and the distinctions are load-bearing:
+
+| Field | Means |
+|---|---|
+| `declined` | The structure said "not for this trigger" — wrong direction for its right |
+| `at_position_limit` | A position was already open |
+| `rejections` | The market could not supply the trade, keyed by `Reject::kind()` |
+| `unfillable_intents` | A queued order's legs were not quoted on the bar that arrived |
+
+`rejection_examples` keeps one worked example per kind, so a census entry can
+actually be read rather than just counted.
+
+Exit rules read **gross** P&L, before commission. A profit target is a resting
+limit order at a spread *price*, and no order can be placed that accounts for its
+own commission. Commissions are charged in full and shown in the net P&L; they
+are simply not what the trigger reads.
+
+## Test fixtures generate their own options
+
+`engine::testing::snapshot_with` builds a real on-disk snapshot whose ladder is
+priced by Black-76 off a given path, so the parity fit recovers that path exactly
+and every delta is analytic — a failure is then the engine's, not the fixture's.
+`the_fixture_chain_reconstructs_its_own_underlying` checks that before anything
+else concludes from it. Wrap the inserts in a transaction: without one the suite
+takes 10.7s instead of 0.24s.
+
 ## Conventions from the capture side that this repo must not re-learn
 
 - **Timestamps are RFC3339 text with a literal `+00:00`.** Lexicographic `BETWEEN`
