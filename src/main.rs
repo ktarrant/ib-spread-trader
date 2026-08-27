@@ -4,9 +4,11 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, Utc};
 use clap::{Parser, Subcommand};
+use ib_spread_trader::config::StrategyConfig;
 use ib_spread_trader::data::{
     ChainSeries, Snapshot, chain_coverage, snapshot::default_snapshot_path,
 };
+use ib_spread_trader::{engine, report};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -42,6 +44,18 @@ enum Command {
         /// Defaults to the last bar in the chain.
         #[arg(long)]
         at: Option<String>,
+    },
+    /// Replay a strategy over the snapshot and report what it did.
+    Backtest {
+        /// Path to a strategy TOML file.
+        #[arg(long)]
+        config: PathBuf,
+        /// Also write trades.csv and equity.csv here.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Include every closed trade in the JSON, not just the summary.
+        #[arg(long)]
+        trades: bool,
     },
 }
 
@@ -95,6 +109,66 @@ fn main() -> Result<()> {
                 "snapshot": resolved,
             });
             println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        Command::Backtest {
+            config,
+            out,
+            trades,
+        } => {
+            let strategy_config = StrategyConfig::load(&config)?;
+            let run_config = strategy_config.run_config();
+
+            let mut runs = Vec::new();
+            let mut skipped = Vec::new();
+            for symbol in &strategy_config.symbols {
+                let series = ChainSeries::load(&snapshot, symbol, strategy_config.expiry)?;
+                if series.is_empty() {
+                    // A symbol with no two-sided bars is not a zero-return run;
+                    // averaging it in as one would dilute every real result.
+                    skipped.push(symbol.clone());
+                    continue;
+                }
+                // A fresh strategy per symbol: signals carry indicator state.
+                let mut strategy = strategy_config.strategy()?;
+                runs.push(engine::run_symbol(&series, &mut strategy, &run_config)?);
+            }
+            if runs.is_empty() {
+                bail!(
+                    "no symbol in the config has two-sided option bars for {}; try `catalog`",
+                    strategy_config.expiry
+                );
+            }
+
+            let mut built = report::build(&strategy_config.name, strategy_config.expiry, &runs);
+            if !skipped.is_empty() {
+                built.caveats.push(format!(
+                    "{} symbol(s) had no two-sided option bars and were not run: {}.",
+                    skipped.len(),
+                    skipped.join(", ")
+                ));
+            }
+            if let Some(dir) = &out {
+                report::write_csvs(dir, &built, &runs)?;
+            }
+
+            let mut value = serde_json::to_value(&built)?;
+            if !trades && let Some(object) = value.as_object_mut() {
+                object.remove("trades");
+                object.insert(
+                    "trades_written".into(),
+                    serde_json::json!(built.trades.len()),
+                );
+            }
+            if let Some(object) = value.as_object_mut() {
+                object.insert("config".into(), serde_json::to_value(&strategy_config)?);
+                if let Some(dir) = &out {
+                    object.insert(
+                        "csv_dir".into(),
+                        serde_json::json!(dir.display().to_string()),
+                    );
+                }
+            }
+            println!("{}", serde_json::to_string_pretty(&value)?);
         }
     }
     Ok(())

@@ -20,7 +20,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::data::{ChainSeries, ChainSnapshot, Quality};
@@ -34,7 +34,7 @@ pub mod exits;
 
 pub use exits::ExitRules;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Timing {
     /// Decide on bar N, fill against bar N+1. The honest default.
@@ -253,6 +253,11 @@ pub fn run_symbol(
                 .saturating_sub(opened_at_index.get(&id).copied().unwrap_or(0));
             portfolio.settle_at_expiry(id, price, series.expiry_instant(), held);
         }
+        // Close the curve at the settlement instant. Without this its last point
+        // is the final option bar's *mark* — positions valued at what they could
+        // have been sold for, a day before they actually settled — so anyone
+        // plotting equity.csv reads a different ending than the summary states.
+        equity_curve.push((series.expiry_instant(), portfolio.cash));
     }
 
     let final_equity = portfolio.cash;
@@ -601,6 +606,12 @@ mod tests {
         assert_eq!(run.settlement_price, Some(120.0));
         let trade = run.portfolio.closed.first().expect("one position settled");
         assert_eq!(trade.exit_reason, ExitReason::Expiry);
+
+        // The curve must end where the summary says it ended, at the settlement
+        // instant — not at the final option bar's mark a day earlier.
+        let &(last_ts, last_equity) = run.equity_curve.last().unwrap();
+        assert_eq!(last_ts, series.expiry_instant());
+        assert_eq!(last_equity, run.final_equity);
 
         let (traded, settled) = run.portfolio.realized_split();
         assert_eq!(traded, 0.0, "nothing closed on a quote");

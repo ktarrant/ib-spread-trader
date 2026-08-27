@@ -297,6 +297,60 @@ and every delta is analytic — a failure is then the engine's, not the fixture'
 else concludes from it. Wrap the inserts in a transaction: without one the suite
 takes 10.7s instead of 0.24s.
 
+## Strategies are TOML over Rust traits
+
+`strategies/rsi_bull_call.toml` is the worked example. The three stages are named
+by string with their parameters inline, so a parameter sweep needs no recompile;
+genuinely new logic is still a trait impl. `StrategyConfig::validate` builds every
+stage up front, so a typo fails before any I/O rather than after the first symbol
+has already run.
+
+**Every field carries `#[serde(default)]`, and unknown keys are refused.** A
+partial config that fails to deserialize is a live papercut in `ib-option-calc`
+and not worth reproducing; a misspelled key silently taking its default would be
+worse than an error.
+
+`StrategyConfig::strategy()` returns a **fresh** strategy each call, and the
+backtest command builds one per symbol. Signals carry indicator state — sharing
+one would leak one symbol's price history into the next symbol's readings.
+
+## The report says what it cannot support
+
+**There is no Sharpe ratio, deliberately.** One expiry and ~44 sessions cannot
+support one, and its only real function would be to make the result look more
+settled than it is. `Report::caveats` is part of the output rather than a
+footnote, and it flags: too few trades for the win rate to be more than
+descriptive, how much P&L came from expiry settlement rather than a quoted exit,
+rejections outnumbering fills, commissions dominating P&L, and symbols that never
+traded.
+
+A symbol with no two-sided bars is **skipped and named**, not run as a
+zero-return symbol — averaging it in would dilute every real result.
+
+The equity curve gets a final point at the settlement instant. Without it the
+last point is the final option bar's *mark* — positions valued at what they could
+have been sold for, a day before they actually settled — and anyone plotting
+`equity.csv` would read a different ending than the summary states.
+
+### What the reference strategy actually does
+
+`cargo run -- backtest --config strategies/rsi_bull_call.toml` over all 12
+symbols, as a sanity baseline (not an endorsement — 22 trades proves nothing):
+
+```
+495 triggers -> 246 declined (RSI crossed *down* through 30: bearish, and a
+                             call structure declines it)
+             -> 163 at position limit
+             ->  64 rejected (44 debit above limit, 20 no strike near 0.30 delta)
+             ->  22 filled
+```
+
+The rejection example reads `no call within tolerance of 0.30 delta (closest
+quoted: 0.407)` — that is META's truncated ladder, showing up in real data
+exactly as predicted. META alone accounts for 16 rejections, AMD for 28.
+
+12 of 22 exits were expiry settlement, which is why that P&L is reported apart.
+
 ## Conventions from the capture side that this repo must not re-learn
 
 - **Timestamps are RFC3339 text with a literal `+00:00`.** Lexicographic `BETWEEN`

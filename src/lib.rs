@@ -1,3 +1,4 @@
+pub mod config;
 pub mod data;
 pub mod domain;
 pub mod engine;
@@ -5,6 +6,7 @@ pub mod execution;
 pub mod indicators;
 pub mod portfolio;
 pub mod pricing;
+pub mod report;
 pub mod signal;
 pub mod spread;
 pub mod structure;

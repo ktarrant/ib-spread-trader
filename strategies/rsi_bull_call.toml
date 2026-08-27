@@ -1,0 +1,38 @@
+# RSI recovery off an oversold reading, expressed as a bull call debit spread.
+#
+# The signal fires when RSI(14) crosses up through 30, which reads bullish. A
+# call structure agrees with a bullish trigger, so it builds the debit version:
+# long the 0.50 delta, short the 0.30. A crossing *down* through 30 would read
+# bearish, the call structure would decline it, and the census would count it.
+
+name    = "rsi-oversold-bull-call"
+symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR"]
+expiry  = "2026-08-21"
+initial_cash = 100000.0
+
+[signal]
+kind = "rsi_cross"
+period = 14
+level = 30.0
+
+[structure]
+kind = "vertical"
+right = "call"
+long_delta = 0.50
+short_delta = 0.30
+quantity = 1
+
+[execution]
+# Refuse a trade rather than substitute a strike nobody asked for. META's ladder
+# reaches only ~1% above spot on some bars; a 0.30-delta call is not on it.
+delta_tolerance = 0.07
+max_debit = 1000.0
+timing = "next_bar"
+max_open_positions = 1
+
+[exit]
+profit_target_pct = 50.0
+stop_loss_pct = 100.0
+
+[costs]
+commission_per_contract = 0.65
