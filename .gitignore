@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+/out
+.DS_Store
