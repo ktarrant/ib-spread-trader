@@ -82,7 +82,7 @@ fn fire(ts: DateTime<Utc>, cross: Cross, strength: f64) -> Trigger {
 }
 
 #[cfg(test)]
-pub(crate) mod testing {
+pub mod testing {
     use super::*;
     use crate::data::chain::UnderlyingBar;
     use chrono::TimeZone;
@@ -91,6 +91,7 @@ pub(crate) mod testing {
     /// underlying, which is all of them so far.
     pub fn bar(minute: u32, price: f64) -> ChainSnapshot {
         ChainSnapshot {
+            symbol: "TEST".into(),
             ts: Utc
                 .with_ymd_and_hms(2026, 7, 1, 13 + minute / 60, minute % 60, 0)
                 .unwrap(),

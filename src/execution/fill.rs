@@ -132,6 +132,7 @@ mod tests {
     /// so mid-to-mid the spread looks like 3.00 - 1.50 = $150.
     fn bar() -> ChainSnapshot {
         ChainSnapshot {
+            symbol: "SPY".into(),
             ts: Utc.with_ymd_and_hms(2026, 8, 19, 15, 0, 0).unwrap(),
             underlying: UnderlyingBar {
                 mid: Some(751.0),

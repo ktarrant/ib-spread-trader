@@ -6,3 +6,4 @@ pub mod portfolio;
 pub mod pricing;
 pub mod signal;
 pub mod spread;
+pub mod structure;

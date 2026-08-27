@@ -259,6 +259,7 @@ mod tests {
 
     fn bar_at(hour: u32, long: (f64, f64), short: (f64, f64)) -> ChainSnapshot {
         ChainSnapshot {
+            symbol: "SPY".into(),
             ts: Utc.with_ymd_and_hms(2026, 8, 19, hour, 0, 0).unwrap(),
             underlying: UnderlyingBar {
                 mid: Some(751.0),

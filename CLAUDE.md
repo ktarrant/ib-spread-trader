@@ -214,6 +214,37 @@ into history it was not given — look-ahead is structurally impossible here rat
 than merely avoided. `evaluate` must be called **once per bar, in order**;
 skipping or replaying a bar silently corrupts every reading after it.
 
+## Rejection is a first-class path, not an edge case
+
+Resolving a structure against a real ladder is where a backtest most easily
+starts lying to itself, because the honest answer is often "you cannot open this
+trade". On the reference snapshot at 2026-07-15 15:00 UTC, SPY quotes 45 strikes
+spanning −4.9% to +3.4% of spot — but **META quotes only to +1.0%**, so there is
+no 0.30-delta call on its ladder at all. PLTR and QQQ carry ten strikes each.
+
+A selector that quietly took the nearest available strike would turn a trade that
+could not be placed into a trade that was, at a delta nobody asked for. So every
+refusal is a typed `Reject` carrying **what was available** — "off by 0.02" and
+"off by 0.28" are different findings — and the run report prints a census of them
+beside the trade log. A strategy whose rejections outnumber its fills has not
+been backtested; it has been imagined.
+
+`Reject::DebitNotPositive` is worth knowing about: stale or crossed quotes can
+make a debit spread price as a credit. That is not free money, it is bad data,
+and accepting it would show up as edge.
+
+Legs are named by **absolute delta**, which is what lets one `Vertical` struct
+cover both the bull call and the bear put. For calls, strike rises as delta
+falls, so long-0.50/short-0.30 is a bull call; for puts, strike rises as |delta|
+rises, so the identical targets give a bear put. Only the right changes.
+
+Only the **debit** version is built. A trigger disagreeing with the right's
+natural bias (calls bullish, puts bearish) would make the credit version of the
+same structure — the payoff maths already supports it — so such a trigger is
+declined rather than inverted. Declines are counted separately from selector
+rejections, because they mean different things: one is "not for this trigger",
+the other is "the market could not supply it".
+
 ## Conventions from the capture side that this repo must not re-learn
 
 - **Timestamps are RFC3339 text with a literal `+00:00`.** Lexicographic `BETWEEN`

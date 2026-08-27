@@ -98,6 +98,7 @@ impl OptionQuote {
 /// One timestamp's resolved ladder.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChainSnapshot {
+    pub symbol: String,
     pub ts: DateTime<Utc>,
     pub underlying: UnderlyingBar,
     /// Median-of-parity forward across the paired ladder.
@@ -267,6 +268,7 @@ impl ChainSeries {
             .collect();
 
         Some(ChainSnapshot {
+            symbol: self.symbol.clone(),
             ts,
             underlying: self.underlying_at(ts).unwrap_or(UnderlyingBar {
                 mid: None,
