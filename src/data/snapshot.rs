@@ -73,7 +73,9 @@ impl Snapshot {
     }
 
     pub fn schema_version(&self) -> Result<i64> {
-        Ok(self.conn.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+        Ok(self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?)
     }
 }
 
@@ -124,7 +126,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let writable = Connection::open(&path).unwrap();
         writable.pragma_update(None, "user_version", 6i64).unwrap();
-        writable.execute_batch("CREATE TABLE t (a INTEGER)").unwrap();
+        writable
+            .execute_batch("CREATE TABLE t (a INTEGER)")
+            .unwrap();
         drop(writable);
 
         let snapshot = Snapshot::open(&path).unwrap();
