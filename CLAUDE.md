@@ -111,6 +111,32 @@ pick it. Debit verticals sit on the OTM side where the surface is clean (~0.10 I
 there versus a noisy 0.30–0.40 deep ITM), so this constrains structure choice, not
 the common case.
 
+## Load once, borrow forever
+
+`ChainSeries::load` reads a whole symbol/expiry into one sorted `Vec` and every
+per-bar view is a slice into it. This is not premature optimisation — it is
+avoiding a specific mistake. The parked `algorithm-api` branch in
+`~/ib-option-calc` rebuilt its history, quote map and contract map into a fresh
+context on *every bar*, which is O(n²) over ~1M rows.
+
+A full chain loads in ~100 ms (SPY: 581 bars, 48 660 quote rows). IV and delta
+are resolved lazily in `ChainSeries::snapshot`, one pass per bar, so the engine
+pays for exactly the bars it visits.
+
+## Losses are counted, never hidden
+
+`Quality` tallies every row dropped on the way to a clean two-sided series —
+unpaired, crossed, non-positive mid — and the run report prints it. Silently
+discarding them would make a thin chain look like a clean one. On the reference
+snapshot the option tape is good but not perfect: PLTR drops 389 unpaired rows
+of 21 237 (1.8%), AMZN 235 of 27 295, SPY 11 crossed of 48 660. The underlying
+tape is spotless (806 rows, nothing dropped, every symbol).
+
+Note the asymmetry, which is deliberate: a defective *option* quote drops the
+row, because an option that cannot be filled against is not tradeable. A
+defective *underlying* quote only nulls `mid` and keeps the bar, because the
+trades close still drives indicators.
+
 ## Conventions from the capture side that this repo must not re-learn
 
 - **Timestamps are RFC3339 text with a literal `+00:00`.** Lexicographic `BETWEEN`
