@@ -144,6 +144,11 @@ pub struct ExecutionConfig {
     pub timing: Timing,
     #[serde(default = "default_max_open")]
     pub max_open_positions: usize,
+    /// Refuse new entries when fewer than this many calendar days remain before
+    /// expiry. Prevents opening positions the before-expiry exit would
+    /// immediately close. Set this to `min_days_before_expiry + buffer`.
+    #[serde(default)]
+    pub min_entry_days_before_expiry: Option<u32>,
 }
 
 fn default_tolerance() -> f64 {
@@ -160,6 +165,7 @@ impl Default for ExecutionConfig {
             max_debit: None,
             timing: Timing::default(),
             max_open_positions: default_max_open(),
+            min_entry_days_before_expiry: None,
         }
     }
 }
@@ -269,6 +275,7 @@ impl StrategyConfig {
                 min_days_before_expiry: self.exit.min_days_before_expiry,
             },
             max_open_positions: self.execution.max_open_positions,
+            min_entry_days_before_expiry: self.execution.min_entry_days_before_expiry,
         }
     }
 }

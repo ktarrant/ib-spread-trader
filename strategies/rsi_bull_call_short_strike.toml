@@ -17,11 +17,12 @@ quantity = 1
 [execution]
 delta_tolerance = 0.07
 max_debit = 1000.0
+min_entry_days_before_expiry = 8
 
 [exit]
 underlying_past_short_strike = true
 stop_loss_pct = 100.0
-min_days_before_expiry = 7
+min_days_before_expiry = 3
 
 [costs]
 commission_per_contract = 0.65

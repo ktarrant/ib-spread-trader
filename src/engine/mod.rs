@@ -54,6 +54,10 @@ pub struct RunConfig {
     /// How many spreads may be open at once. One means the strategy is simply
     /// in or out; without a cap a repeatedly-firing signal stacks positions.
     pub max_open_positions: usize,
+    /// Refuse new entries when fewer than this many calendar days remain before
+    /// expiry. Prevents opening positions the before-expiry exit would
+    /// immediately close.
+    pub min_entry_days_before_expiry: Option<u32>,
 }
 
 impl Default for RunConfig {
@@ -64,6 +68,7 @@ impl Default for RunConfig {
             timing: Timing::NextBar,
             exits: ExitRules::default(),
             max_open_positions: 1,
+            min_entry_days_before_expiry: None,
         }
     }
 }
@@ -98,6 +103,8 @@ pub struct Census {
     pub rejection_examples: BTreeMap<String, String>,
     /// A queued order could not be filled against the bar that came next.
     pub unfillable_intents: usize,
+    /// Refused because too close to expiry to open a new position.
+    pub too_close_to_expiry: usize,
 }
 
 impl Census {
@@ -209,6 +216,16 @@ pub fn run_symbol(
                     let open_after_exits = portfolio.open.len() - exiting.len();
                     if open_after_exits >= config.max_open_positions {
                         census.at_position_limit += 1;
+                    } else if let Some(min_days) = config.min_entry_days_before_expiry {
+                        let remaining = (series.expiry_instant() - bar.ts).num_days();
+                        if remaining < min_days as i64 {
+                            census.too_close_to_expiry += 1;
+                        } else {
+                            match strategy.selector.resolve(&spec, &bar) {
+                                Ok(spread) => entering = Some(Intent::Open(spread)),
+                                Err(reject) => census.reject(&reject),
+                            }
+                        }
                     } else {
                         match strategy.selector.resolve(&spec, &bar) {
                             Ok(spread) => entering = Some(Intent::Open(spread)),
