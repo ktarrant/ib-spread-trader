@@ -134,6 +134,8 @@ pub struct SymbolRun {
     pub initial_cash: f64,
     pub final_equity: f64,
     pub census: Census,
+    /// Signal-internal gate counts, empty for signals that need no extra census.
+    pub signal_diagnostics: BTreeMap<String, usize>,
     pub option_quality: Quality,
     pub underlying_quality: Quality,
     pub portfolio: Portfolio,
@@ -316,6 +318,7 @@ pub fn run_symbol(
     }
 
     let final_equity = portfolio.cash;
+    let signal_diagnostics = strategy.signal.diagnostics();
     Ok(SymbolRun {
         symbol: series.symbol.clone(),
         strategy: strategy.name.clone(),
@@ -326,6 +329,7 @@ pub fn run_symbol(
         initial_cash: config.initial_cash,
         final_equity,
         census,
+        signal_diagnostics,
         option_quality: series.option_quality,
         underlying_quality: series.underlying_quality,
         portfolio,

@@ -251,6 +251,7 @@ mod tests {
             underlying: UnderlyingBar {
                 mid: Some(100.0),
                 close: Some(100.0),
+                ..UnderlyingBar::default()
             },
             forward,
             residual_mad: 0.02,

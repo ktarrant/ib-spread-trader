@@ -1,0 +1,48 @@
+# A volatility squeeze on the previous completed bar, followed by a bullish
+# price breakout with confirming stock volume and no simultaneous ATM-IV shock.
+# Every threshold is explicit so sensitivity runs can change the entry without
+# recompiling the backtester.
+
+name    = "volatility-contraction-breakout-bull-call"
+symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR"]
+expiry  = "2026-08-21"
+initial_cash = 100000.0
+
+[signal]
+kind = "volatility_contraction_breakout"
+measure = "bollinger_width"
+volatility_period = 20
+contraction_lookback = 120
+contraction_percentile = 0.10
+breakout_period = 20
+# Compare each 30-minute bar only with the same New York session slot. A plain
+# rolling average would mistake the normal opening/closing volume peaks for
+# confirmation.
+volume_lookback_sessions = 20
+# This is intentionally strict. On the 2026-08-26 reference snapshot, 1.50 lets
+# 2 of 20 contraction-breakouts through; 1.25 lets 9 through. Treat 1.25 as the
+# first sample-size sensitivity, not as an in-sample optimisation conclusion.
+min_volume_ratio = 1.50
+# Relative one-bar increase: 0.10 permits at most a 10% ATM-IV rise.
+max_atm_iv_increase = 0.10
+
+[structure]
+kind = "vertical"
+right = "call"
+long_delta = 0.50
+short_delta = 0.30
+quantity = 1
+
+[execution]
+delta_tolerance = 0.07
+max_debit = 1000.0
+timing = "next_bar"
+max_open_positions = 1
+min_entry_days_before_expiry = 8
+
+[exit]
+profit_target_pct = 50.0
+stop_loss_pct = 100.0
+
+[costs]
+commission_per_contract = 0.65

@@ -23,6 +23,8 @@ pub struct Census {
     pub at_position_limit: usize,
     pub unfillable_intents: usize,
     pub synthetic_exits: usize,
+    pub too_close_to_expiry: usize,
+    pub signal_diagnostics: BTreeMap<String, usize>,
     pub rejections: BTreeMap<String, usize>,
     pub rejection_examples: BTreeMap<String, String>,
 }
@@ -38,6 +40,7 @@ pub struct SymbolSummary {
     pub max_drawdown: f64,
     pub triggers: usize,
     pub rejections: usize,
+    pub signal_diagnostics: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +99,7 @@ pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> R
             max_drawdown: max_drawdown(&run.equity_curve),
             triggers: run.census.triggers,
             rejections: run.census.total_rejections(),
+            signal_diagnostics: run.signal_diagnostics.clone(),
         });
 
         census.triggers += run.census.triggers;
@@ -103,6 +107,10 @@ pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> R
         census.at_position_limit += run.census.at_position_limit;
         census.unfillable_intents += run.census.unfillable_intents;
         census.synthetic_exits += run.census.synthetic_exits;
+        census.too_close_to_expiry += run.census.too_close_to_expiry;
+        for (gate, count) in &run.signal_diagnostics {
+            *census.signal_diagnostics.entry(gate.clone()).or_default() += count;
+        }
         for (kind, count) in &run.census.rejections {
             *census.rejections.entry(kind.clone()).or_default() += count;
         }
@@ -359,6 +367,7 @@ mod tests {
             initial_cash: 100.0,
             final_equity: points.last().map(|p| p.1).unwrap_or(100.0),
             census: EngineCensus::default(),
+            signal_diagnostics: BTreeMap::new(),
             option_quality: Quality::default(),
             underlying_quality: Quality::default(),
             portfolio: Portfolio::new(100.0),

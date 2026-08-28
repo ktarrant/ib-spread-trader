@@ -53,12 +53,17 @@ struct RawQuote {
 }
 
 /// The underlying at one timestamp.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct UnderlyingBar {
     /// Bid/ask midpoint — the like-for-like comparison against an option mid.
     pub mid: Option<f64>,
-    /// Trades close. What indicators are conventionally computed on.
+    /// OHLCV from the underlying's `trades` row only. Volume on bid/ask rows is
+    /// a capture sentinel and must never leak into a signal.
+    pub open: Option<f64>,
+    pub high: Option<f64>,
+    pub low: Option<f64>,
     pub close: Option<f64>,
+    pub volume: Option<f64>,
 }
 
 impl UnderlyingBar {
@@ -135,6 +140,45 @@ impl ChainSnapshot {
         self.quotes
             .iter()
             .filter(move |q| q.right == right && q.delta.is_some())
+    }
+
+    /// ATM implied volatility, matching `ib-option-viz`: take only the OTM side
+    /// of the smile and linearly interpolate at zero log-moneyness. OTM prices
+    /// avoid deep-ITM quotes whose value is almost entirely intrinsic.
+    pub fn atm_implied_vol(&self) -> Option<f64> {
+        let mut smile: Vec<(f64, f64)> = self
+            .quotes
+            .iter()
+            .filter_map(|quote| {
+                let is_otm = match quote.right {
+                    OptionRight::Call => quote.strike >= self.forward,
+                    OptionRight::Put => quote.strike < self.forward,
+                };
+                is_otm.then(|| {
+                    let x = (quote.strike / self.forward).ln();
+                    Some((x, quote.implied_vol?))
+                })?
+            })
+            .collect();
+        smile.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        let &(first_x, first_iv) = smile.first()?;
+        if 0.0 <= first_x {
+            return Some(first_iv);
+        }
+        let &(last_x, last_iv) = smile.last()?;
+        if 0.0 >= last_x {
+            return Some(last_iv);
+        }
+
+        smile.windows(2).find_map(|pair| {
+            let (lo_x, lo_iv) = pair[0];
+            let (hi_x, hi_iv) = pair[1];
+            (lo_x <= 0.0 && 0.0 <= hi_x).then(|| {
+                let weight = -lo_x / (hi_x - lo_x);
+                lo_iv + weight * (hi_iv - lo_iv)
+            })
+        })
     }
 }
 
@@ -270,10 +314,7 @@ impl ChainSeries {
         Some(ChainSnapshot {
             symbol: self.symbol.clone(),
             ts,
-            underlying: self.underlying_at(ts).unwrap_or(UnderlyingBar {
-                mid: None,
-                close: None,
-            }),
+            underlying: self.underlying_at(ts).unwrap_or_default(),
             forward: fit.forward,
             residual_mad: fit.residual_mad,
             paired_strikes: ladder.len(),
@@ -310,7 +351,11 @@ const UNDERLYING_SQL: &str = r#"
 SELECT b.ts,
        MAX(CASE WHEN b.data_type = 'bid'    THEN b.close END) AS bid,
        MAX(CASE WHEN b.data_type = 'ask'    THEN b.close END) AS ask,
-       MAX(CASE WHEN b.data_type = 'trades' THEN b.close END) AS close
+       MAX(CASE WHEN b.data_type = 'trades' THEN b.open END) AS open,
+       MAX(CASE WHEN b.data_type = 'trades' THEN b.high END) AS high,
+       MAX(CASE WHEN b.data_type = 'trades' THEN b.low END) AS low,
+       MAX(CASE WHEN b.data_type = 'trades' THEN b.close END) AS close,
+       MAX(CASE WHEN b.data_type = 'trades' THEN b.volume END) AS volume
 FROM bars b
 JOIN contracts c ON c.id = b.contract_id
 WHERE b.bar_size = ?1
@@ -376,14 +421,18 @@ fn load_underlying(
             row.get::<_, String>("ts")?,
             row.get::<_, Option<f64>>("bid")?,
             row.get::<_, Option<f64>>("ask")?,
+            row.get::<_, Option<f64>>("open")?,
+            row.get::<_, Option<f64>>("high")?,
+            row.get::<_, Option<f64>>("low")?,
             row.get::<_, Option<f64>>("close")?,
+            row.get::<_, Option<f64>>("volume")?,
         ))
     })?;
 
     let mut quality = Quality::default();
     let mut out = BTreeMap::new();
     for row in rows {
-        let (ts, bid, ask, close) = row?;
+        let (ts, bid, ask, open, high, low, close, volume) = row?;
         quality.rows_read += 1;
         // A missing side costs the mid, not the whole bar: the trades close still
         // drives indicators, so the bar is kept and only `mid` goes None.
@@ -402,7 +451,17 @@ fn load_underlying(
                 None
             }
         };
-        out.insert(parse_ts(&ts)?, UnderlyingBar { mid, close });
+        out.insert(
+            parse_ts(&ts)?,
+            UnderlyingBar {
+                mid,
+                open,
+                high,
+                low,
+                close,
+                volume,
+            },
+        );
     }
     Ok((out, quality))
 }
@@ -524,8 +583,49 @@ mod tests {
         // the other, so the median forward is exactly 100 with no residual.
         assert!((first.forward - 100.0).abs() < 1e-12);
         assert_eq!(first.residual_mad, 0.0);
+        assert_eq!(first.underlying.open, Some(100.0));
+        assert_eq!(first.underlying.high, Some(100.0));
+        assert_eq!(first.underlying.low, Some(100.0));
         assert_eq!(first.underlying.close, Some(100.0));
+        assert_eq!(first.underlying.volume, Some(0.0));
         assert!((first.underlying.mid.unwrap() - 100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn atm_iv_interpolates_only_the_otm_smile() {
+        let quote = |strike: f64, right: OptionRight, iv: f64| OptionQuote {
+            contract_id: (strike as i64) * 10 + i64::from(right.is_call()),
+            strike,
+            right,
+            bid: 1.0,
+            ask: 1.2,
+            mid: 1.1,
+            implied_vol: Some(iv),
+            delta: Some(0.5),
+        };
+        let bar = ChainSnapshot {
+            symbol: "TEST".into(),
+            ts: Utc::now(),
+            underlying: UnderlyingBar::default(),
+            forward: 100.0,
+            residual_mad: 0.0,
+            paired_strikes: 4,
+            year_fraction: 0.1,
+            quotes: vec![
+                quote(90.0, OptionRight::Put, 0.30),
+                quote(99.0, OptionRight::Put, 0.20),
+                quote(101.0, OptionRight::Call, 0.22),
+                quote(110.0, OptionRight::Call, 0.32),
+                // These are ITM and deliberately absurd: neither may affect ATM.
+                quote(99.0, OptionRight::Call, 0.90),
+                quote(101.0, OptionRight::Put, 0.90),
+            ],
+        };
+
+        let lo = (99.0_f64 / 100.0).ln();
+        let hi = (101.0_f64 / 100.0).ln();
+        let expected = 0.20 + (-lo / (hi - lo)) * (0.22 - 0.20);
+        assert!((bar.atm_implied_vol().unwrap() - expected).abs() < 1e-12);
     }
 
     #[test]
@@ -576,8 +676,7 @@ mod tests {
 
         let mut bar = series.snapshot(0).unwrap();
         bar.underlying = UnderlyingBar {
-            mid: None,
-            close: None,
+            ..UnderlyingBar::default()
         };
         assert_eq!(bar.reference_price(), bar.forward);
     }
@@ -587,7 +686,8 @@ mod tests {
         assert_eq!(
             UnderlyingBar {
                 mid: Some(2.0),
-                close: Some(1.0)
+                close: Some(1.0),
+                ..UnderlyingBar::default()
             }
             .price(),
             Some(1.0)
@@ -595,18 +695,11 @@ mod tests {
         assert_eq!(
             UnderlyingBar {
                 mid: Some(2.0),
-                close: None
+                ..UnderlyingBar::default()
             }
             .price(),
             Some(2.0)
         );
-        assert_eq!(
-            UnderlyingBar {
-                mid: None,
-                close: None
-            }
-            .price(),
-            None
-        );
+        assert_eq!(UnderlyingBar::default().price(), None);
     }
 }

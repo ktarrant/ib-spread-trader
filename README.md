@@ -59,6 +59,19 @@ profit_target_pct = 50.0
 stop_loss_pct = 100.0
 ```
 
+The repository also includes
+`strategies/volatility_contraction_breakout_bull_call.toml`. Its signal requires
+the previous bar's 20-bar Bollinger width to rank in the lowest historical
+decile, then a close above the prior 20-bar high on elevated stock volume,
+without a simultaneous ATM-IV shock. Volume is compared with the median of the
+same New York 30-minute slot across prior sessions, so the normal opening and
+closing peaks are not mistaken for confirmation. ATM IV is reconstructed from
+the OTM smile using the same interpolation as `ib-option-viz`.
+
+Multi-gate signals add a `signal_diagnostics` census to the JSON report. It shows
+how many bars reached contraction, breakout, volume, and IV gates, which matters
+when a strict configuration produces few or no trades.
+
 Legs are named by **absolute delta**, which is why one `[structure]` block covers
 both directions: for calls strike rises as delta falls, so long-0.50/short-0.30 is
 a bull call; for puts strike rises as |delta| rises, so the identical targets give
