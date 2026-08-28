@@ -300,13 +300,17 @@ fn the_volatility_contraction_breakout_reproduces_its_recorded_run() {
     assert_eq!(totals.census.triggers, 2);
     assert_eq!(totals.census.too_close_to_expiry, 1);
     assert_eq!(totals.trades, 1);
-    assert_eq!(totals.exits_by_reason["expiry_settlement"], 1);
-    assert!((totals.total_pnl - 451.70).abs() < 0.01);
+    assert_eq!(totals.census.synthetic_exits, 1);
+    assert_eq!(totals.exits_by_reason["before_expiry"], 1);
+    assert!((totals.total_pnl - (-299.60)).abs() < 0.01, "{}", totals.total_pnl);
+    assert!((totals.traded_pnl - (-299.60)).abs() < 0.01);
+    assert!((totals.settled_pnl - 0.0).abs() < 0.01);
 
     let trade = &built.trades[0];
     assert_eq!(trade.symbol, "MSTR");
     assert_eq!(trade.description, "MSTR +1C 97.5 -1C 105");
     assert_eq!(trade.opened_at.to_rfc3339(), "2026-08-04T16:00:00+00:00");
+    assert!(trade.synthetic_price, "exit was priced at intrinsic");
 }
 
 /// META's ladder reaches barely above the money on many bars, which is the real
