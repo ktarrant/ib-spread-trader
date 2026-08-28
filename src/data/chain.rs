@@ -190,10 +190,18 @@ pub struct ChainSeries {
     quotes: Vec<RawQuote>,
     /// Offsets into `quotes` delimiting each timestamp's block.
     blocks: Vec<(DateTime<Utc>, usize, usize)>,
+    /// 30-min underlying bars, contemporaneous with option bars. Used in
+    /// `snapshot()` so the underlying mid matches the option bar's window.
     underlying: BTreeMap<DateTime<Utc>, UnderlyingBar>,
+    /// Fine-grained underlying bars for the signal. 5-min if the snapshot has
+    /// them, otherwise the same 30-min data. Only stock-only bars draw from
+    /// this; option bars always use `underlying` above.
+    signal_underlying: BTreeMap<DateTime<Utc>, UnderlyingBar>,
     expiry_instant: DateTime<Utc>,
     pub option_quality: Quality,
     pub underlying_quality: Quality,
+    /// "5min" or "30min" — resolution of `signal_underlying`.
+    pub underlying_bar_size: String,
 }
 
 impl ChainSeries {
@@ -202,7 +210,15 @@ impl ChainSeries {
         let expiry_text = expiry.format("%Y-%m-%d").to_string();
 
         let (quotes, option_quality) = load_option_quotes(snapshot, &symbol, &expiry_text)?;
-        let (underlying, underlying_quality) = load_underlying(snapshot, &symbol)?;
+        let (underlying, underlying_quality) = load_underlying(snapshot, &symbol, BAR_SIZE)?;
+        let (signal_underlying, signal_quality, underlying_bar_size) = {
+            let (u, q) = load_underlying(snapshot, &symbol, "5min")?;
+            if !u.is_empty() {
+                (u, q, "5min".to_string())
+            } else {
+                (underlying.clone(), underlying_quality, BAR_SIZE.to_string())
+            }
+        };
 
         let mut blocks = Vec::new();
         let mut start = 0usize;
@@ -222,9 +238,11 @@ impl ChainSeries {
             quotes,
             blocks,
             underlying,
+            signal_underlying,
             expiry_instant: pricing::expiry_instant(expiry)?,
             option_quality,
-            underlying_quality,
+            underlying_quality: signal_quality,
+            underlying_bar_size,
         })
     }
 
@@ -241,20 +259,63 @@ impl ChainSeries {
         self.blocks.is_empty()
     }
 
-    /// The underlying at any timestamp — including ones past the last option bar,
-    /// which is what expiry settlement needs.
+    /// The 30-min underlying at any timestamp.
     pub fn underlying_at(&self, ts: DateTime<Utc>) -> Option<UnderlyingBar> {
         self.underlying.get(&ts).copied()
     }
 
-    /// The last underlying print at or before `ts`. Settlement uses this against
-    /// the expiry instant, since the option tape stops a day early.
+    /// The last underlying print at or before `ts`, checking the fine-grained
+    /// timeline first (5-min bars run later in the day than 30-min on ETFs).
     pub fn underlying_asof(&self, ts: DateTime<Utc>) -> Option<UnderlyingBar> {
-        self.underlying.range(..=ts).next_back().map(|(_, v)| *v)
+        self.signal_underlying
+            .range(..=ts)
+            .next_back()
+            .or_else(|| self.underlying.range(..=ts).next_back())
+            .map(|(_, v)| *v)
     }
 
     pub fn expiry_instant(&self) -> DateTime<Utc> {
         self.expiry_instant
+    }
+
+    /// All timestamps where either option or signal-underlying data exists,
+    /// ascending. Each entry carries the option bar index if one exists at
+    /// that timestamp. When the signal underlying is 5-min, this interleaves
+    /// ~5 stock-only bars between each pair of 30-min option bars.
+    pub fn merged_timeline(&self) -> Vec<(DateTime<Utc>, Option<usize>)> {
+        let mut option_set: std::collections::HashSet<DateTime<Utc>> =
+            std::collections::HashSet::with_capacity(self.blocks.len());
+        let mut out: Vec<(DateTime<Utc>, Option<usize>)> = Vec::new();
+
+        for (idx, &(ts, _, _)) in self.blocks.iter().enumerate() {
+            option_set.insert(ts);
+            out.push((ts, Some(idx)));
+        }
+        for &ts in self.signal_underlying.keys() {
+            if !option_set.contains(&ts) {
+                out.push((ts, None));
+            }
+        }
+        out.sort_by_key(|&(ts, _)| ts);
+        out
+    }
+
+    /// A minimal snapshot for stock-only bars where no option chain exists.
+    /// Uses the fine-grained signal underlying (5-min). `atm_implied_vol()`
+    /// returns None and no quotes are selectable.
+    pub fn stock_only_snapshot(&self, ts: DateTime<Utc>) -> Option<ChainSnapshot> {
+        let underlying = self.signal_underlying.get(&ts).copied()?;
+        let price = underlying.price()?;
+        Some(ChainSnapshot {
+            symbol: self.symbol.clone(),
+            ts,
+            underlying,
+            forward: price,
+            residual_mad: 0.0,
+            paired_strikes: 0,
+            year_fraction: pricing::year_fraction(ts, self.expiry_instant),
+            quotes: Vec::new(),
+        })
     }
 
     /// Resolve the ladder at block `index`: fit the forward, invert for vol,
@@ -414,9 +475,10 @@ fn load_option_quotes(
 fn load_underlying(
     snapshot: &Snapshot,
     symbol: &str,
+    bar_size: &str,
 ) -> Result<(BTreeMap<DateTime<Utc>, UnderlyingBar>, Quality)> {
     let mut stmt = snapshot.conn().prepare(UNDERLYING_SQL)?;
-    let rows = stmt.query_map((BAR_SIZE, symbol), |row| {
+    let rows = stmt.query_map((bar_size, symbol), |row| {
         Ok((
             row.get::<_, String>("ts")?,
             row.get::<_, Option<f64>>("bid")?,

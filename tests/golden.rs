@@ -188,8 +188,9 @@ fn spys_quality_account_matches_the_capture() {
     assert_eq!(series.option_quality.dropped_nonpositive, 0);
 
     // The stock tape is spotless on every symbol.
-    assert_eq!(series.underlying_quality.rows_read, 806);
-    assert_eq!(series.underlying_quality.rows_kept(), 806);
+    // Underlying quality tracks the signal resolution: 5-min when available.
+    assert_eq!(series.underlying_quality.rows_read, 4836);
+    assert_eq!(series.underlying_quality.rows_kept(), 4836);
 }
 
 /// The option tape stops the day before expiry, so settlement depends on a stock
@@ -228,39 +229,40 @@ fn the_reference_strategy_reproduces_its_recorded_run() {
     let totals = &built.totals;
 
     assert_eq!(totals.symbols, 12);
-    assert_eq!(totals.trades, 22);
-    assert_eq!(totals.census.triggers, 495);
+    // 5-min signal resolution changes when RSI crossings land.
+    assert_eq!(totals.trades, 24);
+    assert_eq!(totals.census.triggers, 1280);
     assert_eq!(
-        totals.census.declined, 246,
+        totals.census.declined, 662,
         "bearish crossings a call structure declines"
     );
-    assert_eq!(totals.census.at_position_limit, 163);
+    assert_eq!(totals.census.at_position_limit, 444);
     assert_eq!(totals.census.unfillable_intents, 0);
 
-    assert_eq!(totals.census.rejections["debit_above_limit"], 44);
-    assert_eq!(totals.census.rejections["no_strike_near_target_delta"], 20);
+    assert_eq!(totals.census.rejections["debit_above_limit"], 91);
+    assert_eq!(totals.census.rejections["no_strike_near_target_delta"], 59);
 
     assert!(
-        (totals.total_pnl - 3903.40).abs() < 0.01,
+        (totals.total_pnl - 1116.60).abs() < 0.01,
         "{}",
         totals.total_pnl
     );
     assert!(
-        (totals.traded_pnl - 3131.00).abs() < 0.01,
+        (totals.traded_pnl - 2783.60).abs() < 0.01,
         "{}",
         totals.traded_pnl
     );
     assert!(
-        (totals.settled_pnl - 772.40).abs() < 0.01,
+        (totals.settled_pnl - (-1667.00)).abs() < 0.01,
         "{}",
         totals.settled_pnl
     );
-    assert!((totals.commission_paid - 41.60).abs() < 0.01);
+    assert!((totals.commission_paid - 49.40).abs() < 0.01);
 
     // Every trade closed one way or another; nothing was left marked.
-    assert_eq!(totals.exits_by_reason["expiry_settlement"], 12);
-    assert_eq!(totals.exits_by_reason["profit_target"], 8);
-    assert_eq!(totals.exits_by_reason["stop_loss"], 2);
+    assert_eq!(totals.exits_by_reason["expiry_settlement"], 10);
+    assert_eq!(totals.exits_by_reason["profit_target"], 10);
+    assert_eq!(totals.exits_by_reason["stop_loss"], 4);
 
     // Cash, the trade log and the curve have to agree or the report is decoration.
     let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
@@ -289,16 +291,17 @@ fn the_volatility_contraction_breakout_reproduces_its_recorded_run() {
     let totals = &built.totals;
     let gates = &totals.census.signal_diagnostics;
 
-    assert_eq!(gates["bars_seen"], 6_814);
-    assert_eq!(gates["bars_ready"], 3_565);
-    assert_eq!(gates["contraction_pass"], 534);
-    assert_eq!(gates["breakout_pass"], 20);
-    assert_eq!(gates["volume_pass"], 2);
-    assert_eq!(gates["iv_pass"], 2);
+    // 5-min signal resolution: ~7x more bars seen, different gate counts.
+    assert_eq!(gates["bars_seen"], 50_098);
+    assert_eq!(gates["bars_ready"], 1_125);
+    assert_eq!(gates["contraction_pass"], 167);
+    assert_eq!(gates["breakout_pass"], 17);
+    assert_eq!(gates["volume_pass"], 3);
+    assert_eq!(gates["iv_pass"], 3);
     assert_eq!(gates["missing_underlying"], 129);
 
-    assert_eq!(totals.census.triggers, 2);
-    assert_eq!(totals.census.too_close_to_expiry, 1);
+    assert_eq!(totals.census.triggers, 3);
+    assert_eq!(totals.census.too_close_to_expiry, 0);
     assert_eq!(totals.trades, 1);
     assert_eq!(totals.census.synthetic_exits, 1);
     assert_eq!(totals.exits_by_reason["before_expiry"], 1);
@@ -324,7 +327,7 @@ fn metas_truncated_ladder_rejects_the_far_leg() {
     let mut strategy = config.strategy().unwrap();
     let run = engine::run_symbol(&series, &mut strategy, &config.run_config()).unwrap();
 
-    assert_eq!(run.census.total_rejections(), 16);
+    assert_eq!(run.census.total_rejections(), 40);
     let example = &run.census.rejection_examples["no_strike_near_target_delta"];
     assert!(example.contains("0.30 delta"), "{example}");
     assert!(example.contains("closest quoted"), "{example}");

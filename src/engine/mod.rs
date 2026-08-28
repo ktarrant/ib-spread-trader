@@ -145,6 +145,17 @@ pub struct SymbolRun {
 }
 
 /// Replay one symbol/expiry.
+///
+/// The main loop iterates over the merged timeline — all timestamps where
+/// either option or underlying data exists. On option bars (30-min), the full
+/// pipeline runs: fills, marks, exits, signal. On stock-only bars (5-min
+/// intermediate ticks), only the signal advances, giving it finer-grained
+/// price resolution without inventing option quotes.
+///
+/// A trigger that fires on a stock-only bar is carried to the next option bar,
+/// where it is resolved against that bar's chain — the same way a real trader
+/// would see the stock move, decide to act, and then check the option chain
+/// at the next available snapshot.
 pub fn run_symbol(
     series: &ChainSeries,
     strategy: &mut Strategy,
@@ -155,143 +166,160 @@ pub fn run_symbol(
     let mut equity_curve = Vec::with_capacity(series.len());
     let mut pending: Vec<Intent> = Vec::new();
     let mut opened_at_index: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut carried_trigger: Option<crate::signal::Trigger> = None;
 
-    for index in 0..series.len() {
-        let Some(bar) = series.snapshot(index) else {
-            continue;
-        };
+    let timeline = series.merged_timeline();
 
-        // 1. Execute what the previous bar decided, before this bar's own
-        //    decisions can see the result.
-        for intent in std::mem::take(&mut pending) {
-            execute(
-                &intent,
-                &bar,
-                &mut portfolio,
-                config,
-                &mut census,
-                &opened_at_index,
-                index,
-            )?;
-            if let Intent::Open(_) = intent
-                && let Some(position) = portfolio.open.last()
-            {
-                opened_at_index.insert(position.id, index);
+    for (seq, &(ts, option_index)) in timeline.iter().enumerate() {
+        if let Some(index) = option_index {
+            // ---- Full option bar: fills, marks, exits, signal ----
+            let Some(bar) = series.snapshot(index) else {
+                continue;
+            };
+
+            // 1. Execute what a previous bar decided.
+            for intent in std::mem::take(&mut pending) {
+                execute(
+                    &intent,
+                    &bar,
+                    &mut portfolio,
+                    config,
+                    &mut census,
+                    &opened_at_index,
+                    seq,
+                )?;
+                if let Intent::Open(_) = intent
+                    && let Some(position) = portfolio.open.last()
+                {
+                    opened_at_index.insert(position.id, seq);
+                }
             }
-        }
 
-        // 2. Mark, after fills, so the curve reflects the book as it now stands.
-        equity_curve.push((bar.ts, portfolio.equity(&bar, &config.costs)));
+            // 2. Mark.
+            equity_curve.push((bar.ts, portfolio.equity(&bar, &config.costs)));
 
-        // 3. Exits. Collected first so the borrow ends before anything closes.
-        //    When option quotes are unavailable but time-based rules fire, close
-        //    at intrinsic immediately — waiting for the next bar's quotes does not
-        //    help when the leg has gone quiet.
-        let mut exiting = Vec::new();
-        let mut synthetic_exiting: Vec<(usize, ExitReason)> = Vec::new();
-        for position in &portfolio.open {
-            match crate::execution::exit_credit(&position.spread, &bar) {
-                Ok(credit) => {
-                    let gross = credit - position.entry_debit;
-                    let ctx = exits::ExitContext {
-                        gross_pnl: gross,
-                        underlying_price: bar.underlying.price(),
-                        bar_ts: bar.ts,
-                        expiry_instant: series.expiry_instant(),
-                    };
-                    if let Some(reason) = config.exits.triggered(position, &ctx) {
-                        exiting.push(Intent::Close {
-                            id: position.id,
-                            reason,
-                        });
+            // 3. Exits.
+            let mut exiting = Vec::new();
+            let mut synthetic_exiting: Vec<(usize, ExitReason)> = Vec::new();
+            for position in &portfolio.open {
+                match crate::execution::exit_credit(&position.spread, &bar) {
+                    Ok(credit) => {
+                        let gross = credit - position.entry_debit;
+                        let ctx = exits::ExitContext {
+                            gross_pnl: gross,
+                            underlying_price: bar.underlying.price(),
+                            bar_ts: bar.ts,
+                            expiry_instant: series.expiry_instant(),
+                        };
+                        if let Some(reason) = config.exits.triggered(position, &ctx) {
+                            exiting.push(Intent::Close {
+                                id: position.id,
+                                reason,
+                            });
+                        }
+                    }
+                    Err(_) => {
+                        if let Some(reason) = config.exits.time_triggered(
+                            position.opened_at,
+                            bar.ts,
+                            series.expiry_instant(),
+                        ) {
+                            synthetic_exiting.push((position.id, reason));
+                        }
                     }
                 }
-                Err(_) => {
-                    if let Some(reason) = config.exits.time_triggered(
-                        position.opened_at,
+            }
+
+            for (id, reason) in &synthetic_exiting {
+                if let Some(spot) = bar.underlying.price() {
+                    let held = seq
+                        .saturating_sub(opened_at_index.get(id).copied().unwrap_or(seq));
+                    portfolio.close_at_intrinsic(
+                        *id,
+                        spot,
                         bar.ts,
-                        series.expiry_instant(),
-                    ) {
-                        synthetic_exiting.push((position.id, reason));
-                    }
+                        &config.costs,
+                        *reason,
+                        held,
+                    );
+                    census.synthetic_exits += 1;
                 }
             }
-        }
 
-        for (id, reason) in &synthetic_exiting {
-            if let Some(spot) = bar.underlying.price() {
-                let held = index
-                    .saturating_sub(opened_at_index.get(id).copied().unwrap_or(index));
-                portfolio.close_at_intrinsic(
-                    *id,
-                    spot,
-                    bar.ts,
-                    &config.costs,
-                    *reason,
-                    held,
-                );
-                census.synthetic_exits += 1;
-            }
-        }
+            // 4. Signal — evaluate on this bar, then pick up any trigger carried
+            //    from a stock-only bar if the current bar didn't fire.
+            let view = MarketView {
+                symbol: &series.symbol,
+                chain: &bar,
+            };
+            let current_trigger = strategy.signal.evaluate(&view);
+            let trigger = current_trigger.or(carried_trigger.take());
+            carried_trigger = None;
 
-        // 4. Entry. A signal must be evaluated on every bar, in order, whether
-        //    or not the result can be acted on — its indicators are stateful.
-        let view = MarketView {
-            symbol: &series.symbol,
-            chain: &bar,
-        };
-        let trigger = strategy.signal.evaluate(&view);
-        let mut entering = None;
-        if let Some(trigger) = trigger {
-            census.triggers += 1;
-            match strategy.structure.build(&trigger, &view) {
-                None => census.declined += 1,
-                Some(spec) => {
-                    let open_after_exits = portfolio.open.len() - exiting.len();
-                    if open_after_exits >= config.max_open_positions {
-                        census.at_position_limit += 1;
-                    } else if let Some(min_days) = config.min_entry_days_before_expiry {
-                        let remaining = (series.expiry_instant() - bar.ts).num_days();
-                        if remaining < min_days as i64 {
-                            census.too_close_to_expiry += 1;
+            let mut entering = None;
+            if let Some(trigger) = trigger {
+                census.triggers += 1;
+                match strategy.structure.build(&trigger, &view) {
+                    None => census.declined += 1,
+                    Some(spec) => {
+                        let open_after_exits = portfolio.open.len() - exiting.len();
+                        if open_after_exits >= config.max_open_positions {
+                            census.at_position_limit += 1;
+                        } else if let Some(min_days) = config.min_entry_days_before_expiry {
+                            let remaining = (series.expiry_instant() - bar.ts).num_days();
+                            if remaining < min_days as i64 {
+                                census.too_close_to_expiry += 1;
+                            } else {
+                                match strategy.selector.resolve(&spec, &bar) {
+                                    Ok(spread) => entering = Some(Intent::Open(spread)),
+                                    Err(reject) => census.reject(&reject),
+                                }
+                            }
                         } else {
                             match strategy.selector.resolve(&spec, &bar) {
                                 Ok(spread) => entering = Some(Intent::Open(spread)),
                                 Err(reject) => census.reject(&reject),
                             }
                         }
-                    } else {
-                        match strategy.selector.resolve(&spec, &bar) {
-                            Ok(spread) => entering = Some(Intent::Open(spread)),
-                            Err(reject) => census.reject(&reject),
+                    }
+                }
+            }
+
+            // 5. Queue or execute.
+            let decided: Vec<Intent> = exiting.into_iter().chain(entering).collect();
+            match config.timing {
+                Timing::NextBar => pending = decided,
+                Timing::SameBar => {
+                    for intent in decided {
+                        execute(
+                            &intent,
+                            &bar,
+                            &mut portfolio,
+                            config,
+                            &mut census,
+                            &opened_at_index,
+                            seq,
+                        )?;
+                        if let Intent::Open(_) = intent
+                            && let Some(position) = portfolio.open.last()
+                        {
+                            opened_at_index.insert(position.id, seq);
                         }
                     }
                 }
             }
-        }
-
-        // 5. Queue or execute, per the timing model. Exits go first either way:
-        //    a bar that both closes and opens should free the slot first.
-        let decided: Vec<Intent> = exiting.into_iter().chain(entering).collect();
-        match config.timing {
-            Timing::NextBar => pending = decided,
-            Timing::SameBar => {
-                for intent in decided {
-                    execute(
-                        &intent,
-                        &bar,
-                        &mut portfolio,
-                        config,
-                        &mut census,
-                        &opened_at_index,
-                        index,
-                    )?;
-                    if let Intent::Open(_) = intent
-                        && let Some(position) = portfolio.open.last()
-                    {
-                        opened_at_index.insert(position.id, index);
-                    }
-                }
+        } else {
+            // ---- Stock-only bar: advance the signal, carry any trigger ----
+            let Some(bar) = series.stock_only_snapshot(ts) else {
+                continue;
+            };
+            let view = MarketView {
+                symbol: &series.symbol,
+                chain: &bar,
+            };
+            let trigger = strategy.signal.evaluate(&view);
+            if trigger.is_some() {
+                carried_trigger = trigger;
             }
         }
     }
@@ -305,15 +333,11 @@ pub fn run_symbol(
     {
         let ids: Vec<usize> = portfolio.open.iter().map(|p| p.id).collect();
         for id in ids {
-            let held = series
+            let held = timeline
                 .len()
                 .saturating_sub(opened_at_index.get(&id).copied().unwrap_or(0));
             portfolio.settle_at_expiry(id, price, series.expiry_instant(), held);
         }
-        // Close the curve at the settlement instant. Without this its last point
-        // is the final option bar's *mark* — positions valued at what they could
-        // have been sold for, a day before they actually settled — so anyone
-        // plotting equity.csv reads a different ending than the summary states.
         equity_curve.push((series.expiry_instant(), portfolio.cash));
     }
 
@@ -323,9 +347,9 @@ pub fn run_symbol(
         symbol: series.symbol.clone(),
         strategy: strategy.name.clone(),
         expiry: series.expiry,
-        bars: series.len(),
-        first_ts: series.timestamps().next(),
-        last_ts: series.timestamps().last(),
+        bars: timeline.len(),
+        first_ts: timeline.first().map(|&(ts, _)| ts),
+        last_ts: timeline.last().map(|&(ts, _)| ts),
         initial_cash: config.initial_cash,
         final_equity,
         census,

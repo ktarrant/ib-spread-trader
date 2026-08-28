@@ -289,6 +289,25 @@ both closes and opens frees the slot first.
 can be acted on** — its indicators are stateful, and skipping bars when the
 position cap is full would silently corrupt every later reading.
 
+### Mixed resolution: 5-min signal, 30-min execution
+
+`ChainSeries` loads two underlying timelines: 30-min bars contemporaneous with
+option quotes, and 5-min bars (when the snapshot has them) for the signal. The
+engine iterates the merged timeline — all timestamps from both sources. On option
+bars (30-min), the full pipeline runs: fills, marks, exits, signal. On stock-only
+bars (5-min intermediate ticks), only the signal advances.
+
+A trigger that fires on a stock-only bar is carried to the next option bar, where
+it is resolved against that bar's chain. This mirrors how a real trader would see
+a stock move, decide to act, and check the option chain at the next available
+snapshot. A trigger that fires on both a stock-only bar and the next option bar
+uses the more recent one.
+
+The 30-min underlying stays in `ChainSnapshot.underlying` for option bars so the
+parity forward comparison against spot remains contemporaneous. Stock-only
+snapshots use the 5-min bar and carry no option quotes — `atm_implied_vol()`
+returns None and no strikes are selectable.
+
 ## The census is part of the result
 
 `Census` records why bars produced no trade, and the distinctions are load-bearing:
