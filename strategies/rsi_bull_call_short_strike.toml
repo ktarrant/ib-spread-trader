@@ -1,0 +1,27 @@
+name    = "rsi-oversold-bull-call-short-strike-exit"
+symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR"]
+expiry  = "2026-08-21"
+
+[signal]
+kind = "rsi_cross"
+period = 14
+level = 30.0
+
+[structure]
+kind = "vertical"
+right = "call"
+long_delta = 0.50
+short_delta = 0.30
+quantity = 1
+
+[execution]
+delta_tolerance = 0.07
+max_debit = 1000.0
+
+[exit]
+underlying_past_short_strike = true
+stop_loss_pct = 100.0
+min_days_before_expiry = 7
+
+[costs]
+commission_per_contract = 0.65
