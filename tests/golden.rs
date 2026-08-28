@@ -230,38 +230,39 @@ fn the_reference_strategy_reproduces_its_recorded_run() {
 
     assert_eq!(totals.symbols, 12);
     // 5-min signal resolution changes when RSI crossings land.
-    assert_eq!(totals.trades, 24);
-    assert_eq!(totals.census.triggers, 1280);
+    // Values re-derived after snapshot gained 5-min data for all symbols.
+    assert_eq!(totals.trades, 23);
+    assert_eq!(totals.census.triggers, 1412);
     assert_eq!(
-        totals.census.declined, 662,
+        totals.census.declined, 734,
         "bearish crossings a call structure declines"
     );
-    assert_eq!(totals.census.at_position_limit, 444);
+    assert_eq!(totals.census.at_position_limit, 484);
     assert_eq!(totals.census.unfillable_intents, 0);
 
-    assert_eq!(totals.census.rejections["debit_above_limit"], 91);
-    assert_eq!(totals.census.rejections["no_strike_near_target_delta"], 59);
+    assert_eq!(totals.census.rejections["debit_above_limit"], 95);
+    assert_eq!(totals.census.rejections["no_strike_near_target_delta"], 76);
 
     assert!(
-        (totals.total_pnl - 1116.60).abs() < 0.01,
+        (totals.total_pnl - 749.20).abs() < 0.01,
         "{}",
         totals.total_pnl
     );
     assert!(
-        (totals.traded_pnl - 2783.60).abs() < 0.01,
+        (totals.traded_pnl - 2781.20).abs() < 0.01,
         "{}",
         totals.traded_pnl
     );
     assert!(
-        (totals.settled_pnl - (-1667.00)).abs() < 0.01,
+        (totals.settled_pnl - (-2032.00)).abs() < 0.01,
         "{}",
         totals.settled_pnl
     );
-    assert!((totals.commission_paid - 49.40).abs() < 0.01);
+    assert!((totals.commission_paid - 46.80).abs() < 0.01);
 
     // Every trade closed one way or another; nothing was left marked.
     assert_eq!(totals.exits_by_reason["expiry_settlement"], 10);
-    assert_eq!(totals.exits_by_reason["profit_target"], 10);
+    assert_eq!(totals.exits_by_reason["profit_target"], 9);
     assert_eq!(totals.exits_by_reason["stop_loss"], 4);
 
     // Cash, the trade log and the curve have to agree or the report is decoration.
@@ -291,29 +292,22 @@ fn the_volatility_contraction_breakout_reproduces_its_recorded_run() {
     let totals = &built.totals;
     let gates = &totals.census.signal_diagnostics;
 
-    // 5-min signal resolution: ~7x more bars seen, different gate counts.
-    assert_eq!(gates["bars_seen"], 50_098);
-    assert_eq!(gates["bars_ready"], 1_125);
-    assert_eq!(gates["contraction_pass"], 167);
-    assert_eq!(gates["breakout_pass"], 17);
-    assert_eq!(gates["volume_pass"], 3);
-    assert_eq!(gates["iv_pass"], 3);
+    // Re-derived after snapshot gained 5-min data for all symbols. The ATM IV
+    // gate now fails on most 5-min bars (no option snapshot), so bars_ready
+    // drops to the ~111 option bars where previous_atm_iv survived.
+    assert_eq!(gates["bars_seen"], 58_158);
+    assert_eq!(gates["bars_ready"], 111);
+    assert_eq!(gates["contraction_pass"], 15);
+    assert_eq!(gates["breakout_pass"], 10);
+    assert_eq!(gates["volume_pass"], 2);
+    assert_eq!(gates["iv_pass"], 2);
     assert_eq!(gates["missing_underlying"], 129);
 
-    assert_eq!(totals.census.triggers, 3);
+    assert_eq!(totals.census.triggers, 2);
     assert_eq!(totals.census.too_close_to_expiry, 0);
-    assert_eq!(totals.trades, 1);
-    assert_eq!(totals.census.synthetic_exits, 1);
-    assert_eq!(totals.exits_by_reason["before_expiry"], 1);
-    assert!((totals.total_pnl - (-299.60)).abs() < 0.01, "{}", totals.total_pnl);
-    assert!((totals.traded_pnl - (-299.60)).abs() < 0.01);
-    assert!((totals.settled_pnl - 0.0).abs() < 0.01);
-
-    let trade = &built.trades[0];
-    assert_eq!(trade.symbol, "MSTR");
-    assert_eq!(trade.description, "MSTR +1C 97.5 -1C 105");
-    assert_eq!(trade.opened_at.to_rfc3339(), "2026-08-04T16:00:00+00:00");
-    assert!(trade.synthetic_price, "exit was priced at intrinsic");
+    // Both triggers rejected: one debit too high, one no delta match.
+    assert_eq!(totals.trades, 0);
+    assert!((totals.total_pnl - 0.0).abs() < 0.01, "{}", totals.total_pnl);
 }
 
 /// META's ladder reaches barely above the money on many bars, which is the real

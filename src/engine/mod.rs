@@ -219,11 +219,22 @@ pub fn run_symbol(
                         }
                     }
                     Err(_) => {
-                        if let Some(reason) = config.exits.time_triggered(
-                            position.opened_at,
-                            bar.ts,
-                            series.expiry_instant(),
-                        ) {
+                        let reason = bar
+                            .underlying
+                            .price()
+                            .and_then(|spot| {
+                                config
+                                    .exits
+                                    .underlying_price_triggered(&position.spread, spot)
+                            })
+                            .or_else(|| {
+                                config.exits.time_triggered(
+                                    position.opened_at,
+                                    bar.ts,
+                                    series.expiry_instant(),
+                                )
+                            });
+                        if let Some(reason) = reason {
                             synthetic_exiting.push((position.id, reason));
                         }
                     }
@@ -929,5 +940,45 @@ mod tests {
         let trade = &run.portfolio.closed[0];
         assert!(trade.synthetic_price, "flagged as synthetic");
         assert_eq!(trade.exit_reason, ExitReason::BeforeExpiry);
+    }
+
+    /// When option quotes disappear but the underlying crosses the short
+    /// strike, the engine should close at intrinsic via the short-strike
+    /// rule — not wait for a time-based exit or ride to expiry.
+    #[test]
+    fn unquoted_legs_close_at_short_strike_when_underlying_crosses_it() {
+        let path = v_shaped_path(); // down 25, up 55 → ends at ~113
+        // Dropout at bar 40: ATM quotes vanish. The position opens ~bar 31
+        // (RSI crosses 30). By bar 40+ the recovery pushes the underlying
+        // past the short call's strike while the held legs are unquoted.
+        let file = snapshot_with_dropout("dropout_short_strike", &path, 120.0, 40);
+        let snapshot = crate::data::Snapshot::open(&file).unwrap();
+        let series = ChainSeries::load(&snapshot, "TEST", expiry()).unwrap();
+
+        let mut strategy = bull_call_strategy();
+        let run = run_symbol(
+            &series,
+            &mut strategy,
+            &RunConfig {
+                exits: ExitRules {
+                    underlying_past_short_strike: true,
+                    stop_loss_pct: Some(100.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(run.census.triggers, 1, "one RSI crossing");
+        assert_eq!(
+            run.census.synthetic_exits, 1,
+            "closed at intrinsic when underlying crossed short strike"
+        );
+        assert_eq!(run.portfolio.closed.len(), 1);
+
+        let trade = &run.portfolio.closed[0];
+        assert!(trade.synthetic_price, "flagged as synthetic");
+        assert_eq!(trade.exit_reason, ExitReason::UnderlyingPastShortStrike);
     }
 }

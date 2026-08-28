@@ -85,10 +85,26 @@ impl ExitRules {
         None
     }
 
+    /// Exit conditions that need only the underlying price, not option quotes.
+    /// Called when `exit_credit` fails — the position's legs stopped quoting —
+    /// but the underlying still prints. Higher priority than time-based rules,
+    /// consistent with `triggered()`.
+    pub fn underlying_price_triggered(
+        &self,
+        spread: &crate::spread::Spread,
+        spot: f64,
+    ) -> Option<ExitReason> {
+        if self.underlying_past_short_strike && is_past_short_strike(spread, spot) {
+            return Some(ExitReason::UnderlyingPastShortStrike);
+        }
+        None
+    }
+
     /// Time-based exit conditions only. Called when option quotes are unavailable
     /// but the calendar keeps ticking — the position can be priced at intrinsic
-    /// but not at market. Price-based rules (profit target, stop loss, short
-    /// strike) are skipped because intrinsic strips all time value.
+    /// but not at market. Profit target and stop loss are skipped because
+    /// intrinsic strips all time value; `underlying_past_short_strike` is handled
+    /// separately by `underlying_price_triggered`.
     pub fn time_triggered(
         &self,
         opened_at: DateTime<Utc>,
@@ -490,6 +506,35 @@ mod tests {
                 Utc.with_ymd_and_hms(2026, 8, 20, 19, 30, 0).unwrap(),
                 expiry_instant(),
             ),
+            None,
+        );
+    }
+
+    // ---- underlying_price_triggered ----
+
+    #[test]
+    fn underlying_price_triggered_fires_past_short_strike() {
+        let rules = ExitRules {
+            underlying_past_short_strike: true,
+            ..Default::default()
+        };
+        let p = position(); // short call at 755
+        assert_eq!(
+            rules.underlying_price_triggered(&p.spread, 754.99),
+            None,
+        );
+        assert_eq!(
+            rules.underlying_price_triggered(&p.spread, 755.01),
+            Some(ExitReason::UnderlyingPastShortStrike),
+        );
+    }
+
+    #[test]
+    fn underlying_price_triggered_is_silent_when_disabled() {
+        let rules = ExitRules::default();
+        let p = position();
+        assert_eq!(
+            rules.underlying_price_triggered(&p.spread, 800.0),
             None,
         );
     }
