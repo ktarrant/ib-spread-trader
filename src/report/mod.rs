@@ -22,6 +22,7 @@ pub struct Census {
     pub declined: usize,
     pub at_position_limit: usize,
     pub unfillable_intents: usize,
+    pub synthetic_exits: usize,
     pub rejections: BTreeMap<String, usize>,
     pub rejection_examples: BTreeMap<String, String>,
 }
@@ -101,6 +102,7 @@ pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> R
         census.declined += run.census.declined;
         census.at_position_limit += run.census.at_position_limit;
         census.unfillable_intents += run.census.unfillable_intents;
+        census.synthetic_exits += run.census.synthetic_exits;
         for (kind, count) in &run.census.rejections {
             *census.rejections.entry(kind.clone()).or_default() += count;
         }
@@ -200,6 +202,16 @@ fn caveats(totals: &Totals, runs: &[SymbolRun]) -> Vec<String> {
         out.push(format!(
             "${:.2} of commission against ${:.2} of P&L — costs dominate this result.",
             totals.commission_paid, totals.total_pnl
+        ));
+    }
+    if totals.census.synthetic_exits > 0 {
+        let n = totals.census.synthetic_exits;
+        out.push(format!(
+            "{n} exit{} priced at intrinsic because option quotes were unavailable — \
+             the P&L on {} trade{} is an estimate, not a market observation.",
+            if n == 1 { " was" } else { "s were" },
+            if n == 1 { "that" } else { "those" },
+            if n == 1 { "" } else { "s" },
         ));
     }
     let untraded: Vec<&str> = runs

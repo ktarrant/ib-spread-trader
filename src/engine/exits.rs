@@ -84,6 +84,34 @@ impl ExitRules {
 
         None
     }
+
+    /// Time-based exit conditions only. Called when option quotes are unavailable
+    /// but the calendar keeps ticking — the position can be priced at intrinsic
+    /// but not at market. Price-based rules (profit target, stop loss, short
+    /// strike) are skipped because intrinsic strips all time value.
+    pub fn time_triggered(
+        &self,
+        opened_at: DateTime<Utc>,
+        bar_ts: DateTime<Utc>,
+        expiry_instant: DateTime<Utc>,
+    ) -> Option<ExitReason> {
+        if let Some(max_pct) = self.max_time_pct {
+            let total = (expiry_instant - opened_at).num_seconds() as f64;
+            let elapsed = (bar_ts - opened_at).num_seconds() as f64;
+            if total > 0.0 && elapsed / total * 100.0 >= max_pct {
+                return Some(ExitReason::TimeDecay);
+            }
+        }
+
+        if let Some(days) = self.min_days_before_expiry {
+            let remaining = (expiry_instant - bar_ts).num_days();
+            if remaining < days as i64 {
+                return Some(ExitReason::BeforeExpiry);
+            }
+        }
+
+        None
+    }
 }
 
 /// True when the underlying has crossed the short strike in the direction that
@@ -400,6 +428,69 @@ mod tests {
         assert_eq!(
             rules.triggered(&position(), &late),
             Some(ExitReason::StopLoss)
+        );
+    }
+
+    // ---- time_triggered: fallback when quotes are unavailable ----
+
+    #[test]
+    fn time_triggered_fires_on_time_based_rules_only() {
+        let rules = ExitRules {
+            profit_target_pct: Some(50.0),
+            stop_loss_pct: Some(100.0),
+            underlying_past_short_strike: true,
+            max_time_pct: Some(50.0),
+            min_days_before_expiry: Some(7),
+        };
+        let p = position();
+
+        // Early: none of the time rules fire.
+        assert_eq!(
+            rules.time_triggered(
+                p.opened_at,
+                Utc.with_ymd_and_hms(2026, 7, 15, 15, 0, 0).unwrap(),
+                expiry_instant(),
+            ),
+            None,
+        );
+
+        // Late enough for time decay (50% elapsed).
+        assert_eq!(
+            rules.time_triggered(
+                p.opened_at,
+                Utc.with_ymd_and_hms(2026, 7, 27, 15, 0, 0).unwrap(),
+                expiry_instant(),
+            ),
+            Some(ExitReason::TimeDecay),
+        );
+
+        // Close to expiry: before-expiry wins (time_decay fires first in priority).
+        assert_eq!(
+            rules.time_triggered(
+                p.opened_at,
+                Utc.with_ymd_and_hms(2026, 8, 18, 15, 0, 0).unwrap(),
+                expiry_instant(),
+            ),
+            Some(ExitReason::TimeDecay),
+        );
+    }
+
+    #[test]
+    fn time_triggered_ignores_price_based_rules() {
+        let rules = ExitRules {
+            profit_target_pct: Some(1.0),
+            stop_loss_pct: Some(1.0),
+            underlying_past_short_strike: true,
+            ..Default::default()
+        };
+        // No time-based rules configured — should never fire.
+        assert_eq!(
+            rules.time_triggered(
+                Utc.with_ymd_and_hms(2026, 7, 1, 13, 30, 0).unwrap(),
+                Utc.with_ymd_and_hms(2026, 8, 20, 19, 30, 0).unwrap(),
+                expiry_instant(),
+            ),
+            None,
         );
     }
 }

@@ -105,6 +105,8 @@ pub struct Census {
     pub unfillable_intents: usize,
     /// Refused because too close to expiry to open a new position.
     pub too_close_to_expiry: usize,
+    /// Closed at intrinsic because option quotes were unavailable.
+    pub synthetic_exits: usize,
 }
 
 impl Census {
@@ -180,23 +182,53 @@ pub fn run_symbol(
         equity_curve.push((bar.ts, portfolio.equity(&bar, &config.costs)));
 
         // 3. Exits. Collected first so the borrow ends before anything closes.
+        //    When option quotes are unavailable but time-based rules fire, close
+        //    at intrinsic immediately — waiting for the next bar's quotes does not
+        //    help when the leg has gone quiet.
         let mut exiting = Vec::new();
+        let mut synthetic_exiting: Vec<(usize, ExitReason)> = Vec::new();
         for position in &portfolio.open {
-            let Ok(credit) = crate::execution::exit_credit(&position.spread, &bar) else {
-                continue; // A bar that cannot price a position cannot exit it.
-            };
-            let gross = credit - position.entry_debit;
-            let ctx = exits::ExitContext {
-                gross_pnl: gross,
-                underlying_price: bar.underlying.price(),
-                bar_ts: bar.ts,
-                expiry_instant: series.expiry_instant(),
-            };
-            if let Some(reason) = config.exits.triggered(position, &ctx) {
-                exiting.push(Intent::Close {
-                    id: position.id,
-                    reason,
-                });
+            match crate::execution::exit_credit(&position.spread, &bar) {
+                Ok(credit) => {
+                    let gross = credit - position.entry_debit;
+                    let ctx = exits::ExitContext {
+                        gross_pnl: gross,
+                        underlying_price: bar.underlying.price(),
+                        bar_ts: bar.ts,
+                        expiry_instant: series.expiry_instant(),
+                    };
+                    if let Some(reason) = config.exits.triggered(position, &ctx) {
+                        exiting.push(Intent::Close {
+                            id: position.id,
+                            reason,
+                        });
+                    }
+                }
+                Err(_) => {
+                    if let Some(reason) = config.exits.time_triggered(
+                        position.opened_at,
+                        bar.ts,
+                        series.expiry_instant(),
+                    ) {
+                        synthetic_exiting.push((position.id, reason));
+                    }
+                }
+            }
+        }
+
+        for (id, reason) in &synthetic_exiting {
+            if let Some(spot) = bar.underlying.price() {
+                let held = index
+                    .saturating_sub(opened_at_index.get(id).copied().unwrap_or(index));
+                portfolio.close_at_intrinsic(
+                    *id,
+                    spot,
+                    bar.ts,
+                    &config.costs,
+                    *reason,
+                    held,
+                );
+                census.synthetic_exits += 1;
             }
         }
 
@@ -433,6 +465,102 @@ pub mod testing {
         }
 
         // The stock print on expiry day that settlement reads.
+        let settle_ts = Utc
+            .with_ymd_and_hms(EXPIRY.0, EXPIRY.1, EXPIRY.2, 19, 30, 0)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+        insert
+            .execute(rusqlite::params![1i64, &settle_ts, "trades", settlement])
+            .unwrap();
+
+        drop(insert);
+        conn.execute_batch("COMMIT").unwrap();
+        drop(conn);
+        file
+    }
+
+    /// Like `snapshot_with` but after `dropout_after` bars, only the far
+    /// wings keep quoting — the ATM-ish strikes (within ±20 of spot) go
+    /// quiet. The chain still has timestamps from the wings, but the
+    /// position's specific contracts return `None` from `bar.quote()`.
+    pub fn snapshot_with_dropout(
+        name: &str,
+        path: &[f64],
+        settlement: f64,
+        dropout_after: usize,
+    ) -> PathBuf {
+        let dir = std::env::temp_dir().join("ib-spread-trader-engine-fixtures");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{name}.sqlite3"));
+        let _ = std::fs::remove_file(&file);
+
+        let conn = rusqlite::Connection::open(&file).unwrap();
+        conn.pragma_update(None, "user_version", 6i64).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE contracts (id INTEGER PRIMARY KEY, symbol TEXT, kind TEXT,
+                 exchange TEXT, currency TEXT, expiry TEXT, strike REAL, right TEXT);
+             CREATE TABLE bars (contract_id INTEGER, ts TEXT, bar_size TEXT, data_type TEXT,
+                 open REAL, high REAL, low REAL, close REAL, volume REAL);
+             INSERT INTO contracts (id, symbol, kind, exchange, currency, expiry, strike, right)
+             VALUES (1, 'TEST', 'stock', 'SMART', 'USD', NULL, NULL, NULL);",
+        )
+        .unwrap();
+
+        let strikes: Vec<f64> = (35..=65).map(|i| i as f64 * 2.0).collect();
+        let expiry_text = expiry().format("%Y-%m-%d").to_string();
+        let mut next_id = 2i64;
+        let mut ids = Vec::new();
+        for &strike in &strikes {
+            for right in ["C", "P"] {
+                conn.execute(
+                    "INSERT INTO contracts (id, symbol, kind, exchange, currency, expiry, strike, right)
+                     VALUES (?1, 'TEST', 'option', 'SMART', 'USD', ?2, ?3, ?4)",
+                    rusqlite::params![next_id, expiry_text, strike, right],
+                )
+                .unwrap();
+                ids.push((next_id, strike, right == "C"));
+                next_id += 1;
+            }
+        }
+
+        let start = Utc.with_ymd_and_hms(2026, 7, 1, 13, 30, 0).unwrap();
+        let expiry_instant = pricing::expiry_instant(expiry()).unwrap();
+        conn.execute_batch("BEGIN").unwrap();
+        let mut insert = conn
+            .prepare(
+                "INSERT INTO bars (contract_id, ts, bar_size, data_type, open, high, low, close, volume)
+                 VALUES (?1, ?2, '30min', ?3, ?4, ?4, ?4, ?4, 0)",
+            )
+            .unwrap();
+
+        for (bar, &spot) in path.iter().enumerate() {
+            let ts = (start + Duration::minutes(30 * bar as i64))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+            for (kind, price) in [("trades", spot), ("bid", spot - 0.01), ("ask", spot + 0.01)] {
+                insert
+                    .execute(rusqlite::params![1i64, &ts, kind, price])
+                    .unwrap();
+            }
+            let t = pricing::year_fraction(
+                start + Duration::minutes(30 * bar as i64),
+                expiry_instant,
+            );
+            for &(id, strike, is_call) in &ids {
+                // After the dropout bar, skip strikes within ±20 of spot.
+                // The wings keep quoting so the chain still has timestamps.
+                if bar >= dropout_after && (strike - spot).abs() < 20.0 {
+                    continue;
+                }
+                let mid = pricing::black76(spot, strike, t, VOL, is_call).max(0.06);
+                insert
+                    .execute(rusqlite::params![id, &ts, "bid", mid - 0.05])
+                    .unwrap();
+                insert
+                    .execute(rusqlite::params![id, &ts, "ask", mid + 0.05])
+                    .unwrap();
+            }
+        }
+
         let settle_ts = Utc
             .with_ymd_and_hms(EXPIRY.0, EXPIRY.1, EXPIRY.2, 19, 30, 0)
             .unwrap()
@@ -729,5 +857,49 @@ mod tests {
         let (kind, example) = run.census.rejection_examples.iter().next().unwrap();
         assert_eq!(kind, "no_strike_near_target_delta");
         assert!(example.contains("closest quoted"), "{example}");
+    }
+
+    /// When option quotes disappear but a time-based exit rule fires, the
+    /// engine closes the position at intrinsic rather than letting it ride to
+    /// expiry settlement.
+    #[test]
+    fn unquoted_legs_close_at_intrinsic_when_a_time_rule_fires() {
+        let path = v_shaped_path(); // 81 bars, ~1.7 days from Jul 1
+        // ATM-ish strikes (±20 of spot) go quiet after bar 40. The position
+        // opens around bar 31. A very generous min_days_before_expiry fires
+        // once quotes are unavailable on the held strikes.
+        let file = snapshot_with_dropout("dropout", &path, 120.0, 40);
+        let snapshot = crate::data::Snapshot::open(&file).unwrap();
+        let series = ChainSeries::load(&snapshot, "TEST", expiry()).unwrap();
+
+        let mut strategy = bull_call_strategy();
+        // min_days_before_expiry = 50: fires when remaining < 50 days.
+        // The fixture starts ~51 days before expiry. Remaining crosses below 50
+        // at bar ~62 (Jul 2 20:30) — well after bar 40 where ATM quotes vanish,
+        // so the exit fires via time_triggered, not triggered.
+        let run = run_symbol(
+            &series,
+            &mut strategy,
+            &RunConfig {
+                exits: ExitRules {
+                    min_days_before_expiry: Some(50),
+                    stop_loss_pct: Some(100.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(run.census.triggers, 1, "one RSI crossing");
+        assert_eq!(
+            run.census.synthetic_exits, 1,
+            "closed at intrinsic when quotes vanished"
+        );
+        assert_eq!(run.portfolio.closed.len(), 1);
+
+        let trade = &run.portfolio.closed[0];
+        assert!(trade.synthetic_price, "flagged as synthetic");
+        assert_eq!(trade.exit_reason, ExitReason::BeforeExpiry);
     }
 }

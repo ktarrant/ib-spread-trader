@@ -67,6 +67,10 @@ pub struct ClosedTrade {
     /// `exit_credit - entry_debit - commission`.
     pub pnl: f64,
     pub exit_reason: ExitReason,
+    /// True when the exit was priced at intrinsic because option quotes were
+    /// unavailable. The P&L is an estimate, not a market observation.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub synthetic_price: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,9 +150,50 @@ impl Portfolio {
             commission,
             pnl: credit - position.entry_debit - commission,
             exit_reason: reason,
+            synthetic_price: false,
         };
         self.closed.push(trade.clone());
         Ok(Some(trade))
+    }
+
+    /// Close a position at intrinsic when option quotes are unavailable.
+    ///
+    /// This is the mid-tape equivalent of settlement: the option market stopped
+    /// making a quote in one or both legs, but the underlying is still quoted
+    /// and a time-based exit rule (before-expiry, time-decay) has fired.
+    /// Commission is charged — unlike settlement, this is a decision to close.
+    pub fn close_at_intrinsic(
+        &mut self,
+        id: usize,
+        underlying: f64,
+        bar_ts: DateTime<Utc>,
+        costs: &Costs,
+        reason: ExitReason,
+        bars_held: usize,
+    ) -> Option<ClosedTrade> {
+        let index = self.open.iter().position(|p| p.id == id)?;
+        let position = self.open.remove(index);
+        let credit = position.spread.payoff_at(underlying);
+        let exit_commission = costs.commission(&position.spread);
+        let commission = position.entry_commission + exit_commission;
+
+        self.cash += credit - exit_commission;
+        let trade = ClosedTrade {
+            id: position.id,
+            symbol: position.spread.symbol.clone(),
+            description: position.spread.describe(),
+            opened_at: position.opened_at,
+            closed_at: bar_ts,
+            bars_held,
+            entry_debit: position.entry_debit,
+            exit_credit: credit,
+            commission,
+            pnl: credit - position.entry_debit - commission,
+            exit_reason: reason,
+            synthetic_price: true,
+        };
+        self.closed.push(trade.clone());
+        Some(trade)
     }
 
     /// Settle a position at intrinsic against the underlying's settlement price.
@@ -186,6 +231,7 @@ impl Portfolio {
             commission: position.entry_commission,
             pnl: credit - position.entry_debit - position.entry_commission,
             exit_reason: ExitReason::Expiry,
+            synthetic_price: false,
         };
         self.closed.push(trade.clone());
         Some(trade)
