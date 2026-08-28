@@ -16,7 +16,10 @@ use std::path::Path;
 use crate::domain::OptionRight;
 use crate::engine::{ExitRules, RunConfig, Strategy, Timing};
 use crate::execution::{Costs, DeltaSelector};
-use crate::signal::{RsiCross, SmaCross};
+use crate::signal::{
+    ContractionMeasure, RsiCross, SmaCross, VolatilityContractionBreakout,
+    VolatilityContractionParams,
+};
 use crate::structure::Vertical;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -64,6 +67,26 @@ pub enum SignalConfig {
         #[serde(default = "default_slow")]
         slow: usize,
     },
+    /// A low-volatility regime on the previous bar, followed by a close above
+    /// prior highs on elevated, time-of-day-normalised underlying volume.
+    VolatilityContractionBreakout {
+        #[serde(default)]
+        measure: ContractionMeasure,
+        #[serde(default = "default_volatility_period")]
+        volatility_period: usize,
+        #[serde(default = "default_contraction_lookback")]
+        contraction_lookback: usize,
+        #[serde(default = "default_contraction_percentile")]
+        contraction_percentile: f64,
+        #[serde(default = "default_breakout_period")]
+        breakout_period: usize,
+        #[serde(default = "default_volume_lookback_sessions")]
+        volume_lookback_sessions: usize,
+        #[serde(default = "default_min_volume_ratio")]
+        min_volume_ratio: f64,
+        #[serde(default = "default_max_atm_iv_increase")]
+        max_atm_iv_increase: f64,
+    },
 }
 
 fn default_rsi_period() -> usize {
@@ -77,6 +100,27 @@ fn default_fast() -> usize {
 }
 fn default_slow() -> usize {
     20
+}
+fn default_volatility_period() -> usize {
+    VolatilityContractionParams::default().volatility_period
+}
+fn default_contraction_lookback() -> usize {
+    VolatilityContractionParams::default().contraction_lookback
+}
+fn default_contraction_percentile() -> f64 {
+    VolatilityContractionParams::default().contraction_percentile
+}
+fn default_breakout_period() -> usize {
+    VolatilityContractionParams::default().breakout_period
+}
+fn default_volume_lookback_sessions() -> usize {
+    VolatilityContractionParams::default().volume_lookback_sessions
+}
+fn default_min_volume_ratio() -> f64 {
+    VolatilityContractionParams::default().min_volume_ratio
+}
+fn default_max_atm_iv_increase() -> f64 {
+    VolatilityContractionParams::default().max_atm_iv_increase
 }
 
 impl Default for SignalConfig {
@@ -240,6 +284,27 @@ impl StrategyConfig {
         let signal: Box<dyn crate::signal::Signal> = match self.signal {
             SignalConfig::RsiCross { period, level } => Box::new(RsiCross::new(period, level)?),
             SignalConfig::SmaCross { fast, slow } => Box::new(SmaCross::new(fast, slow)?),
+            SignalConfig::VolatilityContractionBreakout {
+                measure,
+                volatility_period,
+                contraction_lookback,
+                contraction_percentile,
+                breakout_period,
+                volume_lookback_sessions,
+                min_volume_ratio,
+                max_atm_iv_increase,
+            } => Box::new(VolatilityContractionBreakout::new(
+                VolatilityContractionParams {
+                    measure,
+                    volatility_period,
+                    contraction_lookback,
+                    contraction_percentile,
+                    breakout_period,
+                    volume_lookback_sessions,
+                    min_volume_ratio,
+                    max_atm_iv_increase,
+                },
+            )?),
         };
         let structure: Box<dyn crate::structure::Structure> = match self.structure {
             StructureConfig::Vertical {
@@ -403,5 +468,41 @@ commission_per_contract = 0.65
         .unwrap();
         let err = inverted.validate().unwrap_err();
         assert!(err.to_string().contains("short_delta"), "{err}");
+    }
+
+    #[test]
+    fn volatility_contraction_defaults_are_configurable_without_recompiling() {
+        let config: StrategyConfig = toml::from_str(
+            r#"
+symbols = ["SPY"]
+expiry = "2026-08-21"
+
+[signal]
+kind = "volatility_contraction_breakout"
+measure = "realized_volatility"
+volatility_period = 30
+breakout_period = 15
+min_volume_ratio = 1.25
+max_atm_iv_increase = 0.05
+"#,
+        )
+        .unwrap();
+        config.validate().unwrap();
+
+        assert!(matches!(
+            config.signal,
+            SignalConfig::VolatilityContractionBreakout {
+                measure: ContractionMeasure::RealizedVolatility,
+                volatility_period: 30,
+                contraction_lookback: 120,
+                contraction_percentile,
+                breakout_period: 15,
+                volume_lookback_sessions: 20,
+                min_volume_ratio,
+                max_atm_iv_increase,
+            } if contraction_percentile == 0.10
+                && min_volume_ratio == 1.25
+                && max_atm_iv_increase == 0.05
+        ));
     }
 }

@@ -209,6 +209,26 @@ Two behaviours that look like bugs the first time and are not:
   one starves the slow one, which then never warms and the signal fires nothing
   ever. Pinned by `nothing_fires_before_the_slow_average_is_warm`.
 
+### Volatility-contraction breakouts use completed information only
+
+`VolatilityContractionBreakout` composes four gates, all evaluated at a bar's
+close. The contraction flag belongs to the **previous completed stock bar**; the
+breakout bar is allowed to widen the bands without erasing the squeeze that
+preceded it. Its historical percentile excludes the current measurement, and
+the breakout high excludes the current bar. A run of consecutive new highs
+fires only on its leading edge.
+
+Underlying volume comes only from stock `trades` rows. Bid/ask volume is the
+capture's meaningless zero sentinel. Intraday volume is strongly U-shaped, so a
+bar is compared with the trailing median of the same New York 30-minute slot
+across prior sessions rather than with adjacent bars.
+
+ATM IV matches `~/ib-option-viz/src/optionviz/surface.py`: select the OTM side of
+the smile and linearly interpolate implied vol at zero log-moneyness. A missing
+stock high/close/volume or ATM IV fails the signal closed. The report's
+`signal_diagnostics` counts each sequential gate so a sparse result can be
+distinguished from a broken or still-warming signal.
+
 A signal sees one bar at a time and keeps its own state, so it cannot reach back
 into history it was not given — look-ahead is structurally impossible here rather
 than merely avoided. `evaluate` must be called **once per bar, in order**;

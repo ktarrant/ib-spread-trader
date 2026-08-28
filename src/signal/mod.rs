@@ -10,15 +10,20 @@
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 use crate::data::ChainSnapshot;
 use crate::indicators::Cross;
 
 pub mod rsi_cross;
 pub mod sma_cross;
+pub mod volatility_contraction;
 
 pub use rsi_cross::RsiCross;
 pub use sma_cross::SmaCross;
+pub use volatility_contraction::{
+    ContractionMeasure, VolatilityContractionBreakout, VolatilityContractionParams,
+};
 
 /// Which way a signal thinks the underlying is going.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -70,6 +75,12 @@ pub trait Signal {
     /// Called **once per bar, in order**. Stateful indicators depend on that;
     /// skipping a bar or replaying one silently corrupts every reading after it.
     fn evaluate(&mut self, view: &MarketView<'_>) -> Option<Trigger>;
+
+    /// Signal-specific gate counts. Most signals need only the engine's trigger
+    /// census; multi-condition signals can expose why a setup did not progress.
+    fn diagnostics(&self) -> BTreeMap<String, usize> {
+        BTreeMap::new()
+    }
 }
 
 /// Shared by the level- and series-crossing signals below.
@@ -97,7 +108,11 @@ pub mod testing {
                 .unwrap(),
             underlying: UnderlyingBar {
                 mid: Some(price),
+                open: Some(price),
+                high: Some(price),
+                low: Some(price),
                 close: Some(price),
+                volume: Some(1.0),
             },
             forward: price,
             residual_mad: 0.01,
