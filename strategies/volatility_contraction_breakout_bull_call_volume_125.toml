@@ -31,10 +31,12 @@ max_debit = 1000.0
 timing = "next_bar"
 max_open_positions = 1
 min_entry_days_before_expiry = 8
+earnings_blackout_days = 3
 
 [exit]
 underlying_past_short_strike = true
 stop_loss_pct = 100.0
+close_before_earnings = true
 min_days_before_expiry = 3
 
 [costs]

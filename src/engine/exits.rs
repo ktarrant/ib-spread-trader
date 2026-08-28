@@ -12,6 +12,7 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::data::EarningsEvent;
 use crate::domain::OptionRight;
 use crate::portfolio::{ExitReason, OpenPosition};
 use crate::spread::Side;
@@ -28,18 +29,23 @@ pub struct ExitRules {
     pub max_time_pct: Option<f64>,
     /// Close at least this many calendar days before expiration.
     pub min_days_before_expiry: Option<u32>,
+    /// Close before earnings announcements. The position is closed on the last
+    /// session before the earnings event would affect prices.
+    pub close_before_earnings: bool,
 }
 
 /// Everything the exit check needs beyond the position itself.
-pub struct ExitContext {
+pub struct ExitContext<'a> {
     pub gross_pnl: f64,
     pub underlying_price: Option<f64>,
     pub bar_ts: DateTime<Utc>,
     pub expiry_instant: DateTime<Utc>,
+    /// The next earnings event for this symbol, if any.
+    pub next_earnings: Option<&'a EarningsEvent>,
 }
 
 impl ExitRules {
-    pub fn triggered(&self, position: &OpenPosition, ctx: &ExitContext) -> Option<ExitReason> {
+    pub fn triggered(&self, position: &OpenPosition, ctx: &ExitContext<'_>) -> Option<ExitReason> {
         // 1. Profit target — best outcome.
         if let Some(pct) = self.profit_target_pct
             && let Some(max_profit) = position.max_profit
@@ -74,7 +80,14 @@ impl ExitRules {
             }
         }
 
-        // 5. Before-expiry hard cutoff — avoid exercise/assignment risk.
+        // 5. Before-earnings — close before the announcement moves prices.
+        if self.close_before_earnings {
+            if let Some(reason) = earnings_exit(ctx.bar_ts, ctx.next_earnings) {
+                return Some(reason);
+            }
+        }
+
+        // 6. Before-expiry hard cutoff — avoid exercise/assignment risk.
         if let Some(days) = self.min_days_before_expiry {
             let remaining = (ctx.expiry_instant - ctx.bar_ts).num_days();
             if remaining < days as i64 {
@@ -110,12 +123,19 @@ impl ExitRules {
         opened_at: DateTime<Utc>,
         bar_ts: DateTime<Utc>,
         expiry_instant: DateTime<Utc>,
+        next_earnings: Option<&EarningsEvent>,
     ) -> Option<ExitReason> {
         if let Some(max_pct) = self.max_time_pct {
             let total = (expiry_instant - opened_at).num_seconds() as f64;
             let elapsed = (bar_ts - opened_at).num_seconds() as f64;
             if total > 0.0 && elapsed / total * 100.0 >= max_pct {
                 return Some(ExitReason::TimeDecay);
+            }
+        }
+
+        if self.close_before_earnings {
+            if let Some(reason) = earnings_exit(bar_ts, next_earnings) {
+                return Some(reason);
             }
         }
 
@@ -128,6 +148,39 @@ impl ExitRules {
 
         None
     }
+}
+
+/// Close if earnings are tonight (`after_close` on today) or tomorrow morning
+/// (`before_open` on tomorrow). A `during_session` event on today also triggers.
+fn earnings_exit(bar_ts: DateTime<Utc>, next: Option<&EarningsEvent>) -> Option<ExitReason> {
+    let event = next?;
+    let bar_date = bar_ts.date_naive();
+
+    let should_close = match event.session_timing.as_str() {
+        "after_close" | "during_session" => bar_date == event.date,
+        "before_open" => {
+            // Close the day before — the next session opens with earnings priced in.
+            let day_before = event.date - chrono::Duration::days(1);
+            bar_date == day_before
+        }
+        _ => bar_date == event.date,
+    };
+
+    should_close.then_some(ExitReason::BeforeEarnings)
+}
+
+/// True if the bar falls within the earnings blackout window.
+pub fn in_earnings_blackout(
+    bar_ts: DateTime<Utc>,
+    next_earnings: Option<&EarningsEvent>,
+    blackout_days: u32,
+) -> bool {
+    let Some(event) = next_earnings else {
+        return false;
+    };
+    let bar_date = bar_ts.date_naive();
+    let days_until = (event.date - bar_date).num_days();
+    days_until >= 0 && days_until < blackout_days as i64
 }
 
 /// True when the underlying has crossed the short strike in the direction that
@@ -188,12 +241,13 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 8, 21, 20, 0, 0).unwrap()
     }
 
-    fn ctx(gross: f64, underlying: f64) -> ExitContext {
+    fn ctx(gross: f64, underlying: f64) -> ExitContext<'static> {
         ExitContext {
             gross_pnl: gross,
             underlying_price: Some(underlying),
             bar_ts: Utc.with_ymd_and_hms(2026, 7, 15, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
+            next_earnings: None,
         }
     }
 
@@ -380,6 +434,7 @@ mod tests {
             underlying_price: Some(751.0),
             bar_ts: Utc.with_ymd_and_hms(2026, 7, 25, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
+            next_earnings: None,
         };
         assert_eq!(rules.triggered(&p, &before), None);
 
@@ -405,6 +460,7 @@ mod tests {
             underlying_price: Some(751.0),
             bar_ts: Utc.with_ymd_and_hms(2026, 8, 13, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
+            next_earnings: None,
         };
         assert_eq!(rules.triggered(&position(), &safe), None);
 
@@ -440,6 +496,7 @@ mod tests {
             underlying_price: Some(740.0),
             bar_ts: Utc.with_ymd_and_hms(2026, 8, 10, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
+            next_earnings: None,
         };
         assert_eq!(
             rules.triggered(&position(), &late),
@@ -457,6 +514,7 @@ mod tests {
             underlying_past_short_strike: true,
             max_time_pct: Some(50.0),
             min_days_before_expiry: Some(7),
+            ..Default::default()
         };
         let p = position();
 
@@ -466,6 +524,7 @@ mod tests {
                 p.opened_at,
                 Utc.with_ymd_and_hms(2026, 7, 15, 15, 0, 0).unwrap(),
                 expiry_instant(),
+                None,
             ),
             None,
         );
@@ -476,6 +535,7 @@ mod tests {
                 p.opened_at,
                 Utc.with_ymd_and_hms(2026, 7, 27, 15, 0, 0).unwrap(),
                 expiry_instant(),
+                None,
             ),
             Some(ExitReason::TimeDecay),
         );
@@ -486,6 +546,7 @@ mod tests {
                 p.opened_at,
                 Utc.with_ymd_and_hms(2026, 8, 18, 15, 0, 0).unwrap(),
                 expiry_instant(),
+                None,
             ),
             Some(ExitReason::TimeDecay),
         );
@@ -505,6 +566,7 @@ mod tests {
                 Utc.with_ymd_and_hms(2026, 7, 1, 13, 30, 0).unwrap(),
                 Utc.with_ymd_and_hms(2026, 8, 20, 19, 30, 0).unwrap(),
                 expiry_instant(),
+                None,
             ),
             None,
         );
@@ -537,5 +599,130 @@ mod tests {
             rules.underlying_price_triggered(&p.spread, 800.0),
             None,
         );
+    }
+
+    // ---- earnings exit ----
+
+    #[test]
+    fn close_before_after_close_earnings() {
+        use crate::data::EarningsEvent;
+        let event = EarningsEvent {
+            date: chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
+            session_timing: "after_close".to_string(),
+        };
+        let rules = ExitRules {
+            close_before_earnings: true,
+            ..Default::default()
+        };
+        // Day of earnings (after_close) → close today.
+        let ctx_today = ExitContext {
+            gross_pnl: 0.0,
+            underlying_price: Some(751.0),
+            bar_ts: Utc.with_ymd_and_hms(2026, 7, 29, 15, 0, 0).unwrap(),
+            expiry_instant: expiry_instant(),
+            next_earnings: Some(&event),
+        };
+        assert_eq!(
+            rules.triggered(&position(), &ctx_today),
+            Some(ExitReason::BeforeEarnings)
+        );
+
+        // Day before → no action yet.
+        let ctx_before = ExitContext {
+            bar_ts: Utc.with_ymd_and_hms(2026, 7, 28, 15, 0, 0).unwrap(),
+            ..ctx_today
+        };
+        assert_eq!(rules.triggered(&position(), &ctx_before), None);
+    }
+
+    #[test]
+    fn close_before_before_open_earnings() {
+        use crate::data::EarningsEvent;
+        let event = EarningsEvent {
+            date: chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
+            session_timing: "before_open".to_string(),
+        };
+        let rules = ExitRules {
+            close_before_earnings: true,
+            ..Default::default()
+        };
+        // Day before the before_open event → close today.
+        let ctx = ExitContext {
+            gross_pnl: 0.0,
+            underlying_price: Some(751.0),
+            bar_ts: Utc.with_ymd_and_hms(2026, 7, 28, 15, 0, 0).unwrap(),
+            expiry_instant: expiry_instant(),
+            next_earnings: Some(&event),
+        };
+        assert_eq!(
+            rules.triggered(&position(), &ctx),
+            Some(ExitReason::BeforeEarnings)
+        );
+    }
+
+    #[test]
+    fn earnings_exit_disabled_by_default() {
+        use crate::data::EarningsEvent;
+        let event = EarningsEvent {
+            date: chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
+            session_timing: "after_close".to_string(),
+        };
+        let rules = ExitRules::default();
+        let ctx = ExitContext {
+            gross_pnl: 0.0,
+            underlying_price: Some(751.0),
+            bar_ts: Utc.with_ymd_and_hms(2026, 7, 29, 15, 0, 0).unwrap(),
+            expiry_instant: expiry_instant(),
+            next_earnings: Some(&event),
+        };
+        assert_eq!(rules.triggered(&position(), &ctx), None);
+    }
+
+    #[test]
+    fn earnings_blackout_window() {
+        use crate::data::EarningsEvent;
+        let event = EarningsEvent {
+            date: chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
+            session_timing: "after_close".to_string(),
+        };
+        // 3-day blackout: Jul 27, 28, 29 are blocked (days_until = 2, 1, 0).
+        assert!(!in_earnings_blackout(
+            Utc.with_ymd_and_hms(2026, 7, 25, 15, 0, 0).unwrap(),
+            Some(&event),
+            3,
+        ));
+        assert!(!in_earnings_blackout(
+            Utc.with_ymd_and_hms(2026, 7, 26, 15, 0, 0).unwrap(),
+            Some(&event),
+            3,
+        ));
+        assert!(in_earnings_blackout(
+            Utc.with_ymd_and_hms(2026, 7, 27, 15, 0, 0).unwrap(),
+            Some(&event),
+            3,
+        ));
+        assert!(in_earnings_blackout(
+            Utc.with_ymd_and_hms(2026, 7, 28, 15, 0, 0).unwrap(),
+            Some(&event),
+            3,
+        ));
+        // Earnings day itself is also in the window.
+        assert!(in_earnings_blackout(
+            Utc.with_ymd_and_hms(2026, 7, 29, 15, 0, 0).unwrap(),
+            Some(&event),
+            3,
+        ));
+        // Day after earnings is not blocked.
+        assert!(!in_earnings_blackout(
+            Utc.with_ymd_and_hms(2026, 7, 30, 15, 0, 0).unwrap(),
+            Some(&event),
+            3,
+        ));
+        // No earnings → no blackout.
+        assert!(!in_earnings_blackout(
+            Utc.with_ymd_and_hms(2026, 7, 27, 15, 0, 0).unwrap(),
+            None,
+            3,
+        ));
     }
 }

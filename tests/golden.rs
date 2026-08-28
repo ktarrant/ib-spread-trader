@@ -229,41 +229,44 @@ fn the_reference_strategy_reproduces_its_recorded_run() {
     let totals = &built.totals;
 
     assert_eq!(totals.symbols, 12);
-    // 5-min signal resolution changes when RSI crossings land.
-    // Values re-derived after snapshot gained 5-min data for all symbols.
-    assert_eq!(totals.trades, 23);
+    // Values re-derived after adding earnings avoidance (close_before_earnings
+    // + 3-day blackout). Closing before earnings frees slots, so the total
+    // trade count rises even though some entries are blocked.
+    assert_eq!(totals.trades, 25);
     assert_eq!(totals.census.triggers, 1412);
     assert_eq!(
         totals.census.declined, 734,
         "bearish crossings a call structure declines"
     );
-    assert_eq!(totals.census.at_position_limit, 484);
+    assert_eq!(totals.census.at_position_limit, 470);
     assert_eq!(totals.census.unfillable_intents, 0);
+    assert_eq!(totals.census.earnings_blackout, 22);
 
-    assert_eq!(totals.census.rejections["debit_above_limit"], 95);
+    assert_eq!(totals.census.rejections["debit_above_limit"], 85);
     assert_eq!(totals.census.rejections["no_strike_near_target_delta"], 76);
 
     assert!(
-        (totals.total_pnl - 749.20).abs() < 0.01,
+        (totals.total_pnl - 414.70).abs() < 0.01,
         "{}",
         totals.total_pnl
     );
     assert!(
-        (totals.traded_pnl - 2781.20).abs() < 0.01,
+        (totals.traded_pnl - 3451.40).abs() < 0.01,
         "{}",
         totals.traded_pnl
     );
     assert!(
-        (totals.settled_pnl - (-2032.00)).abs() < 0.01,
+        (totals.settled_pnl - (-3036.70)).abs() < 0.01,
         "{}",
         totals.settled_pnl
     );
-    assert!((totals.commission_paid - 46.80).abs() < 0.01);
+    assert!((totals.commission_paid - 53.30).abs() < 0.01);
 
     // Every trade closed one way or another; nothing was left marked.
-    assert_eq!(totals.exits_by_reason["expiry_settlement"], 10);
+    assert_eq!(totals.exits_by_reason["before_earnings"], 5);
+    assert_eq!(totals.exits_by_reason["expiry_settlement"], 9);
     assert_eq!(totals.exits_by_reason["profit_target"], 9);
-    assert_eq!(totals.exits_by_reason["stop_loss"], 4);
+    assert_eq!(totals.exits_by_reason["stop_loss"], 2);
 
     // Cash, the trade log and the curve have to agree or the report is decoration.
     let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
@@ -321,7 +324,7 @@ fn metas_truncated_ladder_rejects_the_far_leg() {
     let mut strategy = config.strategy().unwrap();
     let run = engine::run_symbol(&series, &mut strategy, &config.run_config()).unwrap();
 
-    assert_eq!(run.census.total_rejections(), 40);
+    assert_eq!(run.census.total_rejections(), 35);
     let example = &run.census.rejection_examples["no_strike_near_target_delta"];
     assert!(example.contains("0.30 delta"), "{example}");
     assert!(example.contains("closest quoted"), "{example}");

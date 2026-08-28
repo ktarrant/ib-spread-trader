@@ -24,6 +24,8 @@ pub enum ExitReason {
     UnderlyingPastShortStrike,
     /// Too much of the time to expiry has elapsed.
     TimeDecay,
+    /// Closed to avoid holding through an earnings announcement.
+    BeforeEarnings,
     /// Hard cutoff: close before getting too close to expiration.
     BeforeExpiry,
     /// Ran out of option bars and settled at intrinsic. Reported separately from

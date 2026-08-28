@@ -24,6 +24,7 @@ pub struct Census {
     pub unfillable_intents: usize,
     pub synthetic_exits: usize,
     pub too_close_to_expiry: usize,
+    pub earnings_blackout: usize,
     pub signal_diagnostics: BTreeMap<String, usize>,
     pub rejections: BTreeMap<String, usize>,
     pub rejection_examples: BTreeMap<String, String>,
@@ -108,6 +109,7 @@ pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> R
         census.unfillable_intents += run.census.unfillable_intents;
         census.synthetic_exits += run.census.synthetic_exits;
         census.too_close_to_expiry += run.census.too_close_to_expiry;
+        census.earnings_blackout += run.census.earnings_blackout;
         for (gate, count) in &run.signal_diagnostics {
             *census.signal_diagnostics.entry(gate.clone()).or_default() += count;
         }
@@ -244,6 +246,7 @@ fn reason_key(reason: ExitReason) -> &'static str {
         ExitReason::StopLoss => "stop_loss",
         ExitReason::UnderlyingPastShortStrike => "underlying_past_short",
         ExitReason::TimeDecay => "time_decay",
+        ExitReason::BeforeEarnings => "before_earnings",
         ExitReason::BeforeExpiry => "before_expiry",
         ExitReason::Expiry => "expiry_settlement",
     }

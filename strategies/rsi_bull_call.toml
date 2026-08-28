@@ -29,10 +29,12 @@ delta_tolerance = 0.07
 max_debit = 1000.0
 timing = "next_bar"
 max_open_positions = 1
+earnings_blackout_days = 3
 
 [exit]
 profit_target_pct = 50.0
 stop_loss_pct = 100.0
+close_before_earnings = true
 
 [costs]
 commission_per_contract = 0.65

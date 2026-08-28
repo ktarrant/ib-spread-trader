@@ -211,6 +211,11 @@ pub struct ExecutionConfig {
     /// immediately close. Set this to `min_days_before_expiry + buffer`.
     #[serde(default)]
     pub min_entry_days_before_expiry: Option<u32>,
+    /// Refuse new entries within this many calendar days of an earnings
+    /// announcement. Prevents opening positions that would be immediately
+    /// closed by `close_before_earnings`.
+    #[serde(default)]
+    pub earnings_blackout_days: Option<u32>,
 }
 
 fn default_tolerance() -> f64 {
@@ -228,6 +233,7 @@ impl Default for ExecutionConfig {
             timing: Timing::default(),
             max_open_positions: default_max_open(),
             min_entry_days_before_expiry: None,
+            earnings_blackout_days: None,
         }
     }
 }
@@ -247,6 +253,9 @@ pub struct ExitConfig {
     /// Close after this percentage of the time from entry to expiry has elapsed.
     #[serde(default)]
     pub max_time_pct: Option<f64>,
+    /// Close before earnings announcements to avoid the vol event.
+    #[serde(default)]
+    pub close_before_earnings: bool,
     /// Close at least this many calendar days before expiration.
     #[serde(default)]
     pub min_days_before_expiry: Option<u32>,
@@ -375,10 +384,12 @@ impl StrategyConfig {
                 stop_loss_pct: self.exit.stop_loss_pct,
                 underlying_past_short_strike: self.exit.underlying_past_short_strike,
                 max_time_pct: self.exit.max_time_pct,
+                close_before_earnings: self.exit.close_before_earnings,
                 min_days_before_expiry: self.exit.min_days_before_expiry,
             },
             max_open_positions: self.execution.max_open_positions,
             min_entry_days_before_expiry: self.execution.min_entry_days_before_expiry,
+            earnings_blackout_days: self.execution.earnings_blackout_days,
         }
     }
 }

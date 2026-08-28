@@ -183,6 +183,14 @@ impl ChainSnapshot {
 }
 
 /// A whole symbol/expiry, loaded once.
+/// An earnings announcement for one symbol.
+#[derive(Debug, Clone)]
+pub struct EarningsEvent {
+    pub date: NaiveDate,
+    /// `before_open`, `after_close`, or `during_session`.
+    pub session_timing: String,
+}
+
 #[derive(Debug)]
 pub struct ChainSeries {
     pub symbol: String,
@@ -202,6 +210,8 @@ pub struct ChainSeries {
     pub underlying_quality: Quality,
     /// "5min" or "30min" — resolution of `signal_underlying`.
     pub underlying_bar_size: String,
+    /// Earnings dates within the backtest window, sorted ascending.
+    pub earnings: Vec<EarningsEvent>,
 }
 
 impl ChainSeries {
@@ -211,6 +221,7 @@ impl ChainSeries {
 
         let (quotes, option_quality) = load_option_quotes(snapshot, &symbol, &expiry_text)?;
         let (underlying, underlying_quality) = load_underlying(snapshot, &symbol, BAR_SIZE)?;
+        let earnings = load_earnings(snapshot, &symbol)?;
         let (signal_underlying, signal_quality, underlying_bar_size) = {
             let (u, q) = load_underlying(snapshot, &symbol, "5min")?;
             if !u.is_empty() {
@@ -243,6 +254,7 @@ impl ChainSeries {
             option_quality,
             underlying_quality: signal_quality,
             underlying_bar_size,
+            earnings,
         })
     }
 
@@ -276,6 +288,12 @@ impl ChainSeries {
 
     pub fn expiry_instant(&self) -> DateTime<Utc> {
         self.expiry_instant
+    }
+
+    /// The next earnings event on or after the given date. The engine uses this
+    /// to close positions before earnings and to refuse entries in the blackout.
+    pub fn next_earnings_from(&self, date: NaiveDate) -> Option<&EarningsEvent> {
+        self.earnings.iter().find(|e| e.date >= date)
     }
 
     /// All timestamps where either option or signal-underlying data exists,
@@ -528,6 +546,31 @@ fn load_underlying(
     Ok((out, quality))
 }
 
+fn load_earnings(snapshot: &Snapshot, symbol: &str) -> Result<Vec<EarningsEvent>> {
+    let mut stmt = snapshot.conn().prepare(
+        "SELECT event_date, session_timing FROM events
+         WHERE symbol = ?1 AND kind = 'earnings'
+         ORDER BY event_date",
+    )?;
+    let rows = stmt.query_map([symbol], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (date_str, timing) = row?;
+        let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+            .with_context(|| format!("earnings date '{date_str}'"))?;
+        out.push(EarningsEvent {
+            date,
+            session_timing: timing.unwrap_or_default(),
+        });
+    }
+    Ok(out)
+}
+
 /// Every writer emits RFC3339 UTC with a literal `+00:00`; lexicographic range
 /// queries elsewhere depend on that exact form, and so does this parse.
 fn parse_ts(text: &str) -> Result<DateTime<Utc>> {
@@ -574,6 +617,9 @@ mod tests {
                  exchange TEXT, currency TEXT, expiry TEXT, strike REAL, right TEXT);
              CREATE TABLE bars (contract_id INTEGER, ts TEXT, bar_size TEXT, data_type TEXT,
                  open REAL, high REAL, low REAL, close REAL, volume REAL);
+             CREATE TABLE events (id INTEGER PRIMARY KEY, symbol TEXT,
+                 event_date TEXT NOT NULL, event_time TEXT, session_timing TEXT,
+                 kind TEXT NOT NULL, source TEXT NOT NULL, source_id TEXT, title TEXT);
              INSERT INTO contracts (id, symbol, kind, exchange, currency, expiry, strike, right)
              VALUES (1, 'TEST', 'stock',  'SMART', 'USD', NULL,         NULL, NULL),
                     (2, 'TEST', 'option', 'SMART', 'USD', '2026-08-21', 100.0, 'C'),

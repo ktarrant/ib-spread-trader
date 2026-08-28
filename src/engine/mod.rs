@@ -58,6 +58,9 @@ pub struct RunConfig {
     /// expiry. Prevents opening positions the before-expiry exit would
     /// immediately close.
     pub min_entry_days_before_expiry: Option<u32>,
+    /// Refuse new entries within this many calendar days of an earnings
+    /// announcement. Prevents the same open-close churn as the expiry gate.
+    pub earnings_blackout_days: Option<u32>,
 }
 
 impl Default for RunConfig {
@@ -69,6 +72,7 @@ impl Default for RunConfig {
             exits: ExitRules::default(),
             max_open_positions: 1,
             min_entry_days_before_expiry: None,
+            earnings_blackout_days: None,
         }
     }
 }
@@ -105,6 +109,8 @@ pub struct Census {
     pub unfillable_intents: usize,
     /// Refused because too close to expiry to open a new position.
     pub too_close_to_expiry: usize,
+    /// Refused because within the earnings blackout window.
+    pub earnings_blackout: usize,
     /// Closed at intrinsic because option quotes were unavailable.
     pub synthetic_exits: usize,
 }
@@ -199,6 +205,8 @@ pub fn run_symbol(
             equity_curve.push((bar.ts, portfolio.equity(&bar, &config.costs)));
 
             // 3. Exits.
+            let next_earnings =
+                series.next_earnings_from(bar.ts.date_naive());
             let mut exiting = Vec::new();
             let mut synthetic_exiting: Vec<(usize, ExitReason)> = Vec::new();
             for position in &portfolio.open {
@@ -210,6 +218,7 @@ pub fn run_symbol(
                             underlying_price: bar.underlying.price(),
                             bar_ts: bar.ts,
                             expiry_instant: series.expiry_instant(),
+                            next_earnings,
                         };
                         if let Some(reason) = config.exits.triggered(position, &ctx) {
                             exiting.push(Intent::Close {
@@ -232,6 +241,7 @@ pub fn run_symbol(
                                     position.opened_at,
                                     bar.ts,
                                     series.expiry_instant(),
+                                    next_earnings,
                                 )
                             });
                         if let Some(reason) = reason {
@@ -276,16 +286,18 @@ pub fn run_symbol(
                         let open_after_exits = portfolio.open.len() - exiting.len();
                         if open_after_exits >= config.max_open_positions {
                             census.at_position_limit += 1;
-                        } else if let Some(min_days) = config.min_entry_days_before_expiry {
-                            let remaining = (series.expiry_instant() - bar.ts).num_days();
-                            if remaining < min_days as i64 {
-                                census.too_close_to_expiry += 1;
-                            } else {
-                                match strategy.selector.resolve(&spec, &bar) {
-                                    Ok(spread) => entering = Some(Intent::Open(spread)),
-                                    Err(reject) => census.reject(&reject),
-                                }
-                            }
+                        } else if config
+                            .min_entry_days_before_expiry
+                            .is_some_and(|min_days| {
+                                (series.expiry_instant() - bar.ts).num_days()
+                                    < min_days as i64
+                            })
+                        {
+                            census.too_close_to_expiry += 1;
+                        } else if config.earnings_blackout_days.is_some_and(|days| {
+                            exits::in_earnings_blackout(bar.ts, next_earnings, days)
+                        }) {
+                            census.earnings_blackout += 1;
                         } else {
                             match strategy.selector.resolve(&spec, &bar) {
                                 Ok(spread) => entering = Some(Intent::Open(spread)),
@@ -448,6 +460,9 @@ pub mod testing {
                  exchange TEXT, currency TEXT, expiry TEXT, strike REAL, right TEXT);
              CREATE TABLE bars (contract_id INTEGER, ts TEXT, bar_size TEXT, data_type TEXT,
                  open REAL, high REAL, low REAL, close REAL, volume REAL);
+             CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, symbol TEXT,
+                 event_date TEXT NOT NULL, event_time TEXT, session_timing TEXT,
+                 kind TEXT NOT NULL, source TEXT NOT NULL, source_id TEXT, title TEXT);
              INSERT INTO contracts (id, symbol, kind, exchange, currency, expiry, strike, right)
              VALUES (1, 'TEST', 'stock', 'SMART', 'USD', NULL, NULL, NULL);",
         )
@@ -540,6 +555,9 @@ pub mod testing {
                  exchange TEXT, currency TEXT, expiry TEXT, strike REAL, right TEXT);
              CREATE TABLE bars (contract_id INTEGER, ts TEXT, bar_size TEXT, data_type TEXT,
                  open REAL, high REAL, low REAL, close REAL, volume REAL);
+             CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, symbol TEXT,
+                 event_date TEXT NOT NULL, event_time TEXT, session_timing TEXT,
+                 kind TEXT NOT NULL, source TEXT NOT NULL, source_id TEXT, title TEXT);
              INSERT INTO contracts (id, symbol, kind, exchange, currency, expiry, strike, right)
              VALUES (1, 'TEST', 'stock', 'SMART', 'USD', NULL, NULL, NULL);",
         )
