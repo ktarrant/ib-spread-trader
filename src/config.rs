@@ -17,7 +17,7 @@ use crate::domain::OptionRight;
 use crate::engine::{ExitRules, RunConfig, Strategy, Timing};
 use crate::execution::{Costs, DeltaSelector};
 use crate::signal::{
-    ContractionMeasure, RsiCross, SmaCross, VolatilityContractionBreakout,
+    ContractionMeasure, RsiCross, RsiTrendFiltered, SmaCross, VolatilityContractionBreakout,
     VolatilityContractionParams,
 };
 use crate::structure::Vertical;
@@ -66,6 +66,24 @@ pub enum SignalConfig {
         fast: usize,
         #[serde(default = "default_slow")]
         slow: usize,
+    },
+    /// RSI crossing a level, gated by a trend filter. Only fires the oversold
+    /// bounce when the broader trend agrees — the classic institutional filter.
+    RsiTrendFiltered {
+        #[serde(default = "default_rsi_period")]
+        period: usize,
+        #[serde(default = "default_rsi_level")]
+        level: f64,
+        /// Single SMA: price must be above (bullish) or below (bearish) this SMA.
+        /// Mutually exclusive with `trend_fast`/`trend_slow`.
+        #[serde(default)]
+        trend_period: Option<usize>,
+        /// Fast SMA for a dual-SMA trend gate. Requires `trend_slow`.
+        #[serde(default)]
+        trend_fast: Option<usize>,
+        /// Slow SMA for a dual-SMA trend gate. Requires `trend_fast`.
+        #[serde(default)]
+        trend_slow: Option<usize>,
     },
     /// A low-volatility regime on the previous bar, followed by a close above
     /// prior highs on elevated, time-of-day-normalised underlying volume.
@@ -284,6 +302,26 @@ impl StrategyConfig {
         let signal: Box<dyn crate::signal::Signal> = match self.signal {
             SignalConfig::RsiCross { period, level } => Box::new(RsiCross::new(period, level)?),
             SignalConfig::SmaCross { fast, slow } => Box::new(SmaCross::new(fast, slow)?),
+            SignalConfig::RsiTrendFiltered {
+                period,
+                level,
+                trend_period,
+                trend_fast,
+                trend_slow,
+            } => match (trend_period, trend_fast, trend_slow) {
+                (Some(p), None, None) => {
+                    Box::new(RsiTrendFiltered::with_price_sma(period, level, p)?)
+                }
+                (None, Some(f), Some(s)) => {
+                    Box::new(RsiTrendFiltered::with_sma_cross(period, level, f, s)?)
+                }
+                (None, None, None) => {
+                    bail!("rsi_trend_filtered needs either `trend_period` or `trend_fast`+`trend_slow`")
+                }
+                _ => {
+                    bail!("rsi_trend_filtered: use `trend_period` alone or `trend_fast`+`trend_slow` together, not both")
+                }
+            },
             SignalConfig::VolatilityContractionBreakout {
                 measure,
                 volatility_period,
@@ -468,6 +506,68 @@ commission_per_contract = 0.65
         .unwrap();
         let err = inverted.validate().unwrap_err();
         assert!(err.to_string().contains("short_delta"), "{err}");
+    }
+
+    #[test]
+    fn rsi_trend_filtered_with_price_sma_parses() {
+        let config: StrategyConfig = toml::from_str(
+            r#"
+symbols = ["SPY"]
+expiry = "2026-08-21"
+
+[signal]
+kind = "rsi_trend_filtered"
+period = 14
+level = 30.0
+trend_period = 50
+"#,
+        )
+        .unwrap();
+        config.validate().unwrap();
+        assert!(matches!(
+            config.signal,
+            SignalConfig::RsiTrendFiltered {
+                period: 14,
+                level,
+                trend_period: Some(50),
+                trend_fast: None,
+                trend_slow: None,
+            } if level == 30.0
+        ));
+    }
+
+    #[test]
+    fn rsi_trend_filtered_with_sma_cross_parses() {
+        let config: StrategyConfig = toml::from_str(
+            r#"
+symbols = ["SPY"]
+expiry = "2026-08-21"
+
+[signal]
+kind = "rsi_trend_filtered"
+period = 14
+level = 30.0
+trend_fast = 20
+trend_slow = 50
+"#,
+        )
+        .unwrap();
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn rsi_trend_filtered_without_trend_params_fails_validation() {
+        let config: StrategyConfig = toml::from_str(
+            r#"
+symbols = ["SPY"]
+expiry = "2026-08-21"
+
+[signal]
+kind = "rsi_trend_filtered"
+"#,
+        )
+        .unwrap();
+        assert!(config.validate().is_err());
     }
 
     #[test]

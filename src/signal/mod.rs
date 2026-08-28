@@ -16,10 +16,12 @@ use crate::data::ChainSnapshot;
 use crate::indicators::Cross;
 
 pub mod rsi_cross;
+pub mod rsi_trend_filtered;
 pub mod sma_cross;
 pub mod volatility_contraction;
 
 pub use rsi_cross::RsiCross;
+pub use rsi_trend_filtered::RsiTrendFiltered;
 pub use sma_cross::SmaCross;
 pub use volatility_contraction::{
     ContractionMeasure, VolatilityContractionBreakout, VolatilityContractionParams,
