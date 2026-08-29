@@ -327,6 +327,13 @@ impl ChainSeries {
         self.earnings.iter().find(|e| e.date >= date)
     }
 
+    /// The most recent earnings event on or before the given date — the other
+    /// half of an earnings-distance feature. `None` before the first event in the
+    /// window. `earnings` is sorted ascending, so scan from the back.
+    pub fn previous_earnings_from(&self, date: NaiveDate) -> Option<&EarningsEvent> {
+        self.earnings.iter().rev().find(|e| e.date <= date)
+    }
+
     /// All timestamps where either option or signal-underlying data exists,
     /// ascending. Each entry carries the option bar index if one exists at
     /// that timestamp. When the signal underlying is 5-min, this interleaves
