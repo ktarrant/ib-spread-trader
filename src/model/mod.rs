@@ -13,10 +13,14 @@
 //! Everything here is fed one option bar at a time, in order — the same
 //! discipline the signals keep, so look-ahead stays structurally impossible.
 
+pub mod candidates;
 pub mod distribution;
 pub mod features;
 pub mod price_model;
+pub mod ranker;
 
+pub use candidates::{Candidate, CandidateConfig, RankingFunnel, enumerate_verticals};
 pub use distribution::PriceDistribution;
 pub use features::{EarningsDistance, FeatureConfig, FeatureEngine, Features};
 pub use price_model::{LognormalDriftModel, LognormalModelConfig, PriceModel};
+pub use ranker::{RankedChoice, RankingConfig, rank};
