@@ -313,6 +313,56 @@ fn the_volatility_contraction_breakout_reproduces_its_recorded_run() {
     assert!((totals.total_pnl - 0.0).abs() < 0.01, "{}", totals.total_pnl);
 }
 
+/// The ranked price-target engine, pinned end to end. These numbers are
+/// deterministic and depend on `ranked_verticals.toml`'s default weights; a
+/// change to any of them means the model or its config changed, intentionally or
+/// otherwise. The funnel is the point of interest: half a million candidate
+/// verticals priced, cascading down to the 31 the model actually took.
+#[test]
+fn the_ranked_strategy_reproduces_its_recorded_run() {
+    let snapshot = snapshot_or_skip!();
+    let config = StrategyConfig::load("strategies/ranked_verticals.toml").unwrap();
+    let run_config = config.run_config();
+
+    let mut runs = Vec::new();
+    for symbol in &config.symbols {
+        let series = ChainSeries::load(&snapshot, symbol, config.expiry).unwrap();
+        let mut strategy = config.strategy().unwrap();
+        runs.push(engine::run_symbol(&series, &mut strategy, &run_config).unwrap());
+    }
+    let built = report::build(&config.name, config.expiry, &runs);
+    let totals = &built.totals;
+
+    assert_eq!(totals.symbols, 12);
+    assert_eq!(totals.trades, 31);
+
+    // The candidate funnel: enumerated -> priceable -> liquid -> within-loss ->
+    // positive-EV -> above-min-score -> chosen. Every vertical is bounded, so
+    // priceable equals enumerated.
+    let funnel = &totals.census.ranking;
+    assert_eq!(funnel.enumerated, 516_026);
+    assert_eq!(funnel.priceable, 516_026);
+    assert_eq!(funnel.liquid, 503_449);
+    assert_eq!(funnel.within_loss, 80_114);
+    assert_eq!(funnel.positive_ev, 4_567);
+    assert_eq!(funnel.above_min_score, 1_776);
+    assert_eq!(funnel.chosen, 31, "chosen must equal the trade count");
+
+    assert!((totals.total_pnl - (-1047.30)).abs() < 0.01, "{}", totals.total_pnl);
+    assert!((totals.traded_pnl - (-2468.00)).abs() < 0.01, "{}", totals.traded_pnl);
+    assert!((totals.settled_pnl - 1420.70).abs() < 0.01, "{}", totals.settled_pnl);
+
+    // Both orientations really do trade: mostly debits, at least one credit.
+    let credits = built.trades.iter().filter(|t| t.entry_debit < 0.0).count();
+    assert!(credits >= 1, "the ranker takes credit verticals too");
+
+    // Cash, the trade log and the curve must agree, ranked or staged.
+    let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
+    assert!((totals.total_pnl - booked).abs() < 1e-6);
+    let curve = report::combined_curve(&runs);
+    assert!((curve.last().unwrap().1 - totals.final_equity).abs() < 1e-6);
+}
+
 /// META's ladder reaches barely above the money on many bars, which is the real
 /// case selector rejection exists for. If this ever stops rejecting, check
 /// whether the ladder changed before assuming the selector improved.

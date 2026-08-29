@@ -390,6 +390,58 @@ exactly as predicted. META alone accounts for 16 rejections, AMD for 28.
 
 12 of 22 exits were expiry settlement, which is why that P&L is reported apart.
 
+## The ranked price-target engine is a second decision path, not a replacement
+
+`mode = "ranked"` in a strategy TOML swaps the `signal -> structure -> selector`
+pipeline for a different shape, while reusing the same bar loop, gates, timing,
+portfolio, and settlement. `Strategy` is an enum (`Staged` | `Ranked`); the staged
+path is byte-identical to before, which is why its golden tests never moved. Lives
+under `src/model/`.
+
+The ranked path, on each **option bar** (never the 5-min stock-only bars — the
+feature engine is 30-min only, so a session VWAP cannot double-count overlapping
+volume):
+
+1. **`FeatureEngine::observe`** advances its indicators once, in order, and emits a
+   `Features` vector — trend, VWAP distance, ATR, realized vol, ATM IV, put/call
+   skew, DTE, time-of-day, days to/since earnings. Every history-dependent field is
+   `Option`; a warming indicator or a one-sided ladder reports `None`, never a
+   fabricated value.
+2. **`PriceModel::forecast`** turns that into a `PriceDistribution` over the
+   underlying at a scoring horizon. The v1 `LognormalDriftModel` is a lognormal:
+   vol blended from realized vol and ATM IV and scaled to the horizon (floored by
+   ATR), with a small drift from trend, VWAP reversion, and skew. It is close to a
+   random walk unless its weights are turned up — the honest null. The trait is the
+   seam: a richer model drops in without the ranker or engine changing.
+3. **`enumerate_verticals`** walks every strike pair the ladder quotes, in both
+   orientations, keeping those that price to a non-zero debit, are bounded, quote
+   inside a relative-spread limit, and stay within the loss cap. Debit **and**
+   credit verticals both fall out of one double loop — orientation is read from the
+   sign of the entry debit, so credit spreads (which the fill model and portfolio
+   already price) need no special case.
+4. **`rank`** marks each candidate to model against the distribution and scores
+   `E[P/L] / max_loss`, with a positive-expectancy floor and a minimum score. The
+   best survivor is opened through the same next-bar timing and gates as staged.
+
+**Scoring is interim mark-to-model, not intrinsic-at-expiry.** `Spread::model_value`
+(beside `payoff_at`) sums the legs' Black-76 values with time value at a
+hypothesised forward, so a candidate is scored at a configurable pre-expiry horizon
+rather than only at expiry. The assumptions, all in `ranking`/`model` config:
+per-leg vol is held **sticky-strike** (each leg keeps its entry IV); the horizon is
+capped at expiry, where `model_value` degrades to `payoff_at`; a sampled spot maps
+to its forward by the current parity basis; and the risk denominator is the
+**structural** expiry max loss from `payoff_bounds` (capital committed), not the
+interim worst case.
+
+**The funnel is the census here.** `RankingFunnel` counts the cascade —
+enumerated -> priceable -> liquid -> within-loss -> positive-EV -> above-min-score
+-> chosen — and the report surfaces it beside the trade log, the way
+`signal_diagnostics` surfaces the staged gates. On the reference snapshot,
+`ranked_verticals.toml` prices ~516 k candidate verticals down to 31 taken, and the
+report carries a caveat that the result rests on the model's unvalidated
+assumptions. A ranked run whose `chosen` is a rounding error against `enumerated`
+has been floored, not backtested.
+
 ## Conventions from the capture side that this repo must not re-learn
 
 - **Timestamps are RFC3339 text with a literal `+00:00`.** Lexicographic `BETWEEN`

@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::engine::SymbolRun;
+use crate::model::RankingFunnel;
 use crate::portfolio::{ClosedTrade, ExitReason};
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -28,6 +29,9 @@ pub struct Census {
     pub signal_diagnostics: BTreeMap<String, usize>,
     pub rejections: BTreeMap<String, usize>,
     pub rejection_examples: BTreeMap<String, String>,
+    /// The ranked path's candidate funnel, summed across symbols. All zero for a
+    /// staged run.
+    pub ranking: RankingFunnel,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +114,7 @@ pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> R
         census.synthetic_exits += run.census.synthetic_exits;
         census.too_close_to_expiry += run.census.too_close_to_expiry;
         census.earnings_blackout += run.census.earnings_blackout;
+        census.ranking.merge(&run.census.ranking);
         for (gate, count) in &run.signal_diagnostics {
             *census.signal_diagnostics.entry(gate.clone()).or_default() += count;
         }
@@ -207,6 +212,22 @@ fn caveats(totals: &Totals, runs: &[SymbolRun]) -> Vec<String> {
              most of what this strategy asked for.",
             totals.trades
         ));
+    }
+    let funnel = &totals.census.ranking;
+    if funnel.enumerated > 0 {
+        out.push(
+            "This is a model-driven result: the ranking rests on the price model's \
+             assumptions — the vol blend, the drift weights, and sticky-strike interim \
+             marks — none of which are validated against realised outcomes here."
+                .to_string(),
+        );
+        if funnel.chosen == 0 {
+            out.push(format!(
+                "The model priced {} candidate vertical(s) but the expectancy and score \
+                 floors took none: this result is those floors, not the model's edge.",
+                funnel.enumerated
+            ));
+        }
     }
     if totals.trades > 0 && totals.commission_paid.abs() > totals.total_pnl.abs() {
         out.push(format!(
