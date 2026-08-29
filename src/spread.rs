@@ -74,6 +74,37 @@ impl Spread {
         self.legs.iter().map(|leg| leg.payoff_at(underlying)).sum()
     }
 
+    /// Mark-to-model value of the whole structure, in dollars, using Black-76
+    /// with time value at a hypothesised `forward` and a vol **per leg**.
+    ///
+    /// `leg_vols[i]` prices `legs[i]` — typically each leg's implied vol at entry,
+    /// carried sticky-strike to a future spot. This is the interim valuation the
+    /// ranker integrates against a price distribution: unlike `payoff_at` it keeps
+    /// the extrinsic value a pre-expiry exit would still command. At
+    /// `remaining_years -> 0` it converges to `payoff_at`, because `black76`
+    /// returns intrinsic once time runs out.
+    pub fn model_value(&self, forward: f64, remaining_years: f64, leg_vols: &[f64]) -> f64 {
+        debug_assert_eq!(
+            self.legs.len(),
+            leg_vols.len(),
+            "one vol per leg is required"
+        );
+        self.legs
+            .iter()
+            .zip(leg_vols)
+            .map(|(leg, &vol)| {
+                let price = crate::pricing::black76(
+                    forward,
+                    leg.strike,
+                    remaining_years,
+                    vol,
+                    leg.right.is_call(),
+                );
+                leg.side.sign() * price * leg.quantity as f64 * CONTRACT_MULTIPLIER
+            })
+            .sum()
+    }
+
     /// Underlying prices where the payoff can turn: every strike, plus a point
     /// below the lowest and above the highest to catch unbounded tails.
     fn breakpoints(&self) -> Vec<f64> {
@@ -251,5 +282,34 @@ mod tests {
     #[test]
     fn describe_names_the_structure() {
         assert_eq!(bull_call().describe(), "SPY +1C 750 -1C 755");
+    }
+
+    /// With no time left, the model value is the intrinsic payoff — the property
+    /// that lets the ranker score to any horizon, including expiry, with one call.
+    #[test]
+    fn model_value_converges_to_the_payoff_at_expiry() {
+        let s = bull_call();
+        for underlying in [700.0, 752.5, 755.0, 900.0] {
+            let modelled = s.model_value(underlying, 0.0, &[0.2, 0.2]);
+            assert!(
+                (modelled - s.payoff_at(underlying)).abs() < 1e-9,
+                "at {underlying}: {modelled} vs {}",
+                s.payoff_at(underlying)
+            );
+        }
+    }
+
+    /// Before expiry the value carries time premium, and it is exactly the
+    /// side-signed sum of the legs' Black-76 prices — which pins the signs, the
+    /// contract multiplier, and the per-leg vol wiring.
+    #[test]
+    fn model_value_sums_side_signed_black76_legs() {
+        use crate::pricing::black76;
+        let (f, t) = (752.5, 0.05);
+        let got = bull_call().model_value(f, t, &[0.2, 0.2]);
+        let want = (black76(f, 750.0, t, 0.2, true) - black76(f, 755.0, t, 0.2, true)) * 100.0;
+        assert!((got - want).abs() < 1e-9, "{got} vs {want}");
+        // A long debit vertical is worth something, but never more than its width.
+        assert!(got > 0.0 && got < 500.0, "{got}");
     }
 }

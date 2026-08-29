@@ -11,6 +11,9 @@
 //! "crossed up through 30" trigger at the start of every single backtest.
 
 use anyhow::{Result, bail};
+use chrono::{DateTime, NaiveDate, Utc};
+use chrono_tz::America::New_York;
+use std::collections::VecDeque;
 use ta::Next;
 use ta::indicators::{RelativeStrengthIndex, SimpleMovingAverage};
 
@@ -119,6 +122,154 @@ impl CrossDetector {
     }
 }
 
+/// Drop the oldest value once `capacity` is reached, then append.
+fn push_bounded(values: &mut VecDeque<f64>, value: f64, capacity: usize) {
+    if values.len() == capacity {
+        values.pop_front();
+    }
+    values.push_back(value);
+}
+
+/// Population standard deviation of the log returns across `closes`, per bar
+/// (not annualised). This is the realized-volatility measure the
+/// volatility-contraction signal uses, factored out so the `RealizedVol`
+/// indicator and that signal compute it identically.
+///
+/// `None` if fewer than two prices, or any price is non-positive — a log return
+/// through zero is undefined, and defaulting it to something would invent a move
+/// the tape never showed.
+pub fn realized_vol(closes: &[f64]) -> Option<f64> {
+    if closes.len() < 2 {
+        return None;
+    }
+    let returns: Option<Vec<f64>> = closes
+        .windows(2)
+        .map(|w| (w[0] > 0.0 && w[1] > 0.0).then(|| (w[1] / w[0]).ln()))
+        .collect();
+    let returns = returns?;
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance = returns
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / returns.len() as f64;
+    Some(variance.sqrt())
+}
+
+/// Realized volatility over a rolling window, silent until the window is full.
+///
+/// `period` is the number of **returns** in the window, so it holds `period + 1`
+/// closes — an n-return measure needs n+1 prices, the same n-vs-n+1 accounting as
+/// [`Rsi`]. The reading is the per-bar stddev of log returns; annualisation is
+/// the caller's to apply, since the bar interval is not the indicator's to know.
+#[derive(Debug, Clone)]
+pub struct RealizedVol {
+    closes: VecDeque<f64>,
+    period: usize,
+}
+
+impl RealizedVol {
+    pub fn new(period: usize) -> Result<Self> {
+        if period == 0 {
+            bail!("realized-vol period must be at least 1");
+        }
+        Ok(Self {
+            closes: VecDeque::with_capacity(period + 1),
+            period,
+        })
+    }
+
+    /// Feed one close. `None` until `period + 1` closes have been seen, or if any
+    /// close in the window is non-positive (see [`realized_vol`]).
+    pub fn next(&mut self, close: f64) -> Option<f64> {
+        push_bounded(&mut self.closes, close, self.period + 1);
+        if self.closes.len() < self.period + 1 {
+            return None;
+        }
+        let window: Vec<f64> = self.closes.iter().copied().collect();
+        realized_vol(&window)
+    }
+}
+
+/// Average True Range: the SMA of the true range, silent until the window is full.
+///
+/// True range is `max(high-low, |high-prev_close|, |low-prev_close|)`; the first
+/// bar has no previous close, so its true range is just `high-low`. The averaging
+/// is a plain SMA rather than Wilder's smoothing — it reuses [`Sma`]'s warm-up
+/// suppression, and this crate does not need the extra pinning a second smoothing
+/// scheme would demand.
+#[derive(Debug, Clone)]
+pub struct Atr {
+    true_range: Sma,
+    prev_close: Option<f64>,
+}
+
+impl Atr {
+    pub fn new(period: usize) -> Result<Self> {
+        Ok(Self {
+            true_range: Sma::new(period)?,
+            prev_close: None,
+        })
+    }
+
+    /// Feed one bar's high/low/close. `None` until `period` bars have been seen.
+    pub fn next(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+        let tr = match self.prev_close {
+            Some(prev) => (high - low)
+                .max((high - prev).abs())
+                .max((low - prev).abs()),
+            None => high - low,
+        };
+        self.prev_close = Some(close);
+        self.true_range.next(tr)
+    }
+}
+
+/// Session-anchored VWAP: the volume-weighted average of the typical price since
+/// the current New York trading session began.
+///
+/// It resets when the New York calendar date changes, so each session is priced
+/// against its own open rather than dragging yesterday's mean forward. Typical
+/// price is `(high + low + close) / 3`. Bars with non-positive volume contribute
+/// nothing — underlying volume comes only from `trades` rows, and a bid/ask row's
+/// sentinel volume must not enter the mean.
+///
+/// The reading is `None` until the session has accumulated any real volume.
+#[derive(Debug, Clone, Default)]
+pub struct Vwap {
+    session: Option<NaiveDate>,
+    cumulative_pv: f64,
+    cumulative_volume: f64,
+}
+
+impl Vwap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn next(
+        &mut self,
+        ts: DateTime<Utc>,
+        high: f64,
+        low: f64,
+        close: f64,
+        volume: f64,
+    ) -> Option<f64> {
+        let day = ts.with_timezone(&New_York).date_naive();
+        if self.session != Some(day) {
+            self.session = Some(day);
+            self.cumulative_pv = 0.0;
+            self.cumulative_volume = 0.0;
+        }
+        if volume > 0.0 && volume.is_finite() {
+            let typical = (high + low + close) / 3.0;
+            self.cumulative_pv += typical * volume;
+            self.cumulative_volume += volume;
+        }
+        (self.cumulative_volume > 0.0).then(|| self.cumulative_pv / self.cumulative_volume)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +369,73 @@ mod tests {
         back.update(-5.0);
         assert_eq!(back.update(0.0), None);
         assert_eq!(back.update(-2.0), None, "came back the way it arrived");
+    }
+
+    /// Two symmetric returns put the population stddev at half their spread, a
+    /// value that can be checked by hand independent of the loop above.
+    #[test]
+    fn realized_vol_is_the_population_stddev_of_log_returns() {
+        let got = realized_vol(&[100.0, 110.0, 105.0]).unwrap();
+        let r1: f64 = (110.0f64 / 100.0).ln();
+        let r2: f64 = (105.0f64 / 110.0).ln();
+        assert!((got - (r1 - r2).abs() / 2.0).abs() < 1e-12, "{got}");
+    }
+
+    #[test]
+    fn realized_vol_refuses_short_or_non_positive_windows() {
+        assert_eq!(realized_vol(&[100.0]), None, "needs at least two prices");
+        assert_eq!(
+            realized_vol(&[100.0, -5.0, 105.0]),
+            None,
+            "a return through zero is undefined"
+        );
+    }
+
+    #[test]
+    fn realized_vol_indicator_stays_silent_until_its_window_is_full() {
+        let mut rv = RealizedVol::new(2).unwrap();
+        assert_eq!(rv.next(100.0), None);
+        assert_eq!(rv.next(110.0), None, "two returns need three closes");
+        let reading = rv.next(105.0).unwrap();
+        assert!((reading - realized_vol(&[100.0, 110.0, 105.0]).unwrap()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn atr_averages_true_range_and_suppresses_warm_up() {
+        let mut atr = Atr::new(2).unwrap();
+        assert_eq!(atr.next(10.0, 8.0, 9.0), None, "window not full");
+        // TR = max(11-9, |11-9|, |9-9|) = 2; window [2, 2].
+        assert_eq!(atr.next(11.0, 9.0, 10.0), Some(2.0));
+        // TR = max(12-9, |12-10|, |9-10|) = 3; window [2, 3].
+        assert_eq!(atr.next(12.0, 9.0, 11.0), Some(2.5));
+    }
+
+    #[test]
+    fn vwap_accumulates_within_a_session_and_resets_across_days() {
+        use chrono::TimeZone;
+        let mut vwap = Vwap::new();
+        let day1_open = Utc.with_ymd_and_hms(2026, 8, 19, 15, 0, 0).unwrap();
+        let day1_late = Utc.with_ymd_and_hms(2026, 8, 19, 15, 30, 0).unwrap();
+        let day2 = Utc.with_ymd_and_hms(2026, 8, 20, 15, 0, 0).unwrap();
+
+        assert_eq!(vwap.next(day1_open, 10.0, 8.0, 9.0, 100.0), Some(9.0));
+        // (900 + 11*300) / 400 = 10.5
+        assert_eq!(vwap.next(day1_late, 12.0, 10.0, 11.0, 300.0), Some(10.5));
+        // A new session forgets the prior mean entirely.
+        assert_eq!(vwap.next(day2, 20.0, 18.0, 19.0, 50.0), Some(19.0));
+    }
+
+    #[test]
+    fn vwap_ignores_sentinel_volume() {
+        use chrono::TimeZone;
+        let mut vwap = Vwap::new();
+        let ts = Utc.with_ymd_and_hms(2026, 8, 19, 15, 0, 0).unwrap();
+        assert_eq!(vwap.next(ts, 10.0, 8.0, 9.0, 0.0), None, "no real volume yet");
+        assert_eq!(vwap.next(ts, 10.0, 8.0, 9.0, 100.0), Some(9.0));
+        assert_eq!(
+            vwap.next(ts, 50.0, 40.0, 45.0, 0.0),
+            Some(9.0),
+            "a zero-volume bar cannot move the mean"
+        );
     }
 }

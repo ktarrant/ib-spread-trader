@@ -142,10 +142,11 @@ impl ChainSnapshot {
             .filter(move |q| q.right == right && q.delta.is_some())
     }
 
-    /// ATM implied volatility, matching `ib-option-viz`: take only the OTM side
-    /// of the smile and linearly interpolate at zero log-moneyness. OTM prices
-    /// avoid deep-ITM quotes whose value is almost entirely intrinsic.
-    pub fn atm_implied_vol(&self) -> Option<f64> {
+    /// The out-of-the-money half of the vol smile as `(log-moneyness, iv)` points,
+    /// sorted ascending. OTM prices are used because deep-ITM quotes are almost
+    /// entirely intrinsic and carry no clean vol. `atm_implied_vol` and
+    /// `put_call_skew` both read from here, so they agree on what the smile is.
+    fn otm_smile(&self) -> Vec<(f64, f64)> {
         let mut smile: Vec<(f64, f64)> = self
             .quotes
             .iter()
@@ -161,25 +162,55 @@ impl ChainSnapshot {
             })
             .collect();
         smile.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-        let &(first_x, first_iv) = smile.first()?;
-        if 0.0 <= first_x {
-            return Some(first_iv);
-        }
-        let &(last_x, last_iv) = smile.last()?;
-        if 0.0 >= last_x {
-            return Some(last_iv);
-        }
-
-        smile.windows(2).find_map(|pair| {
-            let (lo_x, lo_iv) = pair[0];
-            let (hi_x, hi_iv) = pair[1];
-            (lo_x <= 0.0 && 0.0 <= hi_x).then(|| {
-                let weight = -lo_x / (hi_x - lo_x);
-                lo_iv + weight * (hi_iv - lo_iv)
-            })
-        })
+        smile
     }
+
+    /// ATM implied volatility, matching `ib-option-viz`: interpolate the OTM smile
+    /// at zero log-moneyness.
+    pub fn atm_implied_vol(&self) -> Option<f64> {
+        interp_smile_iv(&self.otm_smile(), 0.0)
+    }
+
+    /// Put/call skew: OTM put IV minus OTM call IV at a symmetric distance from
+    /// the money (`moneyness` is a log-moneyness magnitude, e.g. 0.05 for ~5%).
+    /// Positive is the usual equity shape — downside protection bid richer than
+    /// upside. `None` unless the smile has quotes on **both** wings, since a
+    /// one-sided ladder cannot measure a skew (the clamp would compare a wing
+    /// against itself and invent a zero).
+    pub fn put_call_skew(&self, moneyness: f64) -> Option<f64> {
+        let m = moneyness.abs();
+        let smile = self.otm_smile();
+        let has_put_side = smile.iter().any(|&(x, _)| x < 0.0);
+        let has_call_side = smile.iter().any(|&(x, _)| x > 0.0);
+        if !has_put_side || !has_call_side {
+            return None;
+        }
+        let put_iv = interp_smile_iv(&smile, -m)?;
+        let call_iv = interp_smile_iv(&smile, m)?;
+        Some(put_iv - call_iv)
+    }
+}
+
+/// Linearly interpolate a sorted `(log-moneyness, iv)` smile at `x`, clamping to
+/// the nearest quoted end when `x` is outside the quoted range. `None` only when
+/// the smile is empty.
+fn interp_smile_iv(smile: &[(f64, f64)], x: f64) -> Option<f64> {
+    let &(first_x, first_iv) = smile.first()?;
+    if x <= first_x {
+        return Some(first_iv);
+    }
+    let &(last_x, last_iv) = smile.last()?;
+    if x >= last_x {
+        return Some(last_iv);
+    }
+    smile.windows(2).find_map(|pair| {
+        let (lo_x, lo_iv) = pair[0];
+        let (hi_x, hi_iv) = pair[1];
+        (lo_x <= x && x <= hi_x).then(|| {
+            let weight = (x - lo_x) / (hi_x - lo_x);
+            lo_iv + weight * (hi_iv - lo_iv)
+        })
+    })
 }
 
 /// A whole symbol/expiry, loaded once.
@@ -734,6 +765,55 @@ mod tests {
         let hi = (101.0_f64 / 100.0).ln();
         let expected = 0.20 + (-lo / (hi - lo)) * (0.22 - 0.20);
         assert!((bar.atm_implied_vol().unwrap() - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn put_call_skew_reads_the_two_wings() {
+        let quote = |strike: f64, right: OptionRight, iv: f64| OptionQuote {
+            contract_id: (strike as i64) * 10 + i64::from(right.is_call()),
+            strike,
+            right,
+            bid: 1.0,
+            ask: 1.2,
+            mid: 1.1,
+            implied_vol: Some(iv),
+            delta: Some(0.5),
+        };
+        let snap = |quotes| ChainSnapshot {
+            symbol: "TEST".into(),
+            ts: Utc::now(),
+            underlying: UnderlyingBar::default(),
+            forward: 100.0,
+            residual_mad: 0.0,
+            paired_strikes: 4,
+            year_fraction: 0.1,
+            quotes,
+        };
+
+        // Puts bid richer than calls: a positive equity skew of roughly the raw
+        // 0.10 wing difference.
+        let skewed = snap(vec![
+            quote(90.0, OptionRight::Put, 0.35),
+            quote(95.0, OptionRight::Put, 0.30),
+            quote(105.0, OptionRight::Call, 0.20),
+            quote(110.0, OptionRight::Call, 0.18),
+        ]);
+        let skew = skewed.put_call_skew(0.05).unwrap();
+        assert!((0.08..=0.12).contains(&skew), "{skew}");
+
+        // A flat smile is (near) zero skew.
+        let flat = snap(vec![
+            quote(95.0, OptionRight::Put, 0.25),
+            quote(105.0, OptionRight::Call, 0.25),
+        ]);
+        assert!(flat.put_call_skew(0.05).unwrap().abs() < 1e-9);
+
+        // A ladder with only one wing quoted cannot measure a skew.
+        let one_sided = snap(vec![
+            quote(105.0, OptionRight::Call, 0.20),
+            quote(110.0, OptionRight::Call, 0.18),
+        ]);
+        assert_eq!(one_sided.put_call_skew(0.05), None);
     }
 
     #[test]

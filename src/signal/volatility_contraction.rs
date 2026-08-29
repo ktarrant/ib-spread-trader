@@ -131,22 +131,8 @@ impl VolatilityContractionBreakout {
                 Some(4.0 * variance.sqrt() / mean)
             }
             ContractionMeasure::RealizedVolatility => {
-                let returns: Option<Vec<f64>> = self
-                    .closes
-                    .iter()
-                    .zip(self.closes.iter().skip(1))
-                    .map(|(previous, current)| {
-                        (*previous > 0.0 && *current > 0.0).then(|| (current / previous).ln())
-                    })
-                    .collect();
-                let returns = returns?;
-                let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-                let variance = returns
-                    .iter()
-                    .map(|value| (value - mean).powi(2))
-                    .sum::<f64>()
-                    / returns.len() as f64;
-                Some(variance.sqrt())
+                let closes: Vec<f64> = self.closes.iter().copied().collect();
+                crate::indicators::realized_vol(&closes)
             }
         }
     }
