@@ -1,0 +1,67 @@
+# Price-target ranked verticals.
+#
+# Instead of a directional trigger picking one structure, this mode forecasts a
+# probability distribution over the underlying at a scoring horizon, enumerates
+# every debit and credit vertical the ladder can supply, marks each to model
+# against the distribution, and takes the one with the best expected P/L per unit
+# of risk — subject to loss and liquidity limits.
+
+name    = "ranked-verticals"
+symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR"]
+expiry  = "2026-08-21"
+initial_cash = 100000.0
+mode    = "ranked"
+
+# [execution]/[exit]/[costs] are shared with the staged mode: timing, the
+# position cap, the entry gates, and the exit rules all still apply.
+[execution]
+timing = "next_bar"
+max_open_positions = 1
+min_entry_days_before_expiry = 2
+earnings_blackout_days = 3
+
+[exit]
+profit_target_pct = 50.0
+stop_loss_pct = 100.0
+close_before_earnings = true
+min_days_before_expiry = 1
+
+[costs]
+commission_per_contract = 0.65
+
+# The indicators feeding the model.
+[features]
+trend_fast = 10
+trend_slow = 30
+atr_period = 14
+realized_vol_period = 20
+skew_moneyness = 0.05
+
+# The lognormal drift model's weights. Close to a random walk unless turned up:
+# vol is a 50/50 blend of realized vol and ATM IV, with a modest trend drift and
+# a first-order skew tilt.
+[model]
+bars_per_year = 3276.0
+realized_vol_weight = 0.5
+fallback_vol = 0.30
+trend_weight = 1.0
+vwap_reversion = 0.0
+skew_weight = 0.5
+grid_sigma = 4.0
+grid_points = 101
+
+# Which verticals to enumerate, and the liquidity/loss limits each must clear.
+[candidates]
+rights = ["call", "put"]
+allow_debit = true
+allow_credit = true
+min_width = 0.0
+max_relative_spread = 0.35
+max_loss = 500.0
+quantity = 1
+
+# The scoring horizon (capped at expiry) and the thresholds a trade must clear.
+[ranking]
+horizon_days = 5.0
+min_score = 0.10
+min_expected_pl = 0.0

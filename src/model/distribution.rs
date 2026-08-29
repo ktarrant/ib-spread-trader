@@ -21,7 +21,7 @@ impl PriceDistribution {
             return None;
         }
         let total: f64 = weights.iter().sum();
-        if !(total > 0.0) {
+        if !total.is_finite() || total <= 0.0 {
             return None;
         }
         let probs = weights.iter().map(|w| w / total).collect();

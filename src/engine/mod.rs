@@ -23,8 +23,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::data::{ChainSeries, ChainSnapshot, Quality};
+use crate::data::{ChainSeries, ChainSnapshot, EarningsEvent, Quality};
 use crate::execution::{Costs, Reject, Selector};
+use crate::model::{
+    CandidateConfig, EarningsDistance, FeatureEngine, PriceModel, RankingConfig, RankingFunnel,
+    enumerate_verticals, rank,
+};
 use crate::portfolio::{ExitReason, Portfolio};
 use crate::signal::{MarketView, Signal};
 use crate::spread::Spread;
@@ -77,12 +81,86 @@ impl Default for RunConfig {
     }
 }
 
-/// One strategy's three stages. Signals are stateful, so each symbol needs its own.
-pub struct Strategy {
+/// The staged `signal -> structure -> selector` pipeline. Signals are stateful,
+/// so each symbol needs its own.
+pub struct StagedStrategy {
     pub name: String,
     pub signal: Box<dyn Signal>,
     pub structure: Box<dyn Structure>,
     pub selector: Box<dyn Selector>,
+}
+
+/// The ranked price-target pipeline: a feature engine feeds a price model, whose
+/// distribution ranks the verticals the chain can supply. Also stateful (the
+/// feature engine carries indicator state), so each symbol needs its own.
+pub struct RankedStrategy {
+    pub name: String,
+    pub features: FeatureEngine,
+    pub model: Box<dyn PriceModel>,
+    pub candidates: CandidateConfig,
+    pub ranking: RankingConfig,
+}
+
+/// One symbol's decision engine, in one of two shapes. The bar loop, gates,
+/// timing and settlement are shared; only how a bar becomes an entry differs.
+pub enum Strategy {
+    Staged(StagedStrategy),
+    /// Boxed: the ranked strategy carries a feature engine's worth of indicator
+    /// state, much larger than the staged stages' three trait objects.
+    Ranked(Box<RankedStrategy>),
+}
+
+impl Strategy {
+    pub fn name(&self) -> &str {
+        match self {
+            Strategy::Staged(s) => &s.name,
+            Strategy::Ranked(r) => &r.name,
+        }
+    }
+
+    /// Signal-internal gate counts. The ranked path reports its funnel through the
+    /// census instead, so this is empty for it.
+    fn signal_diagnostics(&self) -> BTreeMap<String, usize> {
+        match self {
+            Strategy::Staged(s) => s.signal.diagnostics(),
+            Strategy::Ranked(_) => BTreeMap::new(),
+        }
+    }
+}
+
+/// The universal entry gates, shared by both pipelines: a bar may be refused
+/// because a position is already open, or it is too close to expiry or earnings.
+enum EntryGate {
+    Open,
+    PositionLimit,
+    TooCloseToExpiry,
+    EarningsBlackout,
+}
+
+fn entry_gate(
+    open_positions: usize,
+    exiting: usize,
+    config: &RunConfig,
+    expiry_instant: DateTime<Utc>,
+    bar_ts: DateTime<Utc>,
+    next_earnings: Option<&EarningsEvent>,
+) -> EntryGate {
+    let open_after_exits = open_positions - exiting;
+    if open_after_exits >= config.max_open_positions {
+        EntryGate::PositionLimit
+    } else if config
+        .min_entry_days_before_expiry
+        .is_some_and(|min_days| (expiry_instant - bar_ts).num_days() < min_days as i64)
+    {
+        EntryGate::TooCloseToExpiry
+    } else if config
+        .earnings_blackout_days
+        .is_some_and(|days| exits::in_earnings_blackout(bar_ts, next_earnings, days))
+    {
+        EntryGate::EarningsBlackout
+    } else {
+        EntryGate::Open
+    }
 }
 
 /// A decision taken on one bar, to be executed on the next.
@@ -113,6 +191,9 @@ pub struct Census {
     pub earnings_blackout: usize,
     /// Closed at intrinsic because option quotes were unavailable.
     pub synthetic_exits: usize,
+    /// The ranked path's candidate funnel, accumulated across bars. Zeroed for
+    /// the staged path, which reports through `triggers`/`declined`/`rejections`.
+    pub ranking: RankingFunnel,
 }
 
 impl Census {
@@ -267,41 +348,99 @@ pub fn run_symbol(
                 }
             }
 
-            // 4. Signal — evaluate on this bar, then pick up any trigger carried
-            //    from a stock-only bar if the current bar didn't fire.
-            let view = MarketView {
-                symbol: &series.symbol,
-                chain: &bar,
-            };
-            let current_trigger = strategy.signal.evaluate(&view);
-            let trigger = current_trigger.or(carried_trigger.take());
-            carried_trigger = None;
-
+            // 4. Decide. The staged path evaluates its signal (picking up any
+            //    trigger carried from a stock-only bar) and resolves a structure;
+            //    the ranked path forecasts a distribution and ranks the ladder.
+            //    Both go through the same entry gates.
             let mut entering = None;
-            if let Some(trigger) = trigger {
-                census.triggers += 1;
-                match strategy.structure.build(&trigger, &view) {
-                    None => census.declined += 1,
-                    Some(spec) => {
-                        let open_after_exits = portfolio.open.len() - exiting.len();
-                        if open_after_exits >= config.max_open_positions {
-                            census.at_position_limit += 1;
-                        } else if config
-                            .min_entry_days_before_expiry
-                            .is_some_and(|min_days| {
-                                (series.expiry_instant() - bar.ts).num_days()
-                                    < min_days as i64
-                            })
-                        {
-                            census.too_close_to_expiry += 1;
-                        } else if config.earnings_blackout_days.is_some_and(|days| {
-                            exits::in_earnings_blackout(bar.ts, next_earnings, days)
-                        }) {
-                            census.earnings_blackout += 1;
-                        } else {
-                            match strategy.selector.resolve(&spec, &bar) {
-                                Ok(spread) => entering = Some(Intent::Open(spread)),
-                                Err(reject) => census.reject(&reject),
+            match strategy {
+                Strategy::Staged(staged) => {
+                    let view = MarketView {
+                        symbol: &series.symbol,
+                        chain: &bar,
+                    };
+                    let current_trigger = staged.signal.evaluate(&view);
+                    let trigger = current_trigger.or(carried_trigger.take());
+                    carried_trigger = None;
+
+                    if let Some(trigger) = trigger {
+                        census.triggers += 1;
+                        match staged.structure.build(&trigger, &view) {
+                            None => census.declined += 1,
+                            Some(spec) => match entry_gate(
+                                portfolio.open.len(),
+                                exiting.len(),
+                                config,
+                                series.expiry_instant(),
+                                bar.ts,
+                                next_earnings,
+                            ) {
+                                EntryGate::PositionLimit => census.at_position_limit += 1,
+                                EntryGate::TooCloseToExpiry => census.too_close_to_expiry += 1,
+                                EntryGate::EarningsBlackout => census.earnings_blackout += 1,
+                                EntryGate::Open => match staged.selector.resolve(&spec, &bar) {
+                                    Ok(spread) => entering = Some(Intent::Open(spread)),
+                                    Err(reject) => census.reject(&reject),
+                                },
+                            },
+                        }
+                    }
+                }
+                Strategy::Ranked(ranked) => {
+                    // Advance the feature engine every option bar, in order,
+                    // whether or not the gate lets us act — its indicators are
+                    // stateful, so a skipped bar would corrupt every later reading.
+                    let bar_date = bar.ts.date_naive();
+                    let earnings = EarningsDistance {
+                        days_to: next_earnings.map(|e| (e.date - bar_date).num_days()),
+                        days_since: series
+                            .previous_earnings_from(bar_date)
+                            .map(|e| (bar_date - e.date).num_days()),
+                    };
+                    let features = ranked.features.observe(&bar, earnings);
+
+                    match entry_gate(
+                        portfolio.open.len(),
+                        exiting.len(),
+                        config,
+                        series.expiry_instant(),
+                        bar.ts,
+                        next_earnings,
+                    ) {
+                        EntryGate::PositionLimit => census.at_position_limit += 1,
+                        EntryGate::TooCloseToExpiry => census.too_close_to_expiry += 1,
+                        EntryGate::EarningsBlackout => census.earnings_blackout += 1,
+                        EntryGate::Open => {
+                            let horizon_years = (ranked.ranking.horizon_days / 365.25)
+                                .min(features.year_fraction)
+                                .max(0.0);
+                            let remaining_years =
+                                (features.year_fraction - horizon_years).max(0.0);
+                            let forward_scale = if features.spot > 0.0 {
+                                features.forward / features.spot
+                            } else {
+                                1.0
+                            };
+                            let dist = ranked.model.forecast(&features, horizon_years);
+
+                            let mut funnel = RankingFunnel::default();
+                            let candidates = enumerate_verticals(
+                                &bar,
+                                &config.costs,
+                                &ranked.candidates,
+                                &mut funnel,
+                            );
+                            let choice = rank(
+                                candidates,
+                                &dist,
+                                remaining_years,
+                                forward_scale,
+                                &ranked.ranking,
+                                &mut funnel,
+                            );
+                            census.ranking.merge(&funnel);
+                            if let Some(choice) = choice {
+                                entering = Some(Intent::Open(choice.candidate.spread));
                             }
                         }
                     }
@@ -331,8 +470,10 @@ pub fn run_symbol(
                     }
                 }
             }
-        } else {
+        } else if let Strategy::Staged(staged) = strategy {
             // ---- Stock-only bar: advance the signal, carry any trigger ----
+            // Only the staged path uses the finer 5-min stream; the ranked
+            // feature engine is driven from the 30-min option bars alone.
             let Some(bar) = series.stock_only_snapshot(ts) else {
                 continue;
             };
@@ -340,7 +481,7 @@ pub fn run_symbol(
                 symbol: &series.symbol,
                 chain: &bar,
             };
-            let trigger = strategy.signal.evaluate(&view);
+            let trigger = staged.signal.evaluate(&view);
             if trigger.is_some() {
                 carried_trigger = trigger;
             }
@@ -365,10 +506,10 @@ pub fn run_symbol(
     }
 
     let final_equity = portfolio.cash;
-    let signal_diagnostics = strategy.signal.diagnostics();
+    let signal_diagnostics = strategy.signal_diagnostics();
     Ok(SymbolRun {
         symbol: series.symbol.clone(),
-        strategy: strategy.name.clone(),
+        strategy: strategy.name().to_string(),
         expiry: series.expiry,
         bars: timeline.len(),
         first_ts: timeline.first().map(|&(ts, _)| ts),
@@ -643,7 +784,7 @@ pub mod testing {
         use crate::execution::DeltaSelector;
         use crate::signal::RsiCross;
         use crate::structure::Vertical;
-        Strategy {
+        Strategy::Staged(StagedStrategy {
             name: "rsi-bull-call".into(),
             signal: Box::new(RsiCross::new(14, 30.0).unwrap()),
             structure: Box::new(Vertical::bull_call(0.50, 0.30, 1).unwrap()),
@@ -651,6 +792,14 @@ pub mod testing {
                 delta_tolerance: 0.07,
                 max_debit: None,
             }),
+        })
+    }
+
+    /// The staged stages of a test strategy, for tests that swap one out.
+    pub fn staged_mut(strategy: &mut Strategy) -> &mut StagedStrategy {
+        match strategy {
+            Strategy::Staged(staged) => staged,
+            Strategy::Ranked(_) => panic!("expected a staged strategy"),
         }
     }
 }
@@ -787,7 +936,7 @@ mod tests {
 
         let (_snap, series) = series("flat", &v_shaped_path(), 120.0);
         let mut strategy = bull_call_strategy();
-        strategy.signal = Box::new(Silent);
+        staged_mut(&mut strategy).signal = Box::new(Silent);
         let run = run_symbol(&series, &mut strategy, &config()).unwrap();
 
         assert_eq!(run.final_equity, run.initial_cash);
@@ -852,7 +1001,7 @@ mod tests {
 
         let (_snap, series) = series("cap", &v_shaped_path(), 120.0);
         let mut strategy = bull_call_strategy();
-        strategy.signal = Box::new(Always);
+        staged_mut(&mut strategy).signal = Box::new(Always);
         let run = run_symbol(
             &series,
             &mut strategy,
@@ -883,7 +1032,7 @@ mod tests {
         let (_snap, series) = series("declined", &v_shaped_path(), 120.0);
         let mut strategy = bull_call_strategy();
         // Bear put against a bullish RSI recovery: never agrees.
-        strategy.structure = Box::new(Vertical::bear_put(0.50, 0.30, 1).unwrap());
+        staged_mut(&mut strategy).structure = Box::new(Vertical::bear_put(0.50, 0.30, 1).unwrap());
         let run = run_symbol(&series, &mut strategy, &config()).unwrap();
 
         assert_eq!(run.census.triggers, 1);
@@ -903,7 +1052,7 @@ mod tests {
         use crate::execution::DeltaSelector;
         let (_snap, series) = series("unreachable", &v_shaped_path(), 120.0);
         let mut strategy = bull_call_strategy();
-        strategy.selector = Box::new(DeltaSelector {
+        staged_mut(&mut strategy).selector = Box::new(DeltaSelector {
             delta_tolerance: 1e-6,
             max_debit: None,
         });

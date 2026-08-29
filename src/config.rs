@@ -14,8 +14,12 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::domain::OptionRight;
-use crate::engine::{ExitRules, RunConfig, Strategy, Timing};
+use crate::engine::{ExitRules, RankedStrategy, RunConfig, StagedStrategy, Strategy, Timing};
 use crate::execution::{Costs, DeltaSelector};
+use crate::model::{
+    CandidateConfig, FeatureConfig, FeatureEngine, LognormalDriftModel, LognormalModelConfig,
+    RankingConfig,
+};
 use crate::signal::{
     ContractionMeasure, RsiCross, RsiTrendFiltered, SmaCross, VolatilityContractionBreakout,
     VolatilityContractionParams,
@@ -32,6 +36,10 @@ pub struct StrategyConfig {
     pub expiry: NaiveDate,
     #[serde(default = "default_cash")]
     pub initial_cash: f64,
+    /// Which decision engine to run. Absent means the staged pipeline, so every
+    /// existing config keeps working untouched.
+    #[serde(default)]
+    pub mode: StrategyMode,
     #[serde(default)]
     pub signal: SignalConfig,
     #[serde(default)]
@@ -42,6 +50,26 @@ pub struct StrategyConfig {
     pub exit: ExitConfig,
     #[serde(default)]
     pub costs: CostsConfig,
+    /// Ranked-mode sections. Ignored in staged mode.
+    #[serde(default)]
+    pub features: FeaturesConfig,
+    #[serde(default)]
+    pub model: ModelConfig,
+    #[serde(default)]
+    pub candidates: CandidatesConfig,
+    #[serde(default)]
+    pub ranking: RankingSectionConfig,
+}
+
+/// Which decision engine a config selects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyMode {
+    /// The `signal -> structure -> selector` pipeline.
+    #[default]
+    Staged,
+    /// The price-target engine: features -> distribution -> ranked verticals.
+    Ranked,
 }
 
 fn default_name() -> String {
@@ -280,6 +308,181 @@ impl Default for CostsConfig {
     }
 }
 
+/// `[features]` — the indicators feeding the price model. Container-level
+/// `#[serde(default)]` lets a partial section fill the rest from `Default`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FeaturesConfig {
+    pub trend_fast: usize,
+    pub trend_slow: usize,
+    pub atr_period: usize,
+    pub realized_vol_period: usize,
+    pub skew_moneyness: f64,
+}
+
+impl Default for FeaturesConfig {
+    fn default() -> Self {
+        let d = FeatureConfig::default();
+        Self {
+            trend_fast: d.trend_fast,
+            trend_slow: d.trend_slow,
+            atr_period: d.atr_period,
+            realized_vol_period: d.realized_vol_period,
+            skew_moneyness: d.skew_moneyness,
+        }
+    }
+}
+
+impl FeaturesConfig {
+    fn to_runtime(self) -> FeatureConfig {
+        FeatureConfig {
+            trend_fast: self.trend_fast,
+            trend_slow: self.trend_slow,
+            atr_period: self.atr_period,
+            realized_vol_period: self.realized_vol_period,
+            skew_moneyness: self.skew_moneyness,
+        }
+    }
+}
+
+/// `[model]` — the lognormal drift model's weights.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelConfig {
+    pub bars_per_year: f64,
+    pub realized_vol_weight: f64,
+    pub fallback_vol: f64,
+    pub trend_weight: f64,
+    pub vwap_reversion: f64,
+    pub skew_weight: f64,
+    pub grid_sigma: f64,
+    pub grid_points: usize,
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        let d = LognormalModelConfig::default();
+        Self {
+            bars_per_year: d.bars_per_year,
+            realized_vol_weight: d.realized_vol_weight,
+            fallback_vol: d.fallback_vol,
+            trend_weight: d.trend_weight,
+            vwap_reversion: d.vwap_reversion,
+            skew_weight: d.skew_weight,
+            grid_sigma: d.grid_sigma,
+            grid_points: d.grid_points,
+        }
+    }
+}
+
+impl ModelConfig {
+    fn to_runtime(self) -> LognormalModelConfig {
+        LognormalModelConfig {
+            bars_per_year: self.bars_per_year,
+            realized_vol_weight: self.realized_vol_weight,
+            fallback_vol: self.fallback_vol,
+            trend_weight: self.trend_weight,
+            vwap_reversion: self.vwap_reversion,
+            skew_weight: self.skew_weight,
+            grid_sigma: self.grid_sigma,
+            grid_points: self.grid_points,
+        }
+    }
+}
+
+/// `[candidates]` — which verticals to enumerate and the liquidity/loss limits.
+/// `max_width` is optional so "no cap" stays JSON-serializable (an infinity
+/// would not).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CandidatesConfig {
+    pub rights: Vec<OptionRight>,
+    pub allow_debit: bool,
+    pub allow_credit: bool,
+    pub min_width: f64,
+    pub max_width: Option<f64>,
+    pub max_relative_spread: f64,
+    pub max_loss: f64,
+    pub quantity: u32,
+}
+
+impl Default for CandidatesConfig {
+    fn default() -> Self {
+        let d = CandidateConfig::default();
+        Self {
+            rights: d.rights,
+            allow_debit: d.allow_debit,
+            allow_credit: d.allow_credit,
+            min_width: d.min_width,
+            // The runtime default is unbounded; expose that as "no cap".
+            max_width: None,
+            max_relative_spread: d.max_relative_spread,
+            max_loss: d.max_loss,
+            quantity: d.quantity,
+        }
+    }
+}
+
+impl CandidatesConfig {
+    fn to_runtime(&self) -> Result<CandidateConfig> {
+        if self.rights.is_empty() {
+            bail!("`candidates.rights` is empty; nothing to enumerate");
+        }
+        if !self.allow_debit && !self.allow_credit {
+            bail!("`candidates` allows neither debit nor credit verticals");
+        }
+        if self.quantity < 1 {
+            bail!("`candidates.quantity` must be at least 1");
+        }
+        if self.max_loss.is_nan() || self.max_loss <= 0.0 {
+            bail!("`candidates.max_loss` must be positive");
+        }
+        Ok(CandidateConfig {
+            rights: self.rights.clone(),
+            allow_debit: self.allow_debit,
+            allow_credit: self.allow_credit,
+            min_width: self.min_width,
+            max_width: self.max_width.unwrap_or(f64::INFINITY),
+            max_relative_spread: self.max_relative_spread,
+            max_loss: self.max_loss,
+            quantity: self.quantity,
+        })
+    }
+}
+
+/// `[ranking]` — the scoring horizon and the thresholds a trade must clear.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RankingSectionConfig {
+    pub horizon_days: f64,
+    pub min_score: f64,
+    pub min_expected_pl: f64,
+}
+
+impl Default for RankingSectionConfig {
+    fn default() -> Self {
+        let d = RankingConfig::default();
+        Self {
+            horizon_days: d.horizon_days,
+            min_score: d.min_score,
+            min_expected_pl: d.min_expected_pl,
+        }
+    }
+}
+
+impl RankingSectionConfig {
+    fn to_runtime(self) -> Result<RankingConfig> {
+        if self.horizon_days.is_nan() || self.horizon_days <= 0.0 {
+            bail!("`ranking.horizon_days` must be positive");
+        }
+        Ok(RankingConfig {
+            horizon_days: self.horizon_days,
+            min_score: self.min_score,
+            min_expected_pl: self.min_expected_pl,
+        })
+    }
+}
+
 impl StrategyConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -304,10 +507,17 @@ impl StrategyConfig {
         Ok(())
     }
 
-    /// A **fresh** strategy. Signals carry indicator state, so every symbol
-    /// needs its own — sharing one would leak one symbol's price history into
-    /// the next symbol's readings.
+    /// A **fresh** strategy for the selected mode. Both modes carry indicator
+    /// state, so every symbol needs its own — sharing one would leak one symbol's
+    /// price history into the next symbol's readings.
     pub fn strategy(&self) -> Result<Strategy> {
+        match self.mode {
+            StrategyMode::Staged => Ok(Strategy::Staged(self.staged_strategy()?)),
+            StrategyMode::Ranked => Ok(Strategy::Ranked(Box::new(self.ranked_strategy()?))),
+        }
+    }
+
+    fn staged_strategy(&self) -> Result<StagedStrategy> {
         let signal: Box<dyn crate::signal::Signal> = match self.signal {
             SignalConfig::RsiCross { period, level } => Box::new(RsiCross::new(period, level)?),
             SignalConfig::SmaCross { fast, slow } => Box::new(SmaCross::new(fast, slow)?),
@@ -361,7 +571,7 @@ impl StrategyConfig {
                 quantity,
             } => Box::new(Vertical::new(right, long_delta, short_delta, quantity)?),
         };
-        Ok(Strategy {
+        Ok(StagedStrategy {
             name: self.name.clone(),
             signal,
             structure,
@@ -369,6 +579,16 @@ impl StrategyConfig {
                 delta_tolerance: self.execution.delta_tolerance,
                 max_debit: self.execution.max_debit,
             }),
+        })
+    }
+
+    fn ranked_strategy(&self) -> Result<RankedStrategy> {
+        Ok(RankedStrategy {
+            name: self.name.clone(),
+            features: FeatureEngine::new(self.features.to_runtime())?,
+            model: Box::new(LognormalDriftModel::new(self.model.to_runtime())),
+            candidates: self.candidates.to_runtime()?,
+            ranking: self.ranking.to_runtime()?,
         })
     }
 
@@ -477,13 +697,55 @@ commission_per_contract = 0.65
     #[test]
     fn every_call_builds_an_independent_strategy() {
         let config: StrategyConfig = toml::from_str(FULL).unwrap();
-        let a = config.strategy().unwrap();
-        let b = config.strategy().unwrap();
+        let (Strategy::Staged(a), Strategy::Staged(b)) =
+            (config.strategy().unwrap(), config.strategy().unwrap())
+        else {
+            panic!("the FULL fixture is a staged strategy");
+        };
         assert_eq!(a.name, b.name);
         assert!(!std::ptr::eq(
             &*a.signal as *const _,
             &*b.signal as *const _
         ));
+    }
+
+    #[test]
+    fn a_ranked_config_builds_the_ranked_engine() {
+        let src = "\
+symbols = [\"SPY\"]
+expiry = \"2026-08-21\"
+mode = \"ranked\"
+[candidates]
+rights = [\"call\", \"put\"]
+max_loss = 400.0
+[ranking]
+horizon_days = 3.0
+min_score = 0.2
+";
+        let config: StrategyConfig = toml::from_str(src).unwrap();
+        assert_eq!(config.mode, StrategyMode::Ranked);
+        config.validate().unwrap();
+        assert!(matches!(config.strategy().unwrap(), Strategy::Ranked(_)));
+        // Unset ranked fields still fall back to their defaults.
+        assert_eq!(config.candidates.max_relative_spread, 0.5);
+        assert!(config.candidates.allow_credit);
+    }
+
+    #[test]
+    fn a_ranked_section_refuses_unknown_and_invalid_fields() {
+        // An unknown key inside a section is refused, like the top level.
+        let err = toml::from_str::<StrategyConfig>(
+            "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nmode=\"ranked\"\n[ranking]\nhorzon_days=3.0",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("horzon_days"), "{err}");
+
+        // A non-positive horizon fails validation before any I/O.
+        let bad: StrategyConfig = toml::from_str(
+            "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nmode=\"ranked\"\n[ranking]\nhorizon_days=0.0",
+        )
+        .unwrap();
+        assert!(bad.validate().is_err());
     }
 
     #[test]

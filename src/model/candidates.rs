@@ -187,7 +187,7 @@ pub fn enumerate_verticals(
                 let max_loss = cost_basis - lo;
                 // A non-positive max loss is a mispriced arbitrage, i.e. bad data;
                 // it also makes P/L-per-risk meaningless. Refuse it.
-                if !(max_loss > 0.0) || max_loss > cfg.max_loss {
+                if max_loss <= 0.0 || max_loss > cfg.max_loss {
                     continue;
                 }
                 funnel.within_loss += 1;
