@@ -13,6 +13,10 @@
 //! Everything here is fed one option bar at a time, in order — the same
 //! discipline the signals keep, so look-ahead stays structurally impossible.
 
+pub mod distribution;
 pub mod features;
+pub mod price_model;
 
+pub use distribution::PriceDistribution;
 pub use features::{EarningsDistance, FeatureConfig, FeatureEngine, Features};
+pub use price_model::{LognormalDriftModel, LognormalModelConfig, PriceModel};
