@@ -88,6 +88,10 @@ pub struct ClosedTrade {
     /// unavailable. The P&L is an estimate, not a market observation.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub synthetic_price: bool,
+    /// Structural worst case at entry, net of cost — the capital at risk, and the
+    /// denominator of realized P/L-per-risk. `None` for an unbounded structure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_loss: Option<f64>,
     /// The ranked model's prediction at entry, to compare against realized `pnl`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prediction: Option<TradePrediction>,
@@ -172,6 +176,7 @@ impl Portfolio {
             pnl: credit - position.entry_debit - commission,
             exit_reason: reason,
             synthetic_price: false,
+            max_loss: position.max_loss,
             prediction: position.prediction,
         };
         self.closed.push(trade.clone());
@@ -213,6 +218,7 @@ impl Portfolio {
             pnl: credit - position.entry_debit - commission,
             exit_reason: reason,
             synthetic_price: true,
+            max_loss: position.max_loss,
             prediction: position.prediction,
         };
         self.closed.push(trade.clone());
@@ -255,6 +261,7 @@ impl Portfolio {
             pnl: credit - position.entry_debit - position.entry_commission,
             exit_reason: ExitReason::Expiry,
             synthetic_price: false,
+            max_loss: position.max_loss,
             prediction: position.prediction,
         };
         self.closed.push(trade.clone());

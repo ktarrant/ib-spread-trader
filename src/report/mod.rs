@@ -66,6 +66,13 @@ pub struct Totals {
     pub wins: usize,
     pub win_rate: Option<f64>,
     pub average_trade_pnl: Option<f64>,
+    /// Gross wins over gross losses. `None` with no losing trades — a profit
+    /// factor of "infinity" on a handful of trades would flatter the result.
+    pub profit_factor: Option<f64>,
+    /// Mean realized `pnl / max_loss` — return per dollar of capital at risk, the
+    /// guardrail the ranked score is supposed to maximise. `None` if no trade had
+    /// a bounded max loss.
+    pub avg_pnl_per_risk: Option<f64>,
     pub best_trade: Option<f64>,
     pub worst_trade: Option<f64>,
     pub exits_by_reason: BTreeMap<String, usize>,
@@ -184,6 +191,17 @@ pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> R
     let wins = trades.iter().filter(|t| t.pnl > 0.0).count();
     let pnls: Vec<f64> = trades.iter().map(|t| t.pnl).collect();
 
+    let gross_win: f64 = pnls.iter().filter(|p| **p > 0.0).sum();
+    let gross_loss: f64 = pnls.iter().filter(|p| **p < 0.0).map(|p| p.abs()).sum();
+    let profit_factor = (gross_loss > 0.0).then(|| gross_win / gross_loss);
+
+    let risk_ratios: Vec<f64> = trades
+        .iter()
+        .filter_map(|t| t.max_loss.filter(|ml| *ml > 0.0).map(|ml| t.pnl / ml))
+        .collect();
+    let avg_pnl_per_risk =
+        (!risk_ratios.is_empty()).then(|| risk_ratios.iter().sum::<f64>() / risk_ratios.len() as f64);
+
     let totals = Totals {
         symbols: runs.len(),
         bars: runs.iter().map(|run| run.bars).sum(),
@@ -202,6 +220,8 @@ pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> R
         wins,
         win_rate: (!trades.is_empty()).then(|| 100.0 * wins as f64 / trades.len() as f64),
         average_trade_pnl: (!pnls.is_empty()).then(|| pnls.iter().sum::<f64>() / pnls.len() as f64),
+        profit_factor,
+        avg_pnl_per_risk,
         best_trade: pnls.iter().copied().reduce(f64::max),
         worst_trade: pnls.iter().copied().reduce(f64::min),
         exits_by_reason,
