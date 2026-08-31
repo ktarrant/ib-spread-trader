@@ -182,6 +182,15 @@ commission is charged to settle (IB does not bill exercise or assignment on US
 equity options), which does mean a deep-ITM spread settles more cleanly here than
 in life, where both legs assign and pin risk is real.
 
+**The default expiry rules now avoid settlement entirely.** `min_days_before_expiry
+= 3` and `min_entry_days_before_expiry = 8` are the config defaults for every
+strategy, so a position always closes on a real quote before the tape stops rather
+than settling at intrinsic — settlement in live trading is not something you want,
+and with a single expiry a hard blackout is the honest stand-in. Once the capture
+holds more than one expiry, the intended replacement is *rolling* to the next month
+rather than blacking out. The settlement path stays because a config can still lift
+the blackout, and its P&L is still reported apart.
+
 ## Indicators are incremental, and warm-up is suppressed on purpose
 
 Each indicator is fed one value per bar and carries its own state. The parked
@@ -377,18 +386,22 @@ have been sold for, a day before they actually settled — and anyone plotting
 symbols, as a sanity baseline (not an endorsement — 22 trades proves nothing):
 
 ```
-495 triggers -> 246 declined (RSI crossed *down* through 30: bearish, and a
-                             call structure declines it)
-             -> 163 at position limit
-             ->  64 rejected (44 debit above limit, 20 no strike near 0.30 delta)
-             ->  22 filled
+1412 triggers -> 734 declined (RSI crossed *down* through 30: bearish, and a
+                              call structure declines it)
+              -> 433 at position limit
+              ->  44 too close to expiry (the 8-day entry blackout)
+              ->  22 earnings blackout
+              -> 157 rejected (85 debit above limit, 72 no strike near 0.30 delta)
+              ->  22 filled
 ```
 
 The rejection example reads `no call within tolerance of 0.30 delta (closest
 quoted: 0.407)` — that is META's truncated ladder, showing up in real data
 exactly as predicted. META alone accounts for 16 rejections, AMD for 28.
 
-12 of 22 exits were expiry settlement, which is why that P&L is reported apart.
+With the default expiry rules, no trade settles at intrinsic — all 22 exit on a
+real quote (11 before-expiry, 5 before-earnings, 5 profit target, 1 stop), and the
+honest traded P&L is a small loss the old settlement figure used to mask.
 
 ## The ranked price-target engine is a second decision path, not a replacement
 
@@ -437,7 +450,7 @@ interim worst case.
 enumerated -> priceable -> liquid -> within-loss -> positive-EV -> above-min-score
 -> chosen — and the report surfaces it beside the trade log, the way
 `signal_diagnostics` surfaces the staged gates. On the reference snapshot,
-`ranked_verticals.toml` prices ~5 M candidate verticals down to 21 taken. The
+`ranked_verticals.toml` prices ~5.6 M candidate verticals down to 9 taken. The
 enumeration counts are model-dependent — the model decides how many bars hold a
 position and so are *not* enumerating — which is why the driftless default
 enumerates far more than the old drifted one did. A ranked run whose `chosen` is a

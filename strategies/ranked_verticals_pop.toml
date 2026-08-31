@@ -13,18 +13,18 @@ initial_cash = 100000.0
 mode    = "ranked"
 
 # [execution]/[exit]/[costs] are shared with the staged mode: timing, the
-# position cap, the entry gates, and the exit rules all still apply.
+# position cap, the entry gates, and the exit rules all still apply. The expiry
+# rules (close >=3 days out, no entry within 8 days) are the defaults now, so a
+# position always exits on a real quote rather than settling at intrinsic.
 [execution]
 timing = "next_bar"
 max_open_positions = 1
-min_entry_days_before_expiry = 2
 earnings_blackout_days = 3
 
 [exit]
 profit_target_pct = 50.0
 stop_loss_pct = 100.0
 close_before_earnings = true
-min_days_before_expiry = 1
 
 [costs]
 commission_per_contract = 0.65

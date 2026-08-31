@@ -237,7 +237,7 @@ pub struct ExecutionConfig {
     /// Refuse new entries when fewer than this many calendar days remain before
     /// expiry. Prevents opening positions the before-expiry exit would
     /// immediately close. Set this to `min_days_before_expiry + buffer`.
-    #[serde(default)]
+    #[serde(default = "default_min_entry_days_before_expiry")]
     pub min_entry_days_before_expiry: Option<u32>,
     /// Refuse new entries within this many calendar days of an earnings
     /// announcement. Prevents opening positions that would be immediately
@@ -252,6 +252,17 @@ fn default_tolerance() -> f64 {
 fn default_max_open() -> usize {
     1
 }
+// Default expiry rules for every strategy: close well before the option tape
+// stops so a position exits on a real quote rather than settling at intrinsic,
+// and refuse entries too close to expiry to open one that the before-expiry exit
+// would immediately close. With a single expiry this is a hard blackout; once
+// more expiries land, the honest alternative is rolling to the next month.
+fn default_min_days_before_expiry() -> Option<u32> {
+    Some(3)
+}
+fn default_min_entry_days_before_expiry() -> Option<u32> {
+    Some(8)
+}
 
 impl Default for ExecutionConfig {
     fn default() -> Self {
@@ -260,13 +271,13 @@ impl Default for ExecutionConfig {
             max_debit: None,
             timing: Timing::default(),
             max_open_positions: default_max_open(),
-            min_entry_days_before_expiry: None,
+            min_entry_days_before_expiry: default_min_entry_days_before_expiry(),
             earnings_blackout_days: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExitConfig {
     /// Percentage of max profit at which to close.
@@ -285,8 +296,21 @@ pub struct ExitConfig {
     #[serde(default)]
     pub close_before_earnings: bool,
     /// Close at least this many calendar days before expiration.
-    #[serde(default)]
+    #[serde(default = "default_min_days_before_expiry")]
     pub min_days_before_expiry: Option<u32>,
+}
+
+impl Default for ExitConfig {
+    fn default() -> Self {
+        Self {
+            profit_target_pct: None,
+            stop_loss_pct: None,
+            underlying_past_short_strike: false,
+            max_time_pct: None,
+            close_before_earnings: false,
+            min_days_before_expiry: default_min_days_before_expiry(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

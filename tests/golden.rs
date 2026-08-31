@@ -229,44 +229,50 @@ fn the_reference_strategy_reproduces_its_recorded_run() {
     let totals = &built.totals;
 
     assert_eq!(totals.symbols, 12);
-    // Values re-derived after adding earnings avoidance (close_before_earnings
-    // + 3-day blackout). Closing before earnings frees slots, so the total
-    // trade count rises even though some entries are blocked.
-    assert_eq!(totals.trades, 25);
+    // Re-derived after the expiry rules became the default (close >=3 days out,
+    // no entry within 8 days of expiry). Positions now exit on a real quote, so
+    // settlement is gone and the honest traded P&L stands on its own — here a
+    // small loss the settlement figure used to mask.
+    assert_eq!(totals.trades, 22);
     assert_eq!(totals.census.triggers, 1412);
     assert_eq!(
         totals.census.declined, 734,
         "bearish crossings a call structure declines"
     );
-    assert_eq!(totals.census.at_position_limit, 470);
+    assert_eq!(totals.census.at_position_limit, 433);
     assert_eq!(totals.census.unfillable_intents, 0);
     assert_eq!(totals.census.earnings_blackout, 22);
+    assert_eq!(
+        totals.census.too_close_to_expiry, 44,
+        "the 8-day entry blackout now refuses late entries"
+    );
 
     assert_eq!(totals.census.rejections["debit_above_limit"], 85);
-    assert_eq!(totals.census.rejections["no_strike_near_target_delta"], 76);
+    assert_eq!(totals.census.rejections["no_strike_near_target_delta"], 72);
 
     assert!(
-        (totals.total_pnl - 414.70).abs() < 0.01,
+        (totals.total_pnl - (-542.20)).abs() < 0.01,
         "{}",
         totals.total_pnl
     );
     assert!(
-        (totals.traded_pnl - 3451.40).abs() < 0.01,
+        (totals.traded_pnl - (-542.20)).abs() < 0.01,
         "{}",
         totals.traded_pnl
     );
     assert!(
-        (totals.settled_pnl - (-3036.70)).abs() < 0.01,
-        "{}",
+        totals.settled_pnl.abs() < 0.01,
+        "no position settles at intrinsic now: {}",
         totals.settled_pnl
     );
-    assert!((totals.commission_paid - 53.30).abs() < 0.01);
+    assert!((totals.commission_paid - 57.20).abs() < 0.01);
 
-    // Every trade closed one way or another; nothing was left marked.
+    // Every trade closed on a quote; nothing was left to settle at expiry.
     assert_eq!(totals.exits_by_reason["before_earnings"], 5);
-    assert_eq!(totals.exits_by_reason["expiry_settlement"], 9);
-    assert_eq!(totals.exits_by_reason["profit_target"], 9);
-    assert_eq!(totals.exits_by_reason["stop_loss"], 2);
+    assert_eq!(totals.exits_by_reason["before_expiry"], 11);
+    assert_eq!(totals.exits_by_reason["profit_target"], 5);
+    assert_eq!(totals.exits_by_reason["stop_loss"], 1);
+    assert!(!totals.exits_by_reason.contains_key("expiry_settlement"));
 
     // Cash, the trade log and the curve have to agree or the report is decoration.
     let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
@@ -334,7 +340,7 @@ fn the_ranked_strategy_reproduces_its_recorded_run() {
     let totals = &built.totals;
 
     assert_eq!(totals.symbols, 12);
-    assert_eq!(totals.trades, 10);
+    assert_eq!(totals.trades, 9);
 
     // The candidate funnel: enumerated -> priceable -> liquid -> within-loss ->
     // positive-EV -> above-min-score -> chosen. Every vertical is bounded, so
@@ -343,17 +349,19 @@ fn the_ranked_strategy_reproduces_its_recorded_run() {
     // enumerating): the driftless default is selective and holds less often,
     // leaving far more bars to enumerate than the old drifted default did.
     let funnel = &totals.census.ranking;
-    assert_eq!(funnel.enumerated, 5_956_294);
-    assert_eq!(funnel.priceable, 5_956_294);
-    assert_eq!(funnel.liquid, 5_756_747);
-    assert_eq!(funnel.within_loss, 1_620_556);
-    assert_eq!(funnel.positive_ev, 44_148);
-    assert_eq!(funnel.above_min_score, 148);
-    assert_eq!(funnel.chosen, 10, "chosen must equal the trade count");
+    assert_eq!(funnel.enumerated, 5_605_176);
+    assert_eq!(funnel.priceable, 5_605_176);
+    assert_eq!(funnel.liquid, 5_484_878);
+    assert_eq!(funnel.within_loss, 1_504_028);
+    assert_eq!(funnel.positive_ev, 39_993);
+    assert_eq!(funnel.above_min_score, 131);
+    assert_eq!(funnel.chosen, 9, "chosen must equal the trade count");
 
-    assert!((totals.total_pnl - 4189.10).abs() < 0.01, "{}", totals.total_pnl);
-    assert!((totals.traded_pnl - 2030.20).abs() < 0.01, "{}", totals.traded_pnl);
-    assert!((totals.settled_pnl - 2158.90).abs() < 0.01, "{}", totals.settled_pnl);
+    // The expiry rules are the default now, so every position exits on a quote:
+    // settlement is zero and the total is the honest traded P&L.
+    assert!((totals.total_pnl - 1440.60).abs() < 0.01, "{}", totals.total_pnl);
+    assert!((totals.traded_pnl - 1440.60).abs() < 0.01, "{}", totals.traded_pnl);
+    assert!(totals.settled_pnl.abs() < 0.01, "{}", totals.settled_pnl);
 
     // This selective run happens to pick all debit verticals; that credit
     // orientations are enumerated and priceable is covered by the candidates
