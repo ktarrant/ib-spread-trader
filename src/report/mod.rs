@@ -252,24 +252,33 @@ fn caveats(totals: &Totals, runs: &[SymbolRun], model_eval: Option<&ModelEvalRep
     ];
 
     // The null-beating gate: a forecast worse than a random walk is not a better
-    // forecaster, whatever P&L it happened to produce.
+    // forecaster, whatever P&L it happened to produce. A small band around zero
+    // reads as "matches the null" rather than the alarm — a driftless model is
+    // essentially the null, which is honest, not broken.
     if let Some(eval) = model_eval {
         let skill = eval.pooled.crps_skill;
-        if skill < 0.0 {
+        let cal = format!(
+            "mean PIT {:.2}, 50/90% coverage {:.2}/{:.2}",
+            eval.pooled.pit_mean, eval.pooled.coverage_50, eval.pooled.coverage_90
+        );
+        if skill < -0.02 {
             out.push(format!(
                 "The price model forecasts WORSE than a random-walk null (CRPS skill \
                  {skill:+.2}): its drift and vol are miscalibrated, so the ranked P&L \
                  below rests on a forecast that has not earned trust. Tune the model \
                  before reading its edge."
             ));
+        } else if skill <= 0.02 {
+            out.push(format!(
+                "The price model matches a random-walk null on CRPS (skill {skill:+.2}); \
+                 {cal}. It is calibrated but carries no directional edge over a random \
+                 walk — the ranked P&L is a vol/liquidity result, not a forecast one."
+            ));
         } else {
             out.push(format!(
                 "The price model beats a random-walk null on CRPS by {:.0}% (skill \
-                 {skill:+.2}); mean PIT {:.2}, 50/90% coverage {:.2}/{:.2}.",
+                 {skill:+.2}); {cal}.",
                 100.0 * skill,
-                eval.pooled.pit_mean,
-                eval.pooled.coverage_50,
-                eval.pooled.coverage_90,
             ));
         }
     }

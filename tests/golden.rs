@@ -334,23 +334,26 @@ fn the_ranked_strategy_reproduces_its_recorded_run() {
     let totals = &built.totals;
 
     assert_eq!(totals.symbols, 12);
-    assert_eq!(totals.trades, 31);
+    assert_eq!(totals.trades, 21);
 
     // The candidate funnel: enumerated -> priceable -> liquid -> within-loss ->
     // positive-EV -> above-min-score -> chosen. Every vertical is bounded, so
-    // priceable equals enumerated.
+    // priceable equals enumerated. The enumeration counts are model-dependent
+    // because the model controls how many bars hold a position (and so are not
+    // enumerating): the driftless default is selective and holds less often,
+    // leaving far more bars to enumerate than the old drifted default did.
     let funnel = &totals.census.ranking;
-    assert_eq!(funnel.enumerated, 516_026);
-    assert_eq!(funnel.priceable, 516_026);
-    assert_eq!(funnel.liquid, 503_449);
-    assert_eq!(funnel.within_loss, 80_114);
-    assert_eq!(funnel.positive_ev, 4_567);
-    assert_eq!(funnel.above_min_score, 1_776);
-    assert_eq!(funnel.chosen, 31, "chosen must equal the trade count");
+    assert_eq!(funnel.enumerated, 4_999_980);
+    assert_eq!(funnel.priceable, 4_999_980);
+    assert_eq!(funnel.liquid, 4_850_902);
+    assert_eq!(funnel.within_loss, 1_430_245);
+    assert_eq!(funnel.positive_ev, 85_367);
+    assert_eq!(funnel.above_min_score, 1_392);
+    assert_eq!(funnel.chosen, 21, "chosen must equal the trade count");
 
-    assert!((totals.total_pnl - (-1047.30)).abs() < 0.01, "{}", totals.total_pnl);
-    assert!((totals.traded_pnl - (-2468.00)).abs() < 0.01, "{}", totals.traded_pnl);
-    assert!((totals.settled_pnl - 1420.70).abs() < 0.01, "{}", totals.settled_pnl);
+    assert!((totals.total_pnl - 2204.80).abs() < 0.01, "{}", totals.total_pnl);
+    assert!((totals.traded_pnl - 1253.20).abs() < 0.01, "{}", totals.traded_pnl);
+    assert!((totals.settled_pnl - 951.60).abs() < 0.01, "{}", totals.settled_pnl);
 
     // Both orientations really do trade: mostly debits, at least one credit.
     let credits = built.trades.iter().filter(|t| t.entry_debit < 0.0).count();

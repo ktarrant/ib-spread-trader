@@ -437,10 +437,34 @@ interim worst case.
 enumerated -> priceable -> liquid -> within-loss -> positive-EV -> above-min-score
 -> chosen — and the report surfaces it beside the trade log, the way
 `signal_diagnostics` surfaces the staged gates. On the reference snapshot,
-`ranked_verticals.toml` prices ~516 k candidate verticals down to 31 taken, and the
-report carries a caveat that the result rests on the model's unvalidated
-assumptions. A ranked run whose `chosen` is a rounding error against `enumerated`
-has been floored, not backtested.
+`ranked_verticals.toml` prices ~5 M candidate verticals down to 21 taken. The
+enumeration counts are model-dependent — the model decides how many bars hold a
+position and so are *not* enumerating — which is why the driftless default
+enumerates far more than the old drifted one did. A ranked run whose `chosen` is a
+rounding error against `enumerated` has been floored, not backtested.
+
+## The price model is evaluated, not assumed
+
+The ranked path forecasts, so it is judged as a forecaster. On every option bar the
+engine scores the model's distribution against the underlying's **realized** price a
+horizon later — plus a random-walk null (driftless, vol = ATM IV) — and the report's
+`model_eval` section aggregates it: CRPS skill vs the null (the headline), PIT
+calibration and 50/80/90 % coverage, sharpness, and a directional hit-rate. The
+per-bar forecasts (`forecasts.csv`) are two orders of magnitude denser than the
+trades, so this is where tuning has statistical power; the trade P&L
+(`profit_factor`, `avg_pnl_per_risk`, `predictions.csv`) is a guardrail.
+
+The realized read looks *forward* in the already-loaded series. It is safe only
+because it feeds evaluation and never a decision — see `src/model/eval.rs`. Do not
+reuse that read anywhere a trade could see it.
+
+**This is not academic.** The v1 model shipped with a trend+skew drift; evaluation
+showed it forecast *worse* than a random walk (CRPS skill −0.39, PIT 0.63, coverage
+0.38/0.75) and lost money. Zeroing the drift restored calibration (PIT 0.52,
+near-nominal coverage) and flipped the P&L positive, so **the default is now
+driftless**. Turn a drift weight up only once it beats the null out-of-sample. The
+null-beating gate is the floor: a config that cannot beat a random walk is not a
+better forecaster, whatever P&L it posted.
 
 ## Conventions from the capture side that this repo must not re-learn
 

@@ -37,16 +37,20 @@ atr_period = 14
 realized_vol_period = 20
 skew_moneyness = 0.05
 
-# The lognormal drift model's weights. Close to a random walk unless turned up:
-# vol is a 50/50 blend of realized vol and ATM IV, with a modest trend drift and
-# a first-order skew tilt.
+# The lognormal drift model's weights. Drift is turned OFF by default: forecast
+# evaluation on the reference snapshot showed the v1 drift (trend + skew) was
+# miscalibrated and forecast worse than a random-walk null (CRPS skill -0.39,
+# PIT mean 0.63). Zeroing it restores calibration (PIT 0.52, near-nominal
+# coverage) and flips the strategy from a loser to a winner. The vol is a 50/50
+# blend of realized vol and ATM IV; turn the drift weights up only once a drift
+# signal has been shown to beat the null out-of-sample.
 [model]
 bars_per_year = 3276.0
 realized_vol_weight = 0.5
 fallback_vol = 0.30
-trend_weight = 1.0
+trend_weight = 0.0
 vwap_reversion = 0.0
-skew_weight = 0.5
+skew_weight = 0.0
 grid_sigma = 4.0
 grid_points = 101
 
