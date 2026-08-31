@@ -25,6 +25,11 @@ earnings_blackout_days = 3
 profit_target_pct = 50.0
 stop_loss_pct = 100.0
 close_before_earnings = true
+# Take profit (debit) or stop (credit) when the underlying reaches the short
+# strike. A short-dated vertical only marks near its max *at* expiry, so a
+# percent-of-max profit target arrives too late and winners round-trip; the
+# underlying reaching the short strike is the reliable signal to close.
+underlying_past_short_strike = true
 
 [costs]
 commission_per_contract = 0.65

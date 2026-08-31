@@ -349,19 +349,24 @@ fn the_ranked_strategy_reproduces_its_recorded_run() {
     // enumerating): the driftless default is selective and holds less often,
     // leaving far more bars to enumerate than the old drifted default did.
     let funnel = &totals.census.ranking;
-    assert_eq!(funnel.enumerated, 5_605_176);
-    assert_eq!(funnel.priceable, 5_605_176);
-    assert_eq!(funnel.liquid, 5_484_878);
-    assert_eq!(funnel.within_loss, 1_504_028);
-    assert_eq!(funnel.positive_ev, 39_993);
+    assert_eq!(funnel.enumerated, 5_625_634);
+    assert_eq!(funnel.priceable, 5_625_634);
+    assert_eq!(funnel.liquid, 5_505_336);
+    assert_eq!(funnel.within_loss, 1_515_062);
+    assert_eq!(funnel.positive_ev, 40_211);
     assert_eq!(funnel.above_min_score, 131);
     assert_eq!(funnel.chosen, 9, "chosen must equal the trade count");
 
-    // The expiry rules are the default now, so every position exits on a quote:
-    // settlement is zero and the total is the honest traded P&L.
-    assert!((totals.total_pnl - 1440.60).abs() < 0.01, "{}", totals.total_pnl);
-    assert!((totals.traded_pnl - 1440.60).abs() < 0.01, "{}", totals.traded_pnl);
+    // Every position exits on a quote (settlement is zero), and the short-strike
+    // exit takes profit when the underlying reaches the max-profit zone rather
+    // than waiting for a mark that arrives too late.
+    assert!((totals.total_pnl - 1940.60).abs() < 0.01, "{}", totals.total_pnl);
+    assert!((totals.traded_pnl - 1940.60).abs() < 0.01, "{}", totals.traded_pnl);
     assert!(totals.settled_pnl.abs() < 0.01, "{}", totals.settled_pnl);
+    assert_eq!(
+        totals.exits_by_reason["underlying_past_short"], 1,
+        "the SPY 774/779 bull call closes at the short strike, not worthless"
+    );
 
     // This selective run happens to pick all debit verticals; that credit
     // orientations are enumerated and priceable is covered by the candidates
