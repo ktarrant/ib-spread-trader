@@ -128,6 +128,18 @@ impl Portfolio {
         }
     }
 
+    /// Total capital committed to risk across the open positions — the sum of
+    /// each position's max loss. This is what a capital allocator sizes against:
+    /// cash paid for a debit, margin posted for a credit, both captured by
+    /// `max_loss`. A position with no bounded max loss (a naked long call) risks
+    /// only the premium it paid, so it falls back to its entry debit.
+    pub fn capital_at_risk(&self) -> f64 {
+        self.open
+            .iter()
+            .map(|p| p.max_loss.unwrap_or_else(|| p.entry_debit.max(0.0)))
+            .sum()
+    }
+
     /// Open a spread against `bar`, paying the conservative debit plus commission.
     pub fn open(
         &mut self,

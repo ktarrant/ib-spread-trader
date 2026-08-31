@@ -157,6 +157,23 @@ impl Spread {
         Some((lo, hi))
     }
 
+    /// The same structure sized up by an integer factor — every leg's quantity
+    /// times `factor`. Entry cost, payoff, and max loss all scale linearly with
+    /// it, so a position sizer can price one lot and multiply.
+    pub fn scaled(&self, factor: u32) -> Spread {
+        Spread {
+            symbol: self.symbol.clone(),
+            legs: self
+                .legs
+                .iter()
+                .map(|leg| Leg {
+                    quantity: leg.quantity * factor,
+                    ..*leg
+                })
+                .collect(),
+        }
+    }
+
     pub fn total_contracts(&self) -> u32 {
         self.legs.iter().map(|leg| leg.quantity).sum()
     }

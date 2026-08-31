@@ -69,6 +69,31 @@ pub struct RunConfig {
     /// Refuse new entries within this many calendar days of an earnings
     /// announcement. Prevents the same open-close churn as the expiry gate.
     pub earnings_blackout_days: Option<u32>,
+    /// Score-weighted position sizing. `None` keeps the fixed one-lot behaviour;
+    /// `Some` sizes each ranked entry by conviction and the capital left, so a
+    /// limited account fills across opportunities. Ranked path only — the staged
+    /// path has no score to size against.
+    pub sizing: Option<Sizing>,
+}
+
+/// How the ranked path turns a score and the capital left into a contract count.
+///
+/// A position risks a baseline fraction of total capital at the minimum score,
+/// scaled up linearly with the score (conviction buys size) and capped per
+/// position. The contract count is that risk budget divided by one lot's max
+/// loss, so a wide/expensive structure gets fewer lots than a cheap one for the
+/// same budget — capital at risk is what is held constant, not lot count.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct Sizing {
+    /// Fraction of total capital to risk on a position scoring exactly at the
+    /// minimum. Higher scores scale above this, up to `max_risk_per_position`.
+    pub risk_per_position: f64,
+    /// Ceiling on any single position's risk, as a fraction of total capital, so
+    /// one high-scoring idea cannot commit the whole account.
+    pub max_risk_per_position: f64,
+    /// The score that earns exactly `risk_per_position` — the sizing baseline.
+    /// A position scoring `2 * baseline` risks twice as much (before the cap).
+    pub baseline_score: f64,
 }
 
 impl Default for RunConfig {
@@ -81,6 +106,7 @@ impl Default for RunConfig {
             max_open_positions: 1,
             min_entry_days_before_expiry: None,
             earnings_blackout_days: None,
+            sizing: None,
         }
     }
 }
@@ -195,6 +221,9 @@ pub struct Census {
     pub earnings_blackout: usize,
     /// Closed at intrinsic because option quotes were unavailable.
     pub synthetic_exits: usize,
+    /// A ranked choice was made but the capital left could not fund even one
+    /// lot at its max loss. Only the sized ranked path counts this.
+    pub capital_limited: usize,
     /// The ranked path's candidate funnel, accumulated across bars. Zeroed for
     /// the staged path, which reports through `triggers`/`declined`/`rejections`.
     pub ranking: RankingFunnel,
@@ -488,28 +517,68 @@ pub fn run_symbol(
                             );
                             census.ranking.merge(&funnel);
                             if let Some(choice) = choice {
-                                let prediction = TradePrediction {
-                                    expected_pl: choice.expected_pl,
-                                    score: choice.score,
-                                    prob_profit: choice.prob_profit,
+                                // Position sizing: turn the score and the capital
+                                // left into a lot count. `None` sizing keeps one
+                                // lot (fixed behaviour); `Some` scales by
+                                // conviction, capped per position and by the
+                                // capital still uncommitted.
+                                let lots = match config.sizing {
+                                    None => 1,
+                                    Some(sizing) => {
+                                        let one_lot_risk = choice.candidate.max_loss;
+                                        let available = config.initial_cash
+                                            - portfolio.capital_at_risk();
+                                        let score_mult =
+                                            (choice.score / sizing.baseline_score).max(1.0);
+                                        let budget = (config.initial_cash
+                                            * sizing.risk_per_position
+                                            * score_mult)
+                                            .min(
+                                                config.initial_cash
+                                                    * sizing.max_risk_per_position,
+                                            )
+                                            .min(available.max(0.0));
+                                        (budget / one_lot_risk).floor() as u32
+                                    }
                                 };
-                                // The forecast target: the favourable quantile of
-                                // the entry distribution, in the trade's direction.
-                                let forecast_target =
-                                    ranked.ranking.forecast_target_quantile.map(|q| {
-                                        let level = if choice.candidate.spread.profits_from_a_rise()
-                                        {
-                                            q
-                                        } else {
-                                            1.0 - q
-                                        };
-                                        dist.quantile(level)
-                                    });
-                                entering = Some(Intent::Open(
-                                    choice.candidate.spread,
-                                    Some(prediction),
-                                    forecast_target,
-                                ));
+                                if lots == 0 {
+                                    // Not enough capital left for even one lot.
+                                    census.capital_limited += 1;
+                                } else {
+                                    let prediction = TradePrediction {
+                                        // `expected_pl` scales with size; the
+                                        // probability and per-risk score do not.
+                                        expected_pl: choice.expected_pl * lots as f64,
+                                        score: choice.score,
+                                        prob_profit: choice.prob_profit,
+                                    };
+                                    // The forecast target: the favourable quantile
+                                    // of the entry distribution, in the trade's
+                                    // direction. A price, so size does not touch it.
+                                    let forecast_target =
+                                        ranked.ranking.forecast_target_quantile.map(|q| {
+                                            let level = if choice
+                                                .candidate
+                                                .spread
+                                                .profits_from_a_rise()
+                                            {
+                                                q
+                                            } else {
+                                                1.0 - q
+                                            };
+                                            dist.quantile(level)
+                                        });
+                                    let spread = if lots == 1 {
+                                        choice.candidate.spread
+                                    } else {
+                                        choice.candidate.spread.scaled(lots)
+                                    };
+                                    entering = Some(Intent::Open(
+                                        spread,
+                                        Some(prediction),
+                                        forecast_target,
+                                    ));
+                                }
                             }
                         }
                     }

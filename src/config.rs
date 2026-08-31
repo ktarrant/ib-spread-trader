@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::domain::OptionRight;
-use crate::engine::{ExitRules, RankedStrategy, RunConfig, StagedStrategy, Strategy, Timing};
+use crate::engine::{
+    ExitRules, RankedStrategy, RunConfig, Sizing, StagedStrategy, Strategy, Timing,
+};
 use crate::execution::{Costs, DeltaSelector};
 use crate::model::{
     CandidateConfig, FeatureConfig, FeatureEngine, LognormalDriftModel, LognormalModelConfig,
@@ -59,6 +61,10 @@ pub struct StrategyConfig {
     pub candidates: CandidatesConfig,
     #[serde(default)]
     pub ranking: RankingSectionConfig,
+    /// Score-weighted position sizing. Absent means fixed one-lot entries.
+    /// Ranked mode only — the staged path has no score to size against.
+    #[serde(default)]
+    pub sizing: Option<SizingConfig>,
 }
 
 /// Which decision engine a config selects.
@@ -313,6 +319,59 @@ impl Default for ExitConfig {
     }
 }
 
+/// Score-weighted position sizing. Present in a TOML as a `[sizing]` table; its
+/// presence turns sizing on, its absence keeps fixed one-lot entries.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SizingConfig {
+    /// Fraction of total capital to risk on a position scoring at `baseline_score`.
+    pub risk_per_position: f64,
+    /// Ceiling on any one position's risk, as a fraction of total capital.
+    pub max_risk_per_position: f64,
+    /// The score that earns exactly `risk_per_position`; higher scores scale up.
+    pub baseline_score: f64,
+}
+
+impl Default for SizingConfig {
+    fn default() -> Self {
+        // A five-position baseline at the floor score, doubling toward a
+        // half-account cap for the strongest ideas.
+        Self {
+            risk_per_position: 0.20,
+            max_risk_per_position: 0.50,
+            baseline_score: 0.02,
+        }
+    }
+}
+
+impl SizingConfig {
+    fn to_runtime(&self) -> Result<Sizing> {
+        if !(0.0..=1.0).contains(&self.risk_per_position) || self.risk_per_position == 0.0 {
+            bail!(
+                "sizing.risk_per_position must be in (0, 1], got {}",
+                self.risk_per_position
+            );
+        }
+        if !(self.risk_per_position..=1.0).contains(&self.max_risk_per_position) {
+            bail!(
+                "sizing.max_risk_per_position must be in [risk_per_position, 1], got {}",
+                self.max_risk_per_position
+            );
+        }
+        if self.baseline_score <= 0.0 {
+            bail!(
+                "sizing.baseline_score must be positive, got {}",
+                self.baseline_score
+            );
+        }
+        Ok(Sizing {
+            risk_per_position: self.risk_per_position,
+            max_risk_per_position: self.max_risk_per_position,
+            baseline_score: self.baseline_score,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CostsConfig {
@@ -553,6 +612,12 @@ impl StrategyConfig {
         // Build the stages once up front so a typo fails before any I/O rather
         // than after the first symbol has already run.
         self.strategy()?;
+        if let Some(sizing) = &self.sizing {
+            if self.mode != StrategyMode::Ranked {
+                bail!("`[sizing]` applies only to ranked mode; the staged path has no score");
+            }
+            sizing.to_runtime()?;
+        }
         Ok(())
     }
 
@@ -659,6 +724,9 @@ impl StrategyConfig {
             max_open_positions: self.execution.max_open_positions,
             min_entry_days_before_expiry: self.execution.min_entry_days_before_expiry,
             earnings_blackout_days: self.execution.earnings_blackout_days,
+            // Validated in `validate()` (called by `load`), so `ok()` here only
+            // ever drops a sizing block a hand-built config never validated.
+            sizing: self.sizing.as_ref().and_then(|s| s.to_runtime().ok()),
         }
     }
 }

@@ -89,10 +89,10 @@ impl ExitRules {
         }
 
         // 5. Before-earnings — close before the announcement moves prices.
-        if self.close_before_earnings {
-            if let Some(reason) = earnings_exit(ctx.bar_ts, ctx.next_earnings) {
-                return Some(reason);
-            }
+        if self.close_before_earnings
+            && let Some(reason) = earnings_exit(ctx.bar_ts, ctx.next_earnings)
+        {
+            return Some(reason);
         }
 
         // 6. Before-expiry hard cutoff — avoid exercise/assignment risk.
@@ -141,10 +141,10 @@ impl ExitRules {
             }
         }
 
-        if self.close_before_earnings {
-            if let Some(reason) = earnings_exit(bar_ts, next_earnings) {
-                return Some(reason);
-            }
+        if self.close_before_earnings
+            && let Some(reason) = earnings_exit(bar_ts, next_earnings)
+        {
+            return Some(reason);
         }
 
         if let Some(days) = self.min_days_before_expiry {
