@@ -33,6 +33,19 @@ pub enum ExitReason {
     Expiry,
 }
 
+/// What the ranked model predicted for the trade it chose, carried onto the
+/// position so predicted-vs-realized can be compared after the fact. `None` for
+/// the staged pipeline, which makes no such prediction.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct TradePrediction {
+    /// Model expected P/L at the scoring horizon, in dollars.
+    pub expected_pl: f64,
+    /// The rank score, `expected_pl / max_loss`.
+    pub score: f64,
+    /// Model probability the position clears its cost basis at the horizon.
+    pub prob_profit: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenPosition {
     pub id: usize,
@@ -45,6 +58,8 @@ pub struct OpenPosition {
     pub max_profit: Option<f64>,
     /// Worst case at expiry net of entry cost, as a positive number of dollars.
     pub max_loss: Option<f64>,
+    /// The ranked model's prediction for this trade, if it came from that path.
+    pub prediction: Option<TradePrediction>,
 }
 
 impl OpenPosition {
@@ -73,6 +88,9 @@ pub struct ClosedTrade {
     /// unavailable. The P&L is an estimate, not a market observation.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub synthetic_price: bool,
+    /// The ranked model's prediction at entry, to compare against realized `pnl`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prediction: Option<TradePrediction>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -119,6 +137,7 @@ impl Portfolio {
             opened_at: bar.ts,
             entry_debit: debit,
             entry_commission: commission,
+            prediction: None,
         });
         Ok(id)
     }
@@ -153,6 +172,7 @@ impl Portfolio {
             pnl: credit - position.entry_debit - commission,
             exit_reason: reason,
             synthetic_price: false,
+            prediction: position.prediction,
         };
         self.closed.push(trade.clone());
         Ok(Some(trade))
@@ -193,6 +213,7 @@ impl Portfolio {
             pnl: credit - position.entry_debit - commission,
             exit_reason: reason,
             synthetic_price: true,
+            prediction: position.prediction,
         };
         self.closed.push(trade.clone());
         Some(trade)
@@ -234,6 +255,7 @@ impl Portfolio {
             pnl: credit - position.entry_debit - position.entry_commission,
             exit_reason: ExitReason::Expiry,
             synthetic_price: false,
+            prediction: position.prediction,
         };
         self.closed.push(trade.clone());
         Some(trade)

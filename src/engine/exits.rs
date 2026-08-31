@@ -234,6 +234,7 @@ mod tests {
             max_profit: Some(330.0),
             max_loss: Some(170.0),
             spread,
+            prediction: None,
         }
     }
 
@@ -393,6 +394,7 @@ mod tests {
             max_profit: Some(330.0),
             max_loss: Some(170.0),
             spread,
+            prediction: None,
         };
         let rules = ExitRules {
             underlying_past_short_strike: true,

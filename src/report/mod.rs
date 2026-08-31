@@ -343,6 +343,52 @@ pub fn write_csvs(dir: &Path, report: &Report, runs: &[SymbolRun]) -> Result<()>
         equity.push_str(&format!("{},{:.2}\n", ts.to_rfc3339(), value));
     }
     std::fs::write(dir.join("equity.csv"), equity)?;
+
+    // Ranked-mode evaluation logs. Written only when the data exists, so a staged
+    // run's output directory is byte-identical to before.
+    let has_forecasts = runs.iter().any(|r| !r.forecasts.is_empty());
+    if has_forecasts {
+        let mut forecasts = String::from(
+            "ts,symbol,spot,forward,atm_iv,horizon_years,mean,stddev,\
+             q05,q10,q25,q50,q75,q90,q95,realized,model_crps,null_crps,pit\n",
+        );
+        for run in runs {
+            for f in &run.forecasts {
+                let atm_iv = f.atm_iv.map(|v| format!("{v:.6}")).unwrap_or_default();
+                forecasts.push_str(&format!(
+                    "{},{},{:.4},{:.4},{},{:.6},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6}\n",
+                    f.ts.to_rfc3339(), f.symbol, f.spot, f.forward, atm_iv, f.horizon_years,
+                    f.mean, f.stddev,
+                    f.quantiles[0], f.quantiles[1], f.quantiles[2], f.quantiles[3],
+                    f.quantiles[4], f.quantiles[5], f.quantiles[6],
+                    f.realized, f.model_crps, f.null_crps, f.pit,
+                ));
+            }
+        }
+        std::fs::write(dir.join("forecasts.csv"), forecasts)?;
+    }
+
+    let has_predictions = report.trades.iter().any(|t| t.prediction.is_some());
+    if has_predictions {
+        let mut predictions =
+            String::from("id,symbol,description,expected_pl,score,prob_profit,pnl,exit_reason\n");
+        for t in &report.trades {
+            if let Some(p) = t.prediction {
+                predictions.push_str(&format!(
+                    "{},{},\"{}\",{:.2},{:.4},{:.4},{:.2},{}\n",
+                    t.id,
+                    t.symbol,
+                    t.description,
+                    p.expected_pl,
+                    p.score,
+                    p.prob_profit,
+                    t.pnl,
+                    reason_key(t.exit_reason),
+                ));
+            }
+        }
+        std::fs::write(dir.join("predictions.csv"), predictions)?;
+    }
     Ok(())
 }
 
@@ -397,6 +443,7 @@ mod tests {
             portfolio: Portfolio::new(100.0),
             equity_curve: points,
             settlement_price: None,
+            forecasts: Vec::new(),
         };
 
         let runs = vec![

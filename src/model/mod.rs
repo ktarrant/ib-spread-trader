@@ -15,12 +15,14 @@
 
 pub mod candidates;
 pub mod distribution;
+pub mod eval;
 pub mod features;
 pub mod price_model;
 pub mod ranker;
 
 pub use candidates::{Candidate, CandidateConfig, RankingFunnel, enumerate_verticals};
 pub use distribution::PriceDistribution;
+pub use eval::ForecastRecord;
 pub use features::{EarningsDistance, FeatureConfig, FeatureEngine, Features};
 pub use price_model::{LognormalDriftModel, LognormalModelConfig, PriceModel};
 pub use ranker::{RankedChoice, RankingConfig, rank};

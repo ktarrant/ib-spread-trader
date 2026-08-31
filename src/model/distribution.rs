@@ -75,6 +75,37 @@ impl PriceDistribution {
             .sum()
     }
 
+    /// The CDF at `x`: probability mass at or below `x`. `F(realized)` is the
+    /// probability integral transform (PIT) used to test calibration.
+    pub fn cdf(&self, x: f64) -> f64 {
+        self.prices
+            .iter()
+            .zip(&self.probs)
+            .filter(|&(&price, _)| price <= x)
+            .map(|(_, &p)| p)
+            .sum()
+    }
+
+    /// Continuous Ranked Probability Score against a realized value `y`, in the
+    /// energy form `E|X − y| − ½·E|X − X'|`. Lower is better; it rewards a
+    /// forecast for putting mass near the outcome and for being sharp. For a
+    /// point-mass forecast it reduces to `|mean − y|`, which the tests pin.
+    pub fn crps(&self, y: f64) -> f64 {
+        let expected_abs_error: f64 = self
+            .prices
+            .iter()
+            .zip(&self.probs)
+            .map(|(&x, &p)| p * (x - y).abs())
+            .sum();
+        let mut expected_spread = 0.0;
+        for (&xi, &pi) in self.prices.iter().zip(&self.probs) {
+            for (&xj, &pj) in self.prices.iter().zip(&self.probs) {
+                expected_spread += pi * pj * (xi - xj).abs();
+            }
+        }
+        expected_abs_error - 0.5 * expected_spread
+    }
+
     /// The `q`-quantile (0..=1) by cumulative mass, returning the grid price at
     /// which the running total first reaches `q`.
     pub fn quantile(&self, q: f64) -> f64 {
@@ -122,6 +153,30 @@ mod tests {
         assert!((d.mean() - 12.5).abs() < 1e-12);
         assert!((d.variance() - 18.75).abs() < 1e-12);
         assert!((d.expected(|s| s) - d.mean()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn crps_of_a_point_mass_is_the_absolute_error() {
+        let point = PriceDistribution::from_weights(vec![100.0], vec![1.0]).unwrap();
+        assert!((point.crps(103.0) - 3.0).abs() < 1e-12);
+        assert!((point.crps(100.0) - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn crps_rewards_putting_mass_near_the_outcome() {
+        // Same spread, but one distribution is centered on the outcome.
+        let near = PriceDistribution::from_weights(vec![99.0, 101.0], vec![1.0, 1.0]).unwrap();
+        let far = PriceDistribution::from_weights(vec![109.0, 111.0], vec![1.0, 1.0]).unwrap();
+        assert!(near.crps(100.0) < far.crps(100.0));
+    }
+
+    #[test]
+    fn cdf_is_the_cumulative_mass_at_or_below() {
+        let d =
+            PriceDistribution::from_weights(vec![10.0, 20.0, 30.0], vec![1.0, 1.0, 2.0]).unwrap();
+        assert!((d.cdf(9.0) - 0.0).abs() < 1e-12);
+        assert!((d.cdf(20.0) - 0.5).abs() < 1e-12);
+        assert!((d.cdf(30.0) - 1.0).abs() < 1e-12);
     }
 
     #[test]

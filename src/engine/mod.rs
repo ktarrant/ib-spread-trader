@@ -19,20 +19,26 @@
 //! print. That P&L is reported apart from everything that closed on a quote.
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::data::{ChainSeries, ChainSnapshot, EarningsEvent, Quality};
 use crate::execution::{Costs, Reject, Selector};
 use crate::model::{
-    CandidateConfig, EarningsDistance, FeatureEngine, PriceModel, RankingConfig, RankingFunnel,
-    enumerate_verticals, rank,
+    CandidateConfig, EarningsDistance, FeatureEngine, Features, ForecastRecord, PriceDistribution,
+    PriceModel, RankingConfig, RankingFunnel, enumerate_verticals, rank,
 };
-use crate::portfolio::{ExitReason, Portfolio};
+use crate::portfolio::{ExitReason, Portfolio, TradePrediction};
 use crate::signal::{MarketView, Signal};
 use crate::spread::Spread;
 use crate::structure::Structure;
+
+/// Seconds in a calendar year, matching `pricing::year_fraction`.
+const SECONDS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0;
+/// Forecasts with less than half a day to the horizon are point forecasts at
+/// spot with nothing to predict; they are not scored.
+const MIN_EVAL_HORIZON_YEARS: f64 = 0.5 / 365.25;
 
 pub mod exits;
 
@@ -166,7 +172,7 @@ fn entry_gate(
 /// A decision taken on one bar, to be executed on the next.
 #[derive(Debug, Clone)]
 enum Intent {
-    Open(Spread),
+    Open(Spread, Option<TradePrediction>),
     Close { id: usize, reason: ExitReason },
 }
 
@@ -229,6 +235,9 @@ pub struct SymbolRun {
     pub equity_curve: Vec<(DateTime<Utc>, f64)>,
     /// The underlying print settlement used, if anything was still open.
     pub settlement_price: Option<f64>,
+    /// Ranked mode only: one scored forecast per option bar, for model evaluation.
+    /// Empty for the staged pipeline.
+    pub forecasts: Vec<ForecastRecord>,
 }
 
 /// Replay one symbol/expiry.
@@ -254,6 +263,7 @@ pub fn run_symbol(
     let mut pending: Vec<Intent> = Vec::new();
     let mut opened_at_index: BTreeMap<usize, usize> = BTreeMap::new();
     let mut carried_trigger: Option<crate::signal::Trigger> = None;
+    let mut forecasts: Vec<ForecastRecord> = Vec::new();
 
     let timeline = series.merged_timeline();
 
@@ -275,7 +285,7 @@ pub fn run_symbol(
                     &opened_at_index,
                     seq,
                 )?;
-                if let Intent::Open(_) = intent
+                if let Intent::Open(..) = intent
                     && let Some(position) = portfolio.open.last()
                 {
                     opened_at_index.insert(position.id, seq);
@@ -379,7 +389,7 @@ pub fn run_symbol(
                                 EntryGate::TooCloseToExpiry => census.too_close_to_expiry += 1,
                                 EntryGate::EarningsBlackout => census.earnings_blackout += 1,
                                 EntryGate::Open => match staged.selector.resolve(&spec, &bar) {
-                                    Ok(spread) => entering = Some(Intent::Open(spread)),
+                                    Ok(spread) => entering = Some(Intent::Open(spread, None)),
                                     Err(reject) => census.reject(&reject),
                                 },
                             },
@@ -399,6 +409,33 @@ pub fn run_symbol(
                     };
                     let features = ranked.features.observe(&bar, earnings);
 
+                    // Horizon (capped at expiry), the distribution, and the basis
+                    // map. The distribution is needed both to log the forecast and
+                    // to rank, so it is computed once, on every option bar.
+                    let horizon_years = (ranked.ranking.horizon_days / 365.25)
+                        .min(features.year_fraction)
+                        .max(0.0);
+                    let remaining_years = (features.year_fraction - horizon_years).max(0.0);
+                    let forward_scale = if features.spot > 0.0 {
+                        features.forward / features.spot
+                    } else {
+                        1.0
+                    };
+                    let dist = ranked.model.forecast(&features, horizon_years);
+
+                    // Score the forecast against what the underlying actually did a
+                    // horizon later. Eval-only — never on the decision path.
+                    if let Some(record) = score_forecast(
+                        series,
+                        &bar,
+                        &features,
+                        &dist,
+                        horizon_years,
+                        ranked.model.as_ref(),
+                    ) {
+                        forecasts.push(record);
+                    }
+
                     match entry_gate(
                         portfolio.open.len(),
                         exiting.len(),
@@ -411,18 +448,6 @@ pub fn run_symbol(
                         EntryGate::TooCloseToExpiry => census.too_close_to_expiry += 1,
                         EntryGate::EarningsBlackout => census.earnings_blackout += 1,
                         EntryGate::Open => {
-                            let horizon_years = (ranked.ranking.horizon_days / 365.25)
-                                .min(features.year_fraction)
-                                .max(0.0);
-                            let remaining_years =
-                                (features.year_fraction - horizon_years).max(0.0);
-                            let forward_scale = if features.spot > 0.0 {
-                                features.forward / features.spot
-                            } else {
-                                1.0
-                            };
-                            let dist = ranked.model.forecast(&features, horizon_years);
-
                             let mut funnel = RankingFunnel::default();
                             let candidates = enumerate_verticals(
                                 &bar,
@@ -440,7 +465,15 @@ pub fn run_symbol(
                             );
                             census.ranking.merge(&funnel);
                             if let Some(choice) = choice {
-                                entering = Some(Intent::Open(choice.candidate.spread));
+                                let prediction = TradePrediction {
+                                    expected_pl: choice.expected_pl,
+                                    score: choice.score,
+                                    prob_profit: choice.prob_profit,
+                                };
+                                entering = Some(Intent::Open(
+                                    choice.candidate.spread,
+                                    Some(prediction),
+                                ));
                             }
                         }
                     }
@@ -462,7 +495,7 @@ pub fn run_symbol(
                             &opened_at_index,
                             seq,
                         )?;
-                        if let Intent::Open(_) = intent
+                        if let Intent::Open(..) = intent
                             && let Some(position) = portfolio.open.last()
                         {
                             opened_at_index.insert(position.id, seq);
@@ -523,7 +556,56 @@ pub fn run_symbol(
         portfolio,
         equity_curve,
         settlement_price: settlement,
+        forecasts,
     })
+}
+
+/// Score one bar's forecast against the underlying's realized price a horizon
+/// later, plus a random-walk null. Returns `None` when the horizon is degenerate
+/// (capped to ~0 at expiry) or the realized print is unavailable.
+///
+/// The realized read looks *forward* in the already-loaded series. This is safe
+/// only because the result feeds evaluation and never a decision — see
+/// [`crate::model::eval`]. Do not reuse it where a trade could see it.
+fn score_forecast(
+    series: &ChainSeries,
+    bar: &ChainSnapshot,
+    features: &Features,
+    dist: &PriceDistribution,
+    horizon_years: f64,
+    model: &dyn PriceModel,
+) -> Option<ForecastRecord> {
+    if horizon_years <= MIN_EVAL_HORIZON_YEARS {
+        return None;
+    }
+    let horizon_secs = (horizon_years * SECONDS_PER_YEAR) as i64;
+    let realized = series
+        .underlying_asof(bar.ts + Duration::seconds(horizon_secs))?
+        .price()?;
+
+    // The random-walk null: same model, but features that carry no drift and let
+    // the vol fall back to ATM IV.
+    let null_features = Features {
+        trend: None,
+        vwap_distance: None,
+        skew: None,
+        realized_vol: None,
+        atr: None,
+        ..*features
+    };
+    let null = model.forecast(&null_features, horizon_years);
+
+    Some(ForecastRecord::score(
+        bar.ts,
+        &series.symbol,
+        features.spot,
+        features.forward,
+        features.atm_iv,
+        horizon_years,
+        dist,
+        &null,
+        realized,
+    ))
 }
 
 fn execute(
@@ -536,11 +618,16 @@ fn execute(
     index: usize,
 ) -> Result<()> {
     match intent {
-        Intent::Open(spread) => {
+        Intent::Open(spread, prediction) => {
             // The bar that arrives may not quote what the previous one did. A
             // missed fill is a real outcome, counted rather than forced.
-            if portfolio.open(spread.clone(), bar, &config.costs).is_err() {
-                census.unfillable_intents += 1;
+            match portfolio.open(spread.clone(), bar, &config.costs) {
+                Ok(_) => {
+                    if let Some(position) = portfolio.open.last_mut() {
+                        position.prediction = *prediction;
+                    }
+                }
+                Err(_) => census.unfillable_intents += 1,
             }
         }
         Intent::Close { id, reason } => {
