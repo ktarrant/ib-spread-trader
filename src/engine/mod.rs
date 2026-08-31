@@ -99,6 +99,11 @@ pub struct Sizing {
     /// The score that earns exactly `risk_per_position` — the sizing baseline.
     /// A position scoring `2 * baseline` risks twice as much (before the cap).
     pub baseline_score: f64,
+    /// A hard ceiling on contracts per position, independent of capital. The
+    /// risk cap bounds dollars at risk; this bounds *fill size*, so a cheap
+    /// structure cannot be sized into a lot count the ladder cannot absorb
+    /// without slippage. `None` leaves the risk cap the only limit.
+    pub max_lots: Option<u32>,
 }
 
 impl Default for RunConfig {
@@ -248,7 +253,12 @@ fn size_lots(
     let budget = (initial_cash * sizing.risk_per_position * score_mult)
         .min(initial_cash * sizing.max_risk_per_position)
         .min(available.max(0.0));
-    (budget / one_lot_max_loss).floor() as u32
+    let lots = (budget / one_lot_max_loss).floor() as u32;
+    // The lot cap bounds fill size regardless of how much risk budget is free.
+    match sizing.max_lots {
+        Some(cap) => lots.min(cap),
+        None => lots,
+    }
 }
 
 /// Why a bar produced no trade despite a trigger.
@@ -1640,6 +1650,7 @@ mod tests {
             risk_per_position: 0.20,
             max_risk_per_position: 0.50,
             baseline_score: 0.02,
+            max_lots: None,
         };
         let cash = 20_000.0;
         let one_lot = 400.0; // $400 max loss per lot
@@ -1655,6 +1666,14 @@ mod tests {
         assert_eq!(size_lots(&sizing, 1.0, one_lot, cash, 19_800.0), 0);
         // With $19.6k at risk, exactly one lot fits.
         assert_eq!(size_lots(&sizing, 1.0, one_lot, cash, 19_600.0), 1);
+
+        // The lot cap bounds fill size even when the risk budget allows more:
+        // the same 25-lot budget above is clipped to 8.
+        let capped = Sizing {
+            max_lots: Some(8),
+            ..sizing
+        };
+        assert_eq!(size_lots(&capped, 1.0, one_lot, cash, 0.0), 8);
     }
 
     /// The fixture has to be trustworthy before anything is concluded from it:

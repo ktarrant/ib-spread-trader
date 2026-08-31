@@ -353,16 +353,20 @@ pub struct SizingConfig {
     pub max_risk_per_position: f64,
     /// The score that earns exactly `risk_per_position`; higher scores scale up.
     pub baseline_score: f64,
+    /// Hard ceiling on contracts per position, independent of capital — bounds
+    /// fill size so a cheap structure is not sized past what the ladder absorbs.
+    pub max_lots: Option<u32>,
 }
 
 impl Default for SizingConfig {
     fn default() -> Self {
-        // A five-position baseline at the floor score, doubling toward a
-        // half-account cap for the strongest ideas.
+        // A ten-position baseline at the floor score, scaling toward a
+        // quarter-account cap for the strongest ideas.
         Self {
-            risk_per_position: 0.20,
-            max_risk_per_position: 0.50,
+            risk_per_position: 0.10,
+            max_risk_per_position: 0.25,
             baseline_score: 0.02,
+            max_lots: None,
         }
     }
 }
@@ -387,10 +391,14 @@ impl SizingConfig {
                 self.baseline_score
             );
         }
+        if self.max_lots == Some(0) {
+            bail!("sizing.max_lots must be at least 1 when set");
+        }
         Ok(Sizing {
             risk_per_position: self.risk_per_position,
             max_risk_per_position: self.max_risk_per_position,
             baseline_score: self.baseline_score,
+            max_lots: self.max_lots,
         })
     }
 }

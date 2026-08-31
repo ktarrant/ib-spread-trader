@@ -417,18 +417,36 @@ fn the_shared_account_runs_all_symbols_against_one_pool() {
     let built = report::build_shared(&config.name, config.expiry, &shared);
     let totals = &built.totals;
 
-    // One $20k pool, not $20k per symbol.
+    // One $20k pool, not $20k per symbol. Sizing blends a risk cap (10%/pos, 25%
+    // max) with a lot cap (5), for a gentle curve: ~13% drawdown at pf ~4.8.
     assert!((totals.capital_deployed - 20_000.0).abs() < 1e-6);
-    assert_eq!(totals.trades, 12);
-    assert!((totals.total_pnl - 3684.40).abs() < 0.01, "{}", totals.total_pnl);
+    assert_eq!(totals.trades, 14);
+    assert!((totals.total_pnl - 1851.50).abs() < 0.01, "{}", totals.total_pnl);
     assert!(totals.settled_pnl.abs() < 0.01, "{}", totals.settled_pnl);
-    // Opportunities passed up because the account was already full.
-    assert_eq!(totals.census.capital_limited, 13);
+    // At this gentle sizing the lot cap binds before capital, so the account
+    // never fills and no opportunity is turned away for lack of capital.
+    assert_eq!(totals.census.capital_limited, 0);
+    assert!(totals.max_drawdown < 0.15, "drawdown {}", totals.max_drawdown);
 
-    // Invariant 1: capital at risk never exceeds the one $20k pool, and invariant
-    // 2: at most one position is open per symbol at any instant. Sweep the trade
-    // open/close events in time order to check both.
+    // Invariant 1: capital at risk never exceeds the one $20k pool; invariant 2:
+    // at most one position is open per symbol at any instant; invariant 3: the
+    // lot cap bounds every fill. Sweep the trade open/close events in time order.
     use std::collections::BTreeMap;
+    // First leg's contract count from e.g. "QQQ +5C 743 -5C 738".
+    let lots = |desc: &str| -> u32 {
+        for tok in desc.split_whitespace() {
+            if let Some(rest) = tok.strip_prefix('+') {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(n) = digits.parse::<u32>() {
+                    return n;
+                }
+            }
+        }
+        1
+    };
+    for t in &built.trades {
+        assert!(lots(&t.description) <= 5, "{} exceeds the 5-lot cap", t.description);
+    }
     let mut events: Vec<(chrono::DateTime<Utc>, f64, i64, &str)> = Vec::new();
     for t in &built.trades {
         let risk = t.max_loss.unwrap_or(t.entry_debit.max(0.0));
@@ -445,8 +463,7 @@ fn the_shared_account_runs_all_symbols_against_one_pool() {
         *count += dn;
         assert!(*count <= 1, "more than one {sym} position open at once");
     }
-    // A little slack for commission rounding into the risk figure.
-    assert!(peak_risk <= 20_050.0, "peak risk {peak_risk} exceeded the pool");
+    assert!(peak_risk <= 20_000.0, "peak risk {peak_risk} exceeded the pool");
 
     // Cash, the trade log and the single account curve must agree.
     let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();

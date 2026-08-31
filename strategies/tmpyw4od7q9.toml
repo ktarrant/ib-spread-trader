@@ -1,0 +1,78 @@
+# Ranked verticals on a small, capital-constrained account.
+#
+# Same forecast -> enumerate -> rank pipeline as `ranked_verticals.toml`, but
+# instead of one fixed lot at a time it runs a $20k account and lets a
+# score-weighted sizer fill it: higher-scoring ideas get more contracts, several
+# positions run at once, and entries stop when the capital left cannot fund even
+# one lot. The point is to see how the strategy behaves when risk, not a
+# one-position cap, is the binding constraint.
+
+name    = "ranked-verticals-20k"
+symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR"]
+expiry  = "2026-08-21"
+initial_cash = 20000.0
+mode    = "ranked"
+# One shared $20k account across all symbols, rather than $20k per symbol.
+# Entries compete for the pool: funded best-score-first, sized against the
+# capital still free, and capped at one position per symbol (the shared default).
+account = "shared"
+
+# The account-wide cap is lifted well above what $20k can fund, so capital — not
+# the cap — decides how many positions run. earnings/expiry blackouts still apply.
+[execution]
+timing = "next_bar"
+max_open_positions = 50
+earnings_blackout_days = 3
+
+# Score-weighted sizing. A baseline idea (score == baseline_score) risks 20% of
+# capital; a 2x-baseline idea risks 40%, capped at 50% so no single position can
+# take the account. One lot's max loss divides the budget into a contract count,
+# so a wide credit spread gets fewer lots than a cheap debit for the same risk.
+
+[sizing]
+risk_per_position = 0.05
+max_risk_per_position = 0.15
+baseline_score = 0.02
+max_lots = 5
+
+[exit]
+profit_target_pct = 50.0
+stop_loss_pct = 100.0
+close_before_earnings = true
+underlying_past_short_strike = true
+
+[costs]
+commission_per_contract = 0.65
+
+[features]
+trend_fast = 10
+trend_slow = 30
+atr_period = 14
+realized_vol_period = 20
+skew_moneyness = 0.05
+
+[model]
+bars_per_year = 3276.0
+realized_vol_weight = 0.5
+fallback_vol = 0.30
+trend_weight = 0.0
+vwap_reversion = 0.0
+skew_weight = 0.0
+grid_sigma = 4.0
+grid_points = 101
+
+[candidates]
+rights = ["call", "put"]
+allow_debit = true
+allow_credit = true
+min_width = 0.0
+max_relative_spread = 0.35
+max_loss = 500.0
+quantity = 1
+
+[ranking]
+horizon_days = 7.0
+min_score = 0.02
+min_expected_pl = 0.0
+forecast_target_quantile = 0.85
+scorer_sample_per_bar = 20

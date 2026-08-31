@@ -517,8 +517,16 @@ are deliberate, not bugs:
 `SymbolDiag`s; `report::build_shared` turns each symbol into a *view* over its
 slice of the shared trades, so the per-symbol columns and model/scorer eval
 aggregate exactly as before while the totals come from the single pool. The
-report shape is unchanged, so the viewer renders a shared run as-is. No
-market-impact model yet: a large lot count fills at the one-lot quote.
+report shape is unchanged, so the viewer renders a shared run as-is.
+
+Sizing blends two caps (both in `[sizing]`): a **risk cap** bounds dollars per
+name (`risk_per_position`, scaled by score up to `max_risk_per_position`) and a
+**lot cap** (`max_lots`) bounds fill size — the risk cap binds on expensive
+spreads, the lot cap on cheap ones, so neither a single name nor a single fill
+runs away. There is no market-impact model, so the lot cap is the stand-in that
+keeps a large fill from clearing at the one-lot quote. On the reference snapshot
+`ranked_verticals_20k` runs at 10%/25%/5-lot, holding drawdown near 13% (vs ~55%
+uncapped) at profit factor ~4.8.
 
 ## Conventions from the capture side that this repo must not re-learn
 

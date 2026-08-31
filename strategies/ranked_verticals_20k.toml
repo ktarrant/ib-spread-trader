@@ -24,14 +24,17 @@ timing = "next_bar"
 max_open_positions = 50
 earnings_blackout_days = 3
 
-# Score-weighted sizing. A baseline idea (score == baseline_score) risks 20% of
-# capital; a 2x-baseline idea risks 40%, capped at 50% so no single position can
-# take the account. One lot's max loss divides the budget into a contract count,
-# so a wide credit spread gets fewer lots than a cheap debit for the same risk.
+# Score-weighted sizing, blending two caps for a gentle equity curve. The risk
+# cap bounds dollars per name (a baseline idea risks 10% of capital, up to 25%
+# for the strongest); the lot cap bounds fill size (max 5 contracts), so a cheap
+# structure is never sized past what the ladder can absorb without slippage. On
+# the reference snapshot this holds the drawdown near 13% (vs ~55% uncapped) at a
+# profit factor of ~4.8 — the lot cap binds before capital, leaving some headroom.
 [sizing]
-risk_per_position = 0.20
-max_risk_per_position = 0.50
+risk_per_position = 0.10
+max_risk_per_position = 0.25
 baseline_score = 0.02
+max_lots = 5
 
 [exit]
 profit_target_pct = 50.0
