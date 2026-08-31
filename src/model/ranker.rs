@@ -13,12 +13,27 @@
 use super::candidates::{Candidate, RankingFunnel};
 use super::distribution::PriceDistribution;
 
+/// What the ranker maximises when it picks among the candidates that clear the
+/// floors. Both read the same de-biased mark-to-model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RankMetric {
+    /// Expected P/L per unit of risk — the default. Rewards magnitude of edge.
+    ExpectedValue,
+    /// Probability of a net profit at the horizon. Rewards hit rate, and tends
+    /// toward wide, high-odds spreads with a poor payoff when they lose — the
+    /// classic "pick up pennies" profile, which the evaluation makes visible.
+    ProbProfit,
+}
+
 /// The horizon and thresholds the ranker applies. Mapped from TOML in a later
 /// phase.
 #[derive(Debug, Clone, Copy)]
 pub struct RankingConfig {
     /// Scoring horizon in calendar days, capped at expiry by the engine.
     pub horizon_days: f64,
+    /// What to maximise among candidates that clear the floors.
+    pub metric: RankMetric,
     /// Minimum expected-P/L-per-max-loss to open a trade.
     pub min_score: f64,
     /// Positive-expectancy floor, in dollars: expected P/L must exceed this.
@@ -37,6 +52,7 @@ impl Default for RankingConfig {
             // Shorter horizons (e.g. 5 days) land Monday/Tuesday forecasts on the
             // weekend, where the realized read collapses to the prior Friday.
             horizon_days: 7.0,
+            metric: RankMetric::ExpectedValue,
             min_score: 0.10,
             min_expected_pl: 0.0,
             scorer_sample_per_bar: 0,
@@ -131,9 +147,15 @@ pub fn rank(
             score,
             prob_profit,
         };
+        // Rank by the configured metric; break ties on the other so a field of
+        // equal-probability spreads still resolves to the highest-edge one.
+        let key = |c: &RankedChoice| match cfg.metric {
+            RankMetric::ExpectedValue => (c.score, c.prob_profit),
+            RankMetric::ProbProfit => (c.prob_profit, c.score),
+        };
         let better = match &best {
             None => true,
-            Some(current) => choice.score > current.score,
+            Some(current) => key(&choice) > key(current),
         };
         if better {
             best = Some(choice);

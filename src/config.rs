@@ -18,7 +18,7 @@ use crate::engine::{ExitRules, RankedStrategy, RunConfig, StagedStrategy, Strate
 use crate::execution::{Costs, DeltaSelector};
 use crate::model::{
     CandidateConfig, FeatureConfig, FeatureEngine, LognormalDriftModel, LognormalModelConfig,
-    RankingConfig,
+    RankMetric, RankingConfig,
 };
 use crate::signal::{
     ContractionMeasure, RsiCross, RsiTrendFiltered, SmaCross, VolatilityContractionBreakout,
@@ -455,6 +455,8 @@ impl CandidatesConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct RankingSectionConfig {
     pub horizon_days: f64,
+    /// `expected_value` (default) or `prob_profit`.
+    pub metric: RankMetric,
     pub min_score: f64,
     pub min_expected_pl: f64,
     /// Evaluation only: candidates per bar to price forward for the scorer test.
@@ -467,6 +469,7 @@ impl Default for RankingSectionConfig {
         let d = RankingConfig::default();
         Self {
             horizon_days: d.horizon_days,
+            metric: d.metric,
             min_score: d.min_score,
             min_expected_pl: d.min_expected_pl,
             scorer_sample_per_bar: d.scorer_sample_per_bar,
@@ -481,6 +484,7 @@ impl RankingSectionConfig {
         }
         Ok(RankingConfig {
             horizon_days: self.horizon_days,
+            metric: self.metric,
             min_score: self.min_score,
             min_expected_pl: self.min_expected_pl,
             scorer_sample_per_bar: self.scorer_sample_per_bar,
