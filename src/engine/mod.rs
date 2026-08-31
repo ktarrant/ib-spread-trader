@@ -26,8 +26,9 @@ use std::collections::BTreeMap;
 use crate::data::{ChainSeries, ChainSnapshot, EarningsEvent, Quality};
 use crate::execution::{Costs, Reject, Selector};
 use crate::model::{
-    CandidateConfig, EarningsDistance, FeatureEngine, Features, ForecastRecord, PriceDistribution,
-    PriceModel, RankingConfig, RankingFunnel, enumerate_verticals, rank,
+    Candidate, CandidateConfig, EarningsDistance, FeatureEngine, Features, ForecastRecord,
+    PriceDistribution, PriceModel, RankingConfig, RankingFunnel, ScorerRecord, enumerate_verticals,
+    expected_pl_and_score, rank,
 };
 use crate::portfolio::{ExitReason, Portfolio, TradePrediction};
 use crate::signal::{MarketView, Signal};
@@ -235,6 +236,9 @@ pub struct SymbolRun {
     /// Ranked mode only: one scored forecast per option bar, for model evaluation.
     /// Empty for the staged pipeline.
     pub forecasts: Vec<ForecastRecord>,
+    /// Ranked mode only, and only when `scorer_sample_per_bar > 0`: sampled
+    /// candidates priced forward, to test whether the score predicts realized P/L.
+    pub scorer_records: Vec<ScorerRecord>,
 }
 
 /// Replay one symbol/expiry.
@@ -261,6 +265,7 @@ pub fn run_symbol(
     let mut opened_at_index: BTreeMap<usize, usize> = BTreeMap::new();
     let mut carried_trigger: Option<crate::signal::Trigger> = None;
     let mut forecasts: Vec<ForecastRecord> = Vec::new();
+    let mut scorer_records: Vec<ScorerRecord> = Vec::new();
 
     let timeline = series.merged_timeline();
 
@@ -456,6 +461,20 @@ pub fn run_symbol(
                                 &ranked.candidates,
                                 &mut funnel,
                             );
+                            // Scorer evaluation: sample candidates and price them
+                            // forward to grade the score. Reads the candidates
+                            // before `rank` consumes them; eval-only.
+                            scorer_sample(
+                                series,
+                                &bar,
+                                &candidates,
+                                &dist,
+                                remaining_years,
+                                forward_scale,
+                                full_horizon_years,
+                                ranked.ranking.scorer_sample_per_bar,
+                                &mut scorer_records,
+                            );
                             let choice = rank(
                                 candidates,
                                 &dist,
@@ -558,7 +577,53 @@ pub fn run_symbol(
         equity_curve,
         settlement_price: settlement,
         forecasts,
+        scorer_records,
     })
+}
+
+/// Sample up to `sample_per_bar` candidates (a deterministic stride across the
+/// enumerated list, so it spans widths and strikes) and price each forward to the
+/// option bar exactly a horizon later, to test whether the score predicts the
+/// realized outcome. Eval-only — never touches a decision. Skips the bar when
+/// there is no option bar a horizon out (a holiday, or past the last one near
+/// expiry).
+#[allow(clippy::too_many_arguments)]
+fn scorer_sample(
+    series: &ChainSeries,
+    bar: &ChainSnapshot,
+    candidates: &[Candidate],
+    dist: &PriceDistribution,
+    remaining_years: f64,
+    forward_scale: f64,
+    full_horizon_years: f64,
+    sample_per_bar: usize,
+    out: &mut Vec<ScorerRecord>,
+) {
+    if sample_per_bar == 0 || candidates.is_empty() {
+        return;
+    }
+    let horizon_secs = (full_horizon_years * SECONDS_PER_YEAR) as i64;
+    let Some(horizon_chain) = series.snapshot_at(bar.ts + Duration::seconds(horizon_secs)) else {
+        return;
+    };
+    let stride = (candidates.len() / sample_per_bar).max(1);
+    for candidate in candidates.iter().step_by(stride).take(sample_per_bar) {
+        let (expected_pl, score) =
+            expected_pl_and_score(candidate, dist, remaining_years, forward_scale);
+        // Realized: the entry cost is already in `cost_basis`; close on the
+        // horizon bar's quotes, falling back to intrinsic if a leg stopped quoting.
+        let realized_value = crate::execution::exit_credit(&candidate.spread, &horizon_chain)
+            .unwrap_or_else(|_| candidate.spread.payoff_at(horizon_chain.reference_price()));
+        let realized_pl = realized_value - candidate.cost_basis;
+        out.push(ScorerRecord {
+            ts: bar.ts,
+            symbol: series.symbol.clone(),
+            score,
+            expected_pl,
+            realized_pl,
+            max_loss: candidate.max_loss,
+        });
+    }
 }
 
 /// Score one bar's forecast against the underlying's realized price a horizon

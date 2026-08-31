@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::engine::SymbolRun;
-use crate::model::{ForecastRecord, ModelEval, RankingFunnel};
+use crate::model::{ForecastRecord, ModelEval, RankingFunnel, ScorerEval, ScorerRecord};
 use crate::portfolio::{ClosedTrade, ExitReason};
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -125,6 +125,10 @@ pub struct Report {
     /// Forecast-quality metrics for a ranked run; absent for a staged one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_eval: Option<ModelEvalReport>,
+    /// Scorer-discrimination metrics; present only when `scorer_sample_per_bar`
+    /// was set, so the candidates were priced forward.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scorer_eval: Option<ScorerEval>,
     /// What this result does and does not support. Part of the output, not a
     /// footnote — the numbers above are easy to over-read without it.
     pub caveats: Vec<String>,
@@ -230,7 +234,10 @@ pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> R
     };
 
     let model_eval = ModelEvalReport::build(runs);
-    let caveats = caveats(&totals, runs, model_eval.as_ref());
+    let scorer_records: Vec<ScorerRecord> =
+        runs.iter().flat_map(|r| r.scorer_records.iter().cloned()).collect();
+    let scorer_eval = ScorerEval::from_records(&scorer_records);
+    let caveats = caveats(&totals, runs, model_eval.as_ref(), scorer_eval.as_ref());
     Report {
         strategy: strategy.to_string(),
         expiry,
@@ -238,12 +245,18 @@ pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> R
         symbols,
         trades,
         model_eval,
+        scorer_eval,
         caveats,
     }
 }
 
 /// What the numbers above cannot support, stated with them rather than after.
-fn caveats(totals: &Totals, runs: &[SymbolRun], model_eval: Option<&ModelEvalReport>) -> Vec<String> {
+fn caveats(
+    totals: &Totals,
+    runs: &[SymbolRun],
+    model_eval: Option<&ModelEvalReport>,
+    scorer_eval: Option<&ScorerEval>,
+) -> Vec<String> {
     let mut out = vec![
         "No Sharpe or annualised return is reported: one expiry and ~44 sessions \
          cannot support one, and quoting it would make the result look more settled \
@@ -281,6 +294,23 @@ fn caveats(totals: &Totals, runs: &[SymbolRun], model_eval: Option<&ModelEvalRep
                 100.0 * skill,
             ));
         }
+    }
+
+    // Does the score actually predict realized P/L? The one thing that says
+    // whether the ranked P&L is selection skill or a lucky draw.
+    if let Some(scorer) = scorer_eval {
+        let rho = scorer.spearman;
+        let verdict = if rho > 0.10 {
+            "the score discriminates: higher-scored candidates realized more"
+        } else if rho < -0.10 {
+            "the score is inverted: higher-scored candidates realized LESS — the ranker is picking the wrong side"
+        } else {
+            "the score does not discriminate: realized P/L barely tracks the score, so the ranked selection is close to random"
+        };
+        out.push(format!(
+            "Scorer test over {} sampled candidates priced forward: Spearman {rho:+.2} — {verdict}.",
+            scorer.records
+        ));
     }
 
     if totals.trades < 30 {
@@ -459,6 +489,25 @@ pub fn write_csvs(dir: &Path, report: &Report, runs: &[SymbolRun]) -> Result<()>
         std::fs::write(dir.join("forecasts.csv"), forecasts)?;
     }
 
+    let has_scorer = runs.iter().any(|r| !r.scorer_records.is_empty());
+    if has_scorer {
+        let mut scorer = String::from("ts,symbol,score,expected_pl,realized_pl,max_loss\n");
+        for run in runs {
+            for s in &run.scorer_records {
+                scorer.push_str(&format!(
+                    "{},{},{:.6},{:.2},{:.2},{:.2}\n",
+                    s.ts.to_rfc3339(),
+                    s.symbol,
+                    s.score,
+                    s.expected_pl,
+                    s.realized_pl,
+                    s.max_loss,
+                ));
+            }
+        }
+        std::fs::write(dir.join("scorer.csv"), scorer)?;
+    }
+
     let has_predictions = report.trades.iter().any(|t| t.prediction.is_some());
     if has_predictions {
         let mut predictions =
@@ -535,6 +584,7 @@ mod tests {
             equity_curve: points,
             settlement_price: None,
             forecasts: Vec::new(),
+            scorer_records: Vec::new(),
         };
 
         let runs = vec![

@@ -457,6 +457,9 @@ pub struct RankingSectionConfig {
     pub horizon_days: f64,
     pub min_score: f64,
     pub min_expected_pl: f64,
+    /// Evaluation only: candidates per bar to price forward for the scorer test.
+    /// `0` (the default) disables it, so normal runs pay nothing.
+    pub scorer_sample_per_bar: usize,
 }
 
 impl Default for RankingSectionConfig {
@@ -466,6 +469,7 @@ impl Default for RankingSectionConfig {
             horizon_days: d.horizon_days,
             min_score: d.min_score,
             min_expected_pl: d.min_expected_pl,
+            scorer_sample_per_bar: d.scorer_sample_per_bar,
         }
     }
 }
@@ -479,6 +483,7 @@ impl RankingSectionConfig {
             horizon_days: self.horizon_days,
             min_score: self.min_score,
             min_expected_pl: self.min_expected_pl,
+            scorer_sample_per_bar: self.scorer_sample_per_bar,
         })
     }
 }

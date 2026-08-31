@@ -192,6 +192,131 @@ impl ModelEval {
     }
 }
 
+/// One sampled candidate, priced forward to the horizon, for the scorer test:
+/// does the model's `score` actually predict the realized P/L?
+#[derive(Debug, Clone, Serialize)]
+pub struct ScorerRecord {
+    pub ts: DateTime<Utc>,
+    pub symbol: String,
+    /// The rank score the model assigned (`E[P/L] / max_loss`).
+    pub score: f64,
+    /// The model's expected P/L, in dollars.
+    pub expected_pl: f64,
+    /// What the candidate actually made, opened now and closed on the tape a
+    /// horizon later (or at intrinsic when a leg stopped quoting).
+    pub realized_pl: f64,
+    pub max_loss: f64,
+}
+
+/// One score-decile's realized outcome.
+#[derive(Debug, Clone, Serialize)]
+pub struct DecileStat {
+    /// 1 (lowest score) … 10 (highest).
+    pub decile: usize,
+    pub count: usize,
+    pub mean_score: f64,
+    pub mean_realized_pl: f64,
+    pub mean_realized_pl_per_risk: f64,
+}
+
+/// Whether the ranker's score discriminates: realized P/L bucketed by score
+/// decile, plus the Spearman rank correlation between score and realized P/L. A
+/// good scorer shows realized P/L rising across the deciles and a positive rho.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScorerEval {
+    pub records: usize,
+    /// Spearman rank correlation of score vs realized P/L (−1..1).
+    pub spearman: f64,
+    /// Mean realized P/L per dollar of risk across all sampled candidates — the
+    /// null a decile has to beat to be "better than average".
+    pub mean_realized_pl_per_risk: f64,
+    pub deciles: Vec<DecileStat>,
+}
+
+impl ScorerEval {
+    /// `None` unless there are at least ten records — fewer cannot fill deciles.
+    pub fn from_records(records: &[ScorerRecord]) -> Option<Self> {
+        if records.len() < 10 {
+            return None;
+        }
+        let n = records.len();
+
+        let scores: Vec<f64> = records.iter().map(|r| r.score).collect();
+        let realized: Vec<f64> = records.iter().map(|r| r.realized_pl).collect();
+        let spearman = pearson(&average_ranks(&scores), &average_ranks(&realized));
+
+        let mean_realized_pl_per_risk =
+            records.iter().map(|r| r.realized_pl / r.max_loss).sum::<f64>() / n as f64;
+
+        // Sort a view by score, then cut into ten contiguous buckets.
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| records[a].score.total_cmp(&records[b].score));
+
+        let deciles = (0..10)
+            .map(|d| {
+                let slice = &order[d * n / 10..(d + 1) * n / 10];
+                let count = slice.len().max(1);
+                let mean = |f: &dyn Fn(&ScorerRecord) -> f64| {
+                    slice.iter().map(|&i| f(&records[i])).sum::<f64>() / count as f64
+                };
+                DecileStat {
+                    decile: d + 1,
+                    count: slice.len(),
+                    mean_score: mean(&|r| r.score),
+                    mean_realized_pl: mean(&|r| r.realized_pl),
+                    mean_realized_pl_per_risk: mean(&|r| r.realized_pl / r.max_loss),
+                }
+            })
+            .collect();
+
+        Some(Self {
+            records: n,
+            spearman,
+            mean_realized_pl_per_risk,
+            deciles,
+        })
+    }
+}
+
+/// Fractional ranks with ties averaged, so Spearman is exact under ties.
+fn average_ranks(values: &[f64]) -> Vec<f64> {
+    let mut order: Vec<usize> = (0..values.len()).collect();
+    order.sort_by(|&a, &b| values[a].total_cmp(&values[b]));
+    let mut ranks = vec![0.0; values.len()];
+    let mut i = 0;
+    while i < order.len() {
+        let mut j = i + 1;
+        while j < order.len() && values[order[j]] == values[order[i]] {
+            j += 1;
+        }
+        // Average rank (1-based) for the tied group order[i..j].
+        let avg = ((i + 1 + j) as f64) / 2.0;
+        for &idx in &order[i..j] {
+            ranks[idx] = avg;
+        }
+        i = j;
+    }
+    ranks
+}
+
+fn pearson(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len() as f64;
+    let (mean_a, mean_b) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
+    let mut cov = 0.0;
+    let (mut var_a, mut var_b) = (0.0, 0.0);
+    for (&x, &y) in a.iter().zip(b) {
+        let (dx, dy) = (x - mean_a, y - mean_b);
+        cov += dx * dy;
+        var_a += dx * dx;
+        var_b += dy * dy;
+    }
+    if var_a > 0.0 && var_b > 0.0 {
+        cov / (var_a.sqrt() * var_b.sqrt())
+    } else {
+        0.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +373,43 @@ mod tests {
         assert!(eval.crps_skill > 0.5, "model beats the far null: {}", eval.crps_skill);
         assert_eq!(eval.coverage_50, 1.0, "both realized inside [q25,q75]");
         assert_eq!(eval.directional_hit_rate, 1.0, "both moved up, as predicted");
+    }
+
+    fn scorer_records(realized: impl Fn(usize) -> f64) -> Vec<ScorerRecord> {
+        let ts = Utc.with_ymd_and_hms(2026, 8, 3, 15, 0, 0).unwrap();
+        (0..20)
+            .map(|i| ScorerRecord {
+                ts,
+                symbol: "T".into(),
+                score: i as f64 * 0.1,
+                expected_pl: i as f64,
+                realized_pl: realized(i),
+                max_loss: 100.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scorer_eval_detects_a_discriminating_score() {
+        // Realized P/L rises with score → Spearman 1 and increasing deciles.
+        let eval = ScorerEval::from_records(&scorer_records(|i| i as f64 * 2.0)).unwrap();
+        assert!((eval.spearman - 1.0).abs() < 1e-9, "{}", eval.spearman);
+        assert_eq!(eval.deciles.len(), 10);
+        assert!(
+            eval.deciles.last().unwrap().mean_realized_pl
+                > eval.deciles.first().unwrap().mean_realized_pl
+        );
+    }
+
+    #[test]
+    fn scorer_eval_flags_a_score_that_predicts_the_wrong_way() {
+        let eval = ScorerEval::from_records(&scorer_records(|i| -(i as f64))).unwrap();
+        assert!(eval.spearman < -0.9, "{}", eval.spearman);
+    }
+
+    #[test]
+    fn scorer_eval_needs_enough_records_to_fill_deciles() {
+        assert!(ScorerEval::from_records(&scorer_records(|i| i as f64)[..9]).is_none());
     }
 
     #[test]

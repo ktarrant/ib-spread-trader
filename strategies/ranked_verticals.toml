@@ -72,3 +72,7 @@ quantity = 1
 horizon_days = 7.0
 min_score = 0.10
 min_expected_pl = 0.0
+# Evaluation: price this many candidates per bar forward to the horizon, to test
+# whether the score predicts realized P/L (the scorer/decile diagnostic). Costs
+# a chain resolution per bar; set to 0 to turn it off.
+scorer_sample_per_bar = 20

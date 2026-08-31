@@ -22,7 +22,7 @@ pub mod ranker;
 
 pub use candidates::{Candidate, CandidateConfig, RankingFunnel, enumerate_verticals};
 pub use distribution::PriceDistribution;
-pub use eval::{ForecastRecord, ModelEval};
+pub use eval::{DecileStat, ForecastRecord, ModelEval, ScorerEval, ScorerRecord};
 pub use features::{EarningsDistance, FeatureConfig, FeatureEngine, Features};
 pub use price_model::{LognormalDriftModel, LognormalModelConfig, PriceModel};
-pub use ranker::{RankedChoice, RankingConfig, rank};
+pub use ranker::{RankedChoice, RankingConfig, expected_pl_and_score, rank};

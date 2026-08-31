@@ -23,6 +23,10 @@ pub struct RankingConfig {
     pub min_score: f64,
     /// Positive-expectancy floor, in dollars: expected P/L must exceed this.
     pub min_expected_pl: f64,
+    /// Evaluation only: how many candidates per bar to sample and price forward
+    /// to the horizon, to test whether the score actually predicts realized P/L.
+    /// `0` disables it (the default), so normal runs pay nothing.
+    pub scorer_sample_per_bar: usize,
 }
 
 impl Default for RankingConfig {
@@ -35,6 +39,7 @@ impl Default for RankingConfig {
             horizon_days: 7.0,
             min_score: 0.10,
             min_expected_pl: 0.0,
+            scorer_sample_per_bar: 0,
         }
     }
 }
@@ -54,6 +59,42 @@ pub struct RankedChoice {
 /// the funnel. `remaining_years` is the time from the horizon to expiry (zero
 /// scores at expiry); `forward_scale` maps a sampled spot to its forward,
 /// preserving the current parity basis.
+/// The model's expected P/L and score (`E[P/L] / max_loss`) for one candidate.
+/// Shared by `rank` and the scorer evaluation so the number the ranker acts on
+/// and the number the evaluation grades can never drift apart.
+pub fn expected_pl_and_score(
+    candidate: &Candidate,
+    dist: &PriceDistribution,
+    remaining_years: f64,
+    forward_scale: f64,
+) -> (f64, f64) {
+    let expected_value = dist.expected(|s| {
+        candidate
+            .spread
+            .model_value(s * forward_scale, remaining_years, &candidate.leg_vols)
+    });
+    let expected_pl = expected_value - candidate.cost_basis;
+    (expected_pl, expected_pl / candidate.max_loss)
+}
+
+/// Model probability the candidate is worth more than its cost basis at the
+/// horizon. Its own pass over the grid, computed only for a candidate worth
+/// keeping.
+fn prob_profit(
+    candidate: &Candidate,
+    dist: &PriceDistribution,
+    remaining_years: f64,
+    forward_scale: f64,
+) -> f64 {
+    dist.expected(|s| {
+        let value =
+            candidate
+                .spread
+                .model_value(s * forward_scale, remaining_years, &candidate.leg_vols);
+        f64::from(value > candidate.cost_basis)
+    })
+}
+
 pub fn rank(
     candidates: Vec<Candidate>,
     dist: &PriceDistribution,
@@ -65,30 +106,19 @@ pub fn rank(
     let mut best: Option<RankedChoice> = None;
 
     for candidate in candidates {
-        let expected_value = dist.expected(|s| {
-            candidate
-                .spread
-                .model_value(s * forward_scale, remaining_years, &candidate.leg_vols)
-        });
-        let expected_pl = expected_value - candidate.cost_basis;
+        let (expected_pl, score) =
+            expected_pl_and_score(&candidate, dist, remaining_years, forward_scale);
         if expected_pl <= cfg.min_expected_pl {
             continue;
         }
         funnel.positive_ev += 1;
 
-        let score = expected_pl / candidate.max_loss;
         if score < cfg.min_score {
             continue;
         }
         funnel.above_min_score += 1;
 
-        let prob_profit = dist.expected(|s| {
-            let value =
-                candidate
-                    .spread
-                    .model_value(s * forward_scale, remaining_years, &candidate.leg_vols);
-            f64::from(value > candidate.cost_basis)
-        });
+        let prob_profit = prob_profit(&candidate, dist, remaining_years, forward_scale);
 
         let choice = RankedChoice {
             candidate,
