@@ -28,7 +28,11 @@ pub struct RankingConfig {
 impl Default for RankingConfig {
     fn default() -> Self {
         Self {
-            horizon_days: 5.0,
+            // One calendar week: a forecast made on a given weekday is scored
+            // against the same weekday next week, which is always a trading bar.
+            // Shorter horizons (e.g. 5 days) land Monday/Tuesday forecasts on the
+            // weekend, where the realized read collapses to the prior Friday.
+            horizon_days: 7.0,
             min_score: 0.10,
             min_expected_pl: 0.0,
         }

@@ -36,9 +36,6 @@ use crate::structure::Structure;
 
 /// Seconds in a calendar year, matching `pricing::year_fraction`.
 const SECONDS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0;
-/// Forecasts with less than half a day to the horizon are point forecasts at
-/// spot with nothing to predict; they are not scored.
-const MIN_EVAL_HORIZON_YEARS: f64 = 0.5 / 365.25;
 
 pub mod exits;
 
@@ -424,13 +421,17 @@ pub fn run_symbol(
                     let dist = ranked.model.forecast(&features, horizon_years);
 
                     // Score the forecast against what the underlying actually did a
-                    // horizon later. Eval-only — never on the decision path.
+                    // horizon later. Eval-only — never on the decision path. Uses
+                    // the *full* (uncapped) horizon so the realized read lands on a
+                    // fixed same-weekday bar; near expiry the target runs past the
+                    // window and the bar is simply not scored (see score_forecast).
+                    let full_horizon_years = ranked.ranking.horizon_days / 365.25;
                     if let Some(record) = score_forecast(
                         series,
                         &bar,
                         &features,
                         &dist,
-                        horizon_years,
+                        full_horizon_years,
                         ranked.model.as_ref(),
                     ) {
                         forecasts.push(record);
@@ -575,12 +576,15 @@ fn score_forecast(
     horizon_years: f64,
     model: &dyn PriceModel,
 ) -> Option<ForecastRecord> {
-    if horizon_years <= MIN_EVAL_HORIZON_YEARS {
-        return None;
-    }
+    // Read the realized underlying at *exactly* the horizon offset. A 7-day
+    // horizon lands on the same weekday and time a week later, which is a real
+    // trading bar — so an exact lookup gives every intraday forecast a distinct
+    // target and never resolves into a closed weekend. When the target is a
+    // holiday, a missing slot, or past the loaded window (the last week before
+    // expiry), the exact lookup misses and the bar is not scored.
     let horizon_secs = (horizon_years * SECONDS_PER_YEAR) as i64;
     let realized = series
-        .underlying_asof(bar.ts + Duration::seconds(horizon_secs))?
+        .underlying_at(bar.ts + Duration::seconds(horizon_secs))?
         .price()?;
 
     // The random-walk null: same model, but features that carry no drift and let
