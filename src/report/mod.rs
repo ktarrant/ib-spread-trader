@@ -386,6 +386,7 @@ fn reason_key(reason: ExitReason) -> &'static str {
     match reason {
         ExitReason::ProfitTarget => "profit_target",
         ExitReason::StopLoss => "stop_loss",
+        ExitReason::ForecastTarget => "forecast_target",
         ExitReason::UnderlyingPastShortStrike => "underlying_past_short",
         ExitReason::TimeDecay => "time_decay",
         ExitReason::BeforeEarnings => "before_earnings",

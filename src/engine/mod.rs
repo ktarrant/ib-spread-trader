@@ -170,7 +170,7 @@ fn entry_gate(
 /// A decision taken on one bar, to be executed on the next.
 #[derive(Debug, Clone)]
 enum Intent {
-    Open(Spread, Option<TradePrediction>),
+    Open(Spread, Option<TradePrediction>, Option<f64>),
     Close { id: usize, reason: ExitReason },
 }
 
@@ -391,7 +391,9 @@ pub fn run_symbol(
                                 EntryGate::TooCloseToExpiry => census.too_close_to_expiry += 1,
                                 EntryGate::EarningsBlackout => census.earnings_blackout += 1,
                                 EntryGate::Open => match staged.selector.resolve(&spec, &bar) {
-                                    Ok(spread) => entering = Some(Intent::Open(spread, None)),
+                                    Ok(spread) => {
+                                        entering = Some(Intent::Open(spread, None, None))
+                                    }
                                     Err(reject) => census.reject(&reject),
                                 },
                             },
@@ -490,9 +492,23 @@ pub fn run_symbol(
                                     score: choice.score,
                                     prob_profit: choice.prob_profit,
                                 };
+                                // The forecast target: the favourable quantile of
+                                // the entry distribution, in the trade's direction.
+                                let forecast_target =
+                                    ranked.ranking.forecast_target_quantile.map(|q| {
+                                        let level = if exits::profits_from_a_rise(
+                                            &choice.candidate.spread,
+                                        ) {
+                                            q
+                                        } else {
+                                            1.0 - q
+                                        };
+                                        dist.quantile(level)
+                                    });
                                 entering = Some(Intent::Open(
                                     choice.candidate.spread,
                                     Some(prediction),
+                                    forecast_target,
                                 ));
                             }
                         }
@@ -687,13 +703,14 @@ fn execute(
     index: usize,
 ) -> Result<()> {
     match intent {
-        Intent::Open(spread, prediction) => {
+        Intent::Open(spread, prediction, forecast_target) => {
             // The bar that arrives may not quote what the previous one did. A
             // missed fill is a real outcome, counted rather than forced.
             match portfolio.open(spread.clone(), bar, &config.costs) {
                 Ok(_) => {
                     if let Some(position) = portfolio.open.last_mut() {
                         position.prediction = *prediction;
+                        position.forecast_target = *forecast_target;
                     }
                 }
                 Err(_) => census.unfillable_intents += 1,

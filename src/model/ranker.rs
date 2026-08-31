@@ -38,6 +38,11 @@ pub struct RankingConfig {
     pub min_score: f64,
     /// Positive-expectancy floor, in dollars: expected P/L must exceed this.
     pub min_expected_pl: f64,
+    /// If set, close a position when the underlying reaches this quantile of the
+    /// entry forecast in the trade's favour (e.g. 0.85 = the 85th percentile of
+    /// the up-move for a bullish trade). Grounds the exit on the same forecast the
+    /// entry used. `None` disables it.
+    pub forecast_target_quantile: Option<f64>,
     /// Evaluation only: how many candidates per bar to sample and price forward
     /// to the horizon, to test whether the score actually predicts realized P/L.
     /// `0` disables it (the default), so normal runs pay nothing.
@@ -55,6 +60,7 @@ impl Default for RankingConfig {
             metric: RankMetric::ExpectedValue,
             min_score: 0.10,
             min_expected_pl: 0.0,
+            forecast_target_quantile: None,
             scorer_sample_per_bar: 0,
         }
     }
@@ -200,7 +206,7 @@ mod tests {
             spread,
             entry_debit: 190.0,
             cost_basis: 192.6,
-            max_profit: 500.0 - 192.6,
+            max_profit: Some(500.0 - 192.6),
             max_loss: 192.6,
             leg_vols: vec![0.2, 0.2],
             rel_spread: 0.05,
@@ -281,7 +287,7 @@ mod tests {
         // on the same expected P/L.
         let mut tighter = bull_call();
         tighter.max_loss = 96.3;
-        tighter.max_profit = 500.0 - 96.3;
+        tighter.max_profit = Some(500.0 - 96.3);
 
         let choice = rank(
             vec![bull_call(), tighter],

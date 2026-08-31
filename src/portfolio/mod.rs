@@ -20,6 +20,10 @@ use crate::spread::{CONTRACT_MULTIPLIER, Side, Spread};
 pub enum ExitReason {
     ProfitTarget,
     StopLoss,
+    /// The underlying reached the forecast's target — the move the trade bet on
+    /// has played out, so take it. Grounds the exit on the same forecast the
+    /// entry used, and works for a naked long as well as a vertical.
+    ForecastTarget,
     /// The underlying crossed the short strike — near max profit, close it.
     UnderlyingPastShortStrike,
     /// Too much of the time to expiry has elapsed.
@@ -60,6 +64,10 @@ pub struct OpenPosition {
     pub max_loss: Option<f64>,
     /// The ranked model's prediction for this trade, if it came from that path.
     pub prediction: Option<TradePrediction>,
+    /// The underlying price at which the forecast-target exit closes this
+    /// position (a favorable quantile of the entry forecast). `None` unless the
+    /// ranked config enabled it.
+    pub forecast_target: Option<f64>,
 }
 
 impl OpenPosition {
@@ -142,6 +150,7 @@ impl Portfolio {
             entry_debit: debit,
             entry_commission: commission,
             prediction: None,
+            forecast_target: None,
         });
         Ok(id)
     }

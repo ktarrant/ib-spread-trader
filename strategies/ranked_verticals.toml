@@ -77,6 +77,12 @@ quantity = 1
 horizon_days = 7.0
 min_score = 0.10
 min_expected_pl = 0.0
+# Close when the underlying reaches this quantile of the entry forecast in the
+# trade's favour — the same forecast that set the strikes says the move has
+# played out. Works for naked longs (no short strike to close on) and verticals
+# alike. Lower = take profit sooner (higher win rate); too high overshoots the
+# forecast's plausible range and the trade round-trips.
+forecast_target_quantile = 0.85
 # Evaluation: price this many candidates per bar forward to the horizon, to test
 # whether the score predicts realized P/L (the scorer/decile diagnostic). Costs
 # a chain resolution per bar; set to 0 to turn it off.

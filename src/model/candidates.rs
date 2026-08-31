@@ -23,6 +23,10 @@ pub struct CandidateConfig {
     pub rights: Vec<OptionRight>,
     pub allow_debit: bool,
     pub allow_credit: bool,
+    /// Also enumerate single-leg long calls/puts (no short strike). A naked long
+    /// keeps the full upside a vertical caps — efficient far from the money, where
+    /// the short leg's credit is a rounding error against the upside it forfeits.
+    pub allow_naked_long: bool,
     /// Strike-distance bounds, in the underlying's units.
     pub min_width: f64,
     pub max_width: f64,
@@ -39,6 +43,7 @@ impl Default for CandidateConfig {
             rights: vec![OptionRight::Call, OptionRight::Put],
             allow_debit: true,
             allow_credit: true,
+            allow_naked_long: true,
             min_width: 0.0,
             max_width: f64::INFINITY,
             max_relative_spread: 0.5,
@@ -57,8 +62,9 @@ pub struct Candidate {
     /// Total out-of-pocket to enter and exit: `entry_debit + round-trip commission`.
     /// The ranker subtracts this from expected value.
     pub cost_basis: f64,
-    /// Structural best/worst outcome, net of `cost_basis`. `max_loss` is positive.
-    pub max_profit: f64,
+    /// Structural best outcome net of `cost_basis`; `None` for an uncapped
+    /// naked long call. `max_loss` is positive (a long can lose only its premium).
+    pub max_profit: Option<f64>,
     pub max_loss: f64,
     /// Entry implied vol per leg, aligned with `spread.legs`, for mark-to-model.
     pub leg_vols: Vec<f64>,
@@ -188,7 +194,7 @@ pub fn enumerate_verticals(
 
                 let round_trip_commission = 2.0 * costs.commission(&spread);
                 let cost_basis = debit + round_trip_commission;
-                let max_profit = hi - cost_basis;
+                let max_profit = Some(hi - cost_basis);
                 let max_loss = cost_basis - lo;
                 // A non-positive max loss is a mispriced arbitrage, i.e. bad data;
                 // it also makes P/L-per-risk meaningless. Refuse it.
@@ -216,6 +222,68 @@ pub fn enumerate_verticals(
                     max_profit,
                     max_loss,
                     leg_vols,
+                    rel_spread,
+                    exit_spread_cost,
+                });
+            }
+        }
+
+        // Naked long: a single long leg, no short. Its risk is the premium (a
+        // long can only lose what it paid), so it clears the same funnel with
+        // `max_loss = cost_basis`; a long call's profit is uncapped (`max_profit
+        // = None`), a long put's is bounded by a zero underlying.
+        if cfg.allow_naked_long {
+            for long in &strikes {
+                let spread = Spread::new(
+                    chain.symbol.clone(),
+                    vec![Leg {
+                        contract_id: long.contract_id,
+                        strike: long.strike,
+                        right,
+                        side: Side::Long,
+                        quantity: cfg.quantity,
+                    }],
+                );
+                let Ok(debit) = entry_debit(&spread, chain) else {
+                    continue;
+                };
+                if debit <= 0.0 {
+                    continue; // a long always costs; a non-positive debit is bad data
+                }
+                funnel.enumerated += 1;
+                funnel.priceable += 1; // a long's risk is always bounded
+
+                let rel_spread = relative_spread(long.bid, long.ask);
+                if rel_spread > cfg.max_relative_spread {
+                    continue;
+                }
+                funnel.liquid += 1;
+
+                let round_trip_commission = 2.0 * costs.commission(&spread);
+                let cost_basis = debit + round_trip_commission;
+                let max_loss = cost_basis; // payoff floor is 0: lose only the premium
+                if max_loss > cfg.max_loss {
+                    continue;
+                }
+                funnel.within_loss += 1;
+
+                // A long put is capped by a zero underlying; a long call is not.
+                let max_profit = match right {
+                    OptionRight::Put => {
+                        Some(long.strike * cfg.quantity as f64 * CONTRACT_MULTIPLIER - cost_basis)
+                    }
+                    OptionRight::Call => None,
+                };
+                let exit_spread_cost =
+                    0.5 * (long.ask - long.bid) * cfg.quantity as f64 * CONTRACT_MULTIPLIER;
+
+                candidates.push(Candidate {
+                    spread,
+                    entry_debit: debit,
+                    cost_basis,
+                    max_profit,
+                    max_loss,
+                    leg_vols: vec![long.implied_vol.expect("selectable leg has a vol")],
                     rel_spread,
                     exit_spread_cost,
                 });
@@ -281,6 +349,28 @@ mod tests {
         assert!(candidates.iter().any(|c| c.entry_debit < 0.0), "a credit");
         assert!(candidates.iter().all(|c| c.max_loss > 0.0));
         assert_eq!(funnel.enumerated, funnel.priceable, "verticals are bounded");
+    }
+
+    #[test]
+    fn naked_longs_are_enumerated_with_premium_as_risk() {
+        let mut funnel = RankingFunnel::default();
+        let cfg = CandidateConfig {
+            rights: vec![OptionRight::Call],
+            allow_debit: false,
+            allow_credit: false,
+            allow_naked_long: true,
+            max_loss: f64::INFINITY,
+            ..Default::default()
+        };
+        let candidates = enumerate_verticals(&chain(), &Costs::default(), &cfg, &mut funnel);
+
+        assert!(!candidates.is_empty(), "naked long calls enumerate on their own");
+        for c in &candidates {
+            assert_eq!(c.spread.legs.len(), 1, "a naked long is a single leg");
+            // Risk is the premium; a long call's upside is uncapped.
+            assert!((c.max_loss - c.cost_basis).abs() < 1e-9);
+            assert_eq!(c.max_profit, None, "a long call has no capped max profit");
+        }
     }
 
     #[test]

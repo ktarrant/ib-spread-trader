@@ -15,7 +15,7 @@ use serde::Serialize;
 use crate::data::EarningsEvent;
 use crate::domain::OptionRight;
 use crate::portfolio::{ExitReason, OpenPosition};
-use crate::spread::Side;
+use crate::spread::{Side, Spread};
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct ExitRules {
@@ -55,7 +55,15 @@ impl ExitRules {
             return Some(ExitReason::ProfitTarget);
         }
 
-        // 2. Underlying past short strike — near max profit, take it.
+        // 2. Forecast target reached — the move the trade bet on has played out.
+        if let Some(target) = position.forecast_target
+            && let Some(spot) = ctx.underlying_price
+            && forecast_target_reached(&position.spread, spot, target)
+        {
+            return Some(ExitReason::ForecastTarget);
+        }
+
+        // 3. Underlying past short strike — near max profit, take it.
         if self.underlying_past_short_strike
             && let Some(spot) = ctx.underlying_price
             && is_past_short_strike(&position.spread, spot)
@@ -185,6 +193,23 @@ pub fn in_earnings_blackout(
 
 /// True when the underlying has crossed the short strike in the direction that
 /// means the spread is near max profit.
+/// Whether the structure profits from the underlying rising — its payoff is
+/// higher far above the strikes than at zero. Determines which way the forecast
+/// target points (up for a bull, down for a bear), for any vertical or naked long.
+pub fn profits_from_a_rise(spread: &Spread) -> bool {
+    let highest = spread.legs.iter().map(|l| l.strike).fold(0.0_f64, f64::max);
+    spread.payoff_at(highest * 2.0 + 1.0) > spread.payoff_at(0.0)
+}
+
+/// Whether the underlying has reached the forecast target in the trade's favour.
+fn forecast_target_reached(spread: &Spread, spot: f64, target: f64) -> bool {
+    if profits_from_a_rise(spread) {
+        spot >= target
+    } else {
+        spot <= target
+    }
+}
+
 fn is_past_short_strike(spread: &crate::spread::Spread, spot: f64) -> bool {
     for leg in &spread.legs {
         if leg.side != Side::Short {
@@ -235,6 +260,7 @@ mod tests {
             max_loss: Some(170.0),
             spread,
             prediction: None,
+            forecast_target: None,
         }
     }
 
@@ -366,6 +392,47 @@ mod tests {
     }
 
     #[test]
+    fn forecast_target_fires_in_the_trade_direction() {
+        // A bull call profits from a rise, so its target is an upper level.
+        let mut bull = position();
+        bull.forecast_target = Some(760.0);
+        let rules = ExitRules::default();
+        assert_eq!(rules.triggered(&bull, &ctx(0.0, 759.99)), None);
+        assert_eq!(
+            rules.triggered(&bull, &ctx(0.0, 760.01)),
+            Some(ExitReason::ForecastTarget)
+        );
+
+        // A bear put profits from a fall — the target is a lower level.
+        let mut bear = position();
+        bear.spread = Spread::new(
+            "SPY",
+            vec![
+                crate::spread::Leg {
+                    contract_id: 1,
+                    strike: 755.0,
+                    right: OptionRight::Put,
+                    side: Side::Long,
+                    quantity: 1,
+                },
+                crate::spread::Leg {
+                    contract_id: 2,
+                    strike: 745.0,
+                    right: OptionRight::Put,
+                    side: Side::Short,
+                    quantity: 1,
+                },
+            ],
+        );
+        bear.forecast_target = Some(748.0);
+        assert_eq!(rules.triggered(&bear, &ctx(0.0, 748.01)), None);
+        assert_eq!(
+            rules.triggered(&bear, &ctx(0.0, 747.99)),
+            Some(ExitReason::ForecastTarget)
+        );
+    }
+
+    #[test]
     fn underlying_past_short_strike_fires_for_bear_put() {
         let spread = Spread::new(
             "SPY",
@@ -395,6 +462,7 @@ mod tests {
             max_loss: Some(170.0),
             spread,
             prediction: None,
+            forecast_target: None,
         };
         let rules = ExitRules {
             underlying_past_short_strike: true,

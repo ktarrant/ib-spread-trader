@@ -426,6 +426,7 @@ pub struct CandidatesConfig {
     pub rights: Vec<OptionRight>,
     pub allow_debit: bool,
     pub allow_credit: bool,
+    pub allow_naked_long: bool,
     pub min_width: f64,
     pub max_width: Option<f64>,
     pub max_relative_spread: f64,
@@ -440,6 +441,7 @@ impl Default for CandidatesConfig {
             rights: d.rights,
             allow_debit: d.allow_debit,
             allow_credit: d.allow_credit,
+            allow_naked_long: d.allow_naked_long,
             min_width: d.min_width,
             // The runtime default is unbounded; expose that as "no cap".
             max_width: None,
@@ -455,8 +457,8 @@ impl CandidatesConfig {
         if self.rights.is_empty() {
             bail!("`candidates.rights` is empty; nothing to enumerate");
         }
-        if !self.allow_debit && !self.allow_credit {
-            bail!("`candidates` allows neither debit nor credit verticals");
+        if !self.allow_debit && !self.allow_credit && !self.allow_naked_long {
+            bail!("`candidates` allows no structure at all (debit/credit/naked)");
         }
         if self.quantity < 1 {
             bail!("`candidates.quantity` must be at least 1");
@@ -468,6 +470,7 @@ impl CandidatesConfig {
             rights: self.rights.clone(),
             allow_debit: self.allow_debit,
             allow_credit: self.allow_credit,
+            allow_naked_long: self.allow_naked_long,
             min_width: self.min_width,
             max_width: self.max_width.unwrap_or(f64::INFINITY),
             max_relative_spread: self.max_relative_spread,
@@ -486,6 +489,9 @@ pub struct RankingSectionConfig {
     pub metric: RankMetric,
     pub min_score: f64,
     pub min_expected_pl: f64,
+    /// Close when the underlying reaches this quantile of the entry forecast in
+    /// the trade's favour (0.5–1.0). `None`/absent disables the forecast exit.
+    pub forecast_target_quantile: Option<f64>,
     /// Evaluation only: candidates per bar to price forward for the scorer test.
     /// `0` (the default) disables it, so normal runs pay nothing.
     pub scorer_sample_per_bar: usize,
@@ -499,6 +505,7 @@ impl Default for RankingSectionConfig {
             metric: d.metric,
             min_score: d.min_score,
             min_expected_pl: d.min_expected_pl,
+            forecast_target_quantile: d.forecast_target_quantile,
             scorer_sample_per_bar: d.scorer_sample_per_bar,
         }
     }
@@ -509,11 +516,17 @@ impl RankingSectionConfig {
         if self.horizon_days.is_nan() || self.horizon_days <= 0.0 {
             bail!("`ranking.horizon_days` must be positive");
         }
+        if let Some(q) = self.forecast_target_quantile
+            && !(0.5..=1.0).contains(&q)
+        {
+            bail!("`ranking.forecast_target_quantile` must be in 0.5..=1.0");
+        }
         Ok(RankingConfig {
             horizon_days: self.horizon_days,
             metric: self.metric,
             min_score: self.min_score,
             min_expected_pl: self.min_expected_pl,
+            forecast_target_quantile: self.forecast_target_quantile,
             scorer_sample_per_bar: self.scorer_sample_per_bar,
         })
     }

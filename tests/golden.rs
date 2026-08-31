@@ -349,24 +349,32 @@ fn the_ranked_strategy_reproduces_its_recorded_run() {
     // enumerating): the driftless default is selective and holds less often,
     // leaving far more bars to enumerate than the old drifted default did.
     let funnel = &totals.census.ranking;
-    assert_eq!(funnel.enumerated, 5_625_634);
-    assert_eq!(funnel.priceable, 5_625_634);
-    assert_eq!(funnel.liquid, 5_505_336);
-    assert_eq!(funnel.within_loss, 1_515_062);
-    assert_eq!(funnel.positive_ev, 40_211);
-    assert_eq!(funnel.above_min_score, 131);
+    assert_eq!(funnel.enumerated, 5_684_341);
+    assert_eq!(funnel.priceable, 5_684_341);
+    assert_eq!(funnel.liquid, 5_539_234);
+    assert_eq!(funnel.within_loss, 1_580_828);
+    assert_eq!(funnel.positive_ev, 17_248);
+    assert_eq!(funnel.above_min_score, 78);
     assert_eq!(funnel.chosen, 9, "chosen must equal the trade count");
 
-    // Every position exits on a quote (settlement is zero), and the short-strike
-    // exit takes profit when the underlying reaches the max-profit zone rather
-    // than waiting for a mark that arrives too late.
-    assert!((totals.total_pnl - 1940.60).abs() < 0.01, "{}", totals.total_pnl);
-    assert!((totals.traded_pnl - 1940.60).abs() < 0.01, "{}", totals.traded_pnl);
+    // Naked longs are in the universe now, and the forecast-target exit closes a
+    // position when the underlying reaches the favourable quantile of the entry
+    // forecast — the same forecast that set the strikes. Everything exits on a
+    // quote; settlement is zero.
+    assert!((totals.total_pnl - 751.10).abs() < 0.01, "{}", totals.total_pnl);
+    assert!((totals.traded_pnl - 751.10).abs() < 0.01, "{}", totals.traded_pnl);
     assert!(totals.settled_pnl.abs() < 0.01, "{}", totals.settled_pnl);
     assert_eq!(
-        totals.exits_by_reason["underlying_past_short"], 1,
-        "the SPY 774/779 bull call closes at the short strike, not worthless"
+        totals.exits_by_reason["forecast_target"], 7,
+        "most positions close when the forecast target is reached"
     );
+    // Naked longs (a single leg, no short) really do get chosen alongside verticals.
+    let naked = built
+        .trades
+        .iter()
+        .filter(|t| t.description.matches(|c| c == 'C' || c == 'P').count() == 1)
+        .count();
+    assert!(naked >= 1, "the ranker takes naked longs, not only verticals");
 
     // This selective run happens to pick all debit verticals; that credit
     // orientations are enumerated and priceable is covered by the candidates
