@@ -14,7 +14,7 @@
 use crate::data::ChainSnapshot;
 use crate::domain::OptionRight;
 use crate::execution::{Costs, entry_debit};
-use crate::spread::{Leg, Side, Spread};
+use crate::spread::{CONTRACT_MULTIPLIER, Leg, Side, Spread};
 
 /// Which verticals to enumerate, and the liquidity and loss limits a candidate
 /// must clear. Mapped from TOML in a later phase.
@@ -64,6 +64,11 @@ pub struct Candidate {
     pub leg_vols: Vec<f64>,
     /// Worst per-leg relative bid/ask spread — the liquidity the candidate cleared.
     pub rel_spread: f64,
+    /// Estimated cost of crossing the book to *close*, in dollars: half of each
+    /// leg's entry bid/ask spread. The entry crossing is already in `entry_debit`,
+    /// but a mark-to-model exit is at mid — so the ranker subtracts this to stop
+    /// the score over-crediting a spread it can only exit by crossing.
+    pub exit_spread_cost: f64,
 }
 
 /// The decision funnel for one bar (or accumulated across a run): how many
@@ -197,6 +202,13 @@ pub fn enumerate_verticals(
                     short.implied_vol.expect("selectable leg has a vol"),
                 ];
 
+                // Half of each leg's spread is what closing at mid would give back
+                // that a real crossed exit would not.
+                let exit_spread_cost = 0.5
+                    * ((long.ask - long.bid) + (short.ask - short.bid))
+                    * cfg.quantity as f64
+                    * CONTRACT_MULTIPLIER;
+
                 candidates.push(Candidate {
                     spread,
                     entry_debit: debit,
@@ -205,6 +217,7 @@ pub fn enumerate_verticals(
                     max_loss,
                     leg_vols,
                     rel_spread,
+                    exit_spread_cost,
                 });
             }
         }

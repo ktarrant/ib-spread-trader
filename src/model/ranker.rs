@@ -73,7 +73,9 @@ pub fn expected_pl_and_score(
             .spread
             .model_value(s * forward_scale, remaining_years, &candidate.leg_vols)
     });
-    let expected_pl = expected_value - candidate.cost_basis;
+    // The model value is a mid mark; a real exit crosses the book, so charge the
+    // exit spread here rather than let the score read optimistically.
+    let expected_pl = expected_value - candidate.cost_basis - candidate.exit_spread_cost;
     (expected_pl, expected_pl / candidate.max_loss)
 }
 
@@ -86,12 +88,15 @@ fn prob_profit(
     remaining_years: f64,
     forward_scale: f64,
 ) -> f64 {
+    // Profit means clearing the cost basis *and* the exit crossing — the same
+    // net breakeven the expected P/L is measured against.
+    let breakeven = candidate.cost_basis + candidate.exit_spread_cost;
     dist.expected(|s| {
         let value =
             candidate
                 .spread
                 .model_value(s * forward_scale, remaining_years, &candidate.leg_vols);
-        f64::from(value > candidate.cost_basis)
+        f64::from(value > breakeven)
     })
 }
 
@@ -177,6 +182,7 @@ mod tests {
             max_loss: 192.6,
             leg_vols: vec![0.2, 0.2],
             rel_spread: 0.05,
+            exit_spread_cost: 0.0,
         }
     }
 
