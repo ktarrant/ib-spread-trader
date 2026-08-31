@@ -94,6 +94,104 @@ impl ForecastRecord {
     }
 }
 
+/// Aggregate forecast-quality metrics over a set of records — the answer to "is
+/// the forecast any good?", judged on the dense per-bar data rather than the
+/// sparse trades.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelEval {
+    pub forecasts: usize,
+    /// Mean CRPS of the model and of the random-walk null. Lower is better.
+    pub crps_model: f64,
+    pub crps_null: f64,
+    /// `1 − crps_model/crps_null`: positive iff the model beats the null. The
+    /// headline number — the null-beating gate the tuning is judged against.
+    pub crps_skill: f64,
+    /// Fraction of outcomes that fell inside the central 50/80/90% intervals. A
+    /// calibrated model matches the nominal level (0.50/0.80/0.90).
+    pub coverage_50: f64,
+    pub coverage_80: f64,
+    pub coverage_90: f64,
+    /// Mean PIT (≈0.5 when unbiased) and its histogram over ten bins (flat when
+    /// calibrated), with a total-variation distance from uniform (0 = perfect).
+    pub pit_mean: f64,
+    pub pit_histogram: [usize; 10],
+    pub pit_calibration_error: f64,
+    /// Mean predictive stddev — sharpness. Only meaningful read next to coverage.
+    pub mean_stddev: f64,
+    /// Fraction of bars where the sign of the model's drift matched the realized
+    /// move. 0.5 is a coin flip.
+    pub directional_hit_rate: f64,
+}
+
+impl ModelEval {
+    /// `None` for an empty set (no scored forecasts, e.g. a staged run).
+    pub fn from_records(records: &[ForecastRecord]) -> Option<Self> {
+        if records.is_empty() {
+            return None;
+        }
+        let n = records.len() as f64;
+
+        let crps_model = records.iter().map(|r| r.model_crps).sum::<f64>() / n;
+        let crps_null = records.iter().map(|r| r.null_crps).sum::<f64>() / n;
+        let crps_skill = if crps_null > 0.0 {
+            1.0 - crps_model / crps_null
+        } else {
+            0.0
+        };
+
+        let coverage = |level: f64| {
+            records.iter().filter(|r| r.covers(level) == Some(true)).count() as f64 / n
+        };
+
+        let pit_mean = records.iter().map(|r| r.pit).sum::<f64>() / n;
+        let mut pit_histogram = [0usize; 10];
+        for r in records {
+            let bin = ((r.pit * 10.0).floor() as usize).min(9);
+            pit_histogram[bin] += 1;
+        }
+        // Total-variation distance of the PIT histogram from uniform.
+        let pit_calibration_error = 0.5
+            * pit_histogram
+                .iter()
+                .map(|&c| (c as f64 / n - 0.1).abs())
+                .sum::<f64>();
+
+        let mean_stddev = records.iter().map(|r| r.stddev).sum::<f64>() / n;
+
+        let (mut directional_hits, mut directional_total) = (0usize, 0usize);
+        for r in records {
+            let predicted = r.mean - r.spot;
+            let realized = r.realized - r.spot;
+            if predicted != 0.0 && realized != 0.0 {
+                directional_total += 1;
+                if predicted.signum() == realized.signum() {
+                    directional_hits += 1;
+                }
+            }
+        }
+        let directional_hit_rate = if directional_total > 0 {
+            directional_hits as f64 / directional_total as f64
+        } else {
+            0.0
+        };
+
+        Some(Self {
+            forecasts: records.len(),
+            crps_model,
+            crps_null,
+            crps_skill,
+            coverage_50: coverage(0.50),
+            coverage_80: coverage(0.80),
+            coverage_90: coverage(0.90),
+            pit_mean,
+            pit_histogram,
+            pit_calibration_error,
+            mean_stddev,
+            directional_hit_rate,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,6 +220,34 @@ mod tests {
         assert!(r.model_crps < r.null_crps, "the sharper model wins on CRPS");
         // Half the mass sits strictly below the outcome → PIT ½.
         assert!((r.pit - 0.5).abs() < 1e-9, "{}", r.pit);
+    }
+
+    #[test]
+    fn aggregate_metrics_summarize_a_record_set() {
+        assert!(ModelEval::from_records(&[]).is_none());
+
+        // Model predicts up (mean 102 > spot 100) and sits near the outcome; the
+        // null is far below.
+        let model = dist(vec![100.0, 104.0], vec![1.0, 1.0]);
+        let null = dist(vec![80.0, 81.0], vec![1.0, 1.0]);
+        let mk = |realized| {
+            ForecastRecord::score(
+                Utc.with_ymd_and_hms(2026, 8, 3, 15, 0, 0).unwrap(),
+                "T",
+                100.0,
+                100.0,
+                Some(0.2),
+                0.02,
+                &model,
+                &null,
+                realized,
+            )
+        };
+        let eval = ModelEval::from_records(&[mk(103.0), mk(101.0)]).unwrap();
+        assert_eq!(eval.forecasts, 2);
+        assert!(eval.crps_skill > 0.5, "model beats the far null: {}", eval.crps_skill);
+        assert_eq!(eval.coverage_50, 1.0, "both realized inside [q25,q75]");
+        assert_eq!(eval.directional_hit_rate, 1.0, "both moved up, as predicted");
     }
 
     #[test]

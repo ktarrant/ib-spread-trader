@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::engine::SymbolRun;
-use crate::model::RankingFunnel;
+use crate::model::{ForecastRecord, ModelEval, RankingFunnel};
 use crate::portfolio::{ClosedTrade, ExitReason};
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -74,6 +74,40 @@ pub struct Totals {
     pub census: Census,
 }
 
+/// One symbol's forecast-quality metrics.
+#[derive(Debug, Clone, Serialize)]
+pub struct SymbolModelEval {
+    pub symbol: String,
+    #[serde(flatten)]
+    pub eval: ModelEval,
+}
+
+/// Forecast-quality evaluation for a ranked run: pooled across every scored bar,
+/// and broken out per symbol. `None` for a staged run, which forecasts nothing.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelEvalReport {
+    pub pooled: ModelEval,
+    pub per_symbol: Vec<SymbolModelEval>,
+}
+
+impl ModelEvalReport {
+    fn build(runs: &[SymbolRun]) -> Option<Self> {
+        let pooled_records: Vec<ForecastRecord> =
+            runs.iter().flat_map(|r| r.forecasts.iter().cloned()).collect();
+        let pooled = ModelEval::from_records(&pooled_records)?;
+        let per_symbol = runs
+            .iter()
+            .filter_map(|run| {
+                ModelEval::from_records(&run.forecasts).map(|eval| SymbolModelEval {
+                    symbol: run.symbol.clone(),
+                    eval,
+                })
+            })
+            .collect();
+        Some(Self { pooled, per_symbol })
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub strategy: String,
@@ -81,6 +115,9 @@ pub struct Report {
     pub totals: Totals,
     pub symbols: Vec<SymbolSummary>,
     pub trades: Vec<ClosedTrade>,
+    /// Forecast-quality metrics for a ranked run; absent for a staged one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_eval: Option<ModelEvalReport>,
     /// What this result does and does not support. Part of the output, not a
     /// footnote — the numbers above are easy to over-read without it.
     pub caveats: Vec<String>,
@@ -172,25 +209,50 @@ pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> R
         census,
     };
 
-    let caveats = caveats(&totals, runs);
+    let model_eval = ModelEvalReport::build(runs);
+    let caveats = caveats(&totals, runs, model_eval.as_ref());
     Report {
         strategy: strategy.to_string(),
         expiry,
         totals,
         symbols,
         trades,
+        model_eval,
         caveats,
     }
 }
 
 /// What the numbers above cannot support, stated with them rather than after.
-fn caveats(totals: &Totals, runs: &[SymbolRun]) -> Vec<String> {
+fn caveats(totals: &Totals, runs: &[SymbolRun], model_eval: Option<&ModelEvalReport>) -> Vec<String> {
     let mut out = vec![
         "No Sharpe or annualised return is reported: one expiry and ~44 sessions \
          cannot support one, and quoting it would make the result look more settled \
          than it is."
             .to_string(),
     ];
+
+    // The null-beating gate: a forecast worse than a random walk is not a better
+    // forecaster, whatever P&L it happened to produce.
+    if let Some(eval) = model_eval {
+        let skill = eval.pooled.crps_skill;
+        if skill < 0.0 {
+            out.push(format!(
+                "The price model forecasts WORSE than a random-walk null (CRPS skill \
+                 {skill:+.2}): its drift and vol are miscalibrated, so the ranked P&L \
+                 below rests on a forecast that has not earned trust. Tune the model \
+                 before reading its edge."
+            ));
+        } else {
+            out.push(format!(
+                "The price model beats a random-walk null on CRPS by {:.0}% (skill \
+                 {skill:+.2}); mean PIT {:.2}, 50/90% coverage {:.2}/{:.2}.",
+                100.0 * skill,
+                eval.pooled.pit_mean,
+                eval.pooled.coverage_50,
+                eval.pooled.coverage_90,
+            ));
+        }
+    }
 
     if totals.trades < 30 {
         out.push(format!(
