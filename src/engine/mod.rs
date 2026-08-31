@@ -169,6 +169,16 @@ impl Strategy {
     }
 }
 
+/// One point on an account equity curve: total equity marked to market, and the
+/// capital currently at risk in open positions (what is "invested" — cash paid
+/// for debits, margin posted for credits, both captured by max loss).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct EquityPoint {
+    pub ts: DateTime<Utc>,
+    pub equity: f64,
+    pub invested: f64,
+}
+
 /// The universal entry gates, shared by both pipelines: a bar may be refused
 /// because a position is already open, or it is too close to expiry or earnings.
 enum EntryGate {
@@ -320,7 +330,7 @@ pub struct SymbolRun {
     pub option_quality: Quality,
     pub underlying_quality: Quality,
     pub portfolio: Portfolio,
-    pub equity_curve: Vec<(DateTime<Utc>, f64)>,
+    pub equity_curve: Vec<EquityPoint>,
     /// The underlying print settlement used, if anything was still open.
     pub settlement_price: Option<f64>,
     /// Ranked mode only: one scored forecast per option bar, for model evaluation.
@@ -385,7 +395,11 @@ pub fn run_symbol(
             }
 
             // 2. Mark.
-            equity_curve.push((bar.ts, portfolio.equity(&bar, &config.costs)));
+            equity_curve.push(EquityPoint {
+                ts: bar.ts,
+                equity: portfolio.equity(&bar, &config.costs),
+                invested: portfolio.capital_at_risk(),
+            });
 
             // 3. Exits.
             let next_earnings =
@@ -589,7 +603,11 @@ pub fn run_symbol(
                 .saturating_sub(opened_at_index.get(&id).copied().unwrap_or(0));
             portfolio.settle_at_expiry(id, price, series.expiry_instant(), held);
         }
-        equity_curve.push((series.expiry_instant(), portfolio.cash));
+        equity_curve.push(EquityPoint {
+            ts: series.expiry_instant(),
+            equity: portfolio.cash,
+            invested: portfolio.capital_at_risk(),
+        });
     }
 
     let final_equity = portfolio.cash;
@@ -638,7 +656,7 @@ pub struct SharedRun {
     pub initial_cash: f64,
     pub final_equity: f64,
     pub portfolio: Portfolio,
-    pub equity_curve: Vec<(DateTime<Utc>, f64)>,
+    pub equity_curve: Vec<EquityPoint>,
     pub per_symbol: Vec<SymbolDiag>,
     pub first_ts: Option<DateTime<Utc>>,
     pub last_ts: Option<DateTime<Utc>>,
@@ -680,7 +698,7 @@ pub fn run_shared(
     // sparse bars of its own symbol.
     let mut marks: BTreeMap<usize, f64> = BTreeMap::new();
     let mut sym_bars: Vec<usize> = vec![0; n];
-    let mut equity_curve: Vec<(DateTime<Utc>, f64)> = Vec::new();
+    let mut equity_curve: Vec<EquityPoint> = Vec::new();
 
     // Merged, ordered global timeline: (ts, symbol_idx, option_index?).
     let mut global: Vec<(DateTime<Utc>, usize, Option<usize>)> = Vec::new();
@@ -799,7 +817,11 @@ pub fn run_shared(
         }
         if !option_bars.is_empty() {
             let equity = portfolio.cash + marks.values().sum::<f64>();
-            equity_curve.push((ts, equity));
+            equity_curve.push(EquityPoint {
+                ts,
+                equity,
+                invested: portfolio.capital_at_risk(),
+            });
         }
 
         // 3. Decide per symbol: exits (queue real closes, execute synthetic) then
@@ -970,7 +992,11 @@ pub fn run_shared(
             .filter_map(|p| marks.get(&p.id))
             .sum::<f64>();
     if had_open && let Some(last_expiry) = all_series.iter().map(|s| s.expiry_instant()).max() {
-        equity_curve.push((last_expiry, final_equity));
+        equity_curve.push(EquityPoint {
+            ts: last_expiry,
+            equity: final_equity,
+            invested: portfolio.capital_at_risk(),
+        });
     }
 
     let strategy_name = strategies
@@ -1796,7 +1822,7 @@ mod tests {
         assert_eq!(run.final_equity, run.initial_cash);
         assert_eq!(run.census.triggers, 0);
         assert!(run.portfolio.closed.is_empty());
-        assert!(run.equity_curve.iter().all(|&(_, e)| e == run.initial_cash));
+        assert!(run.equity_curve.iter().all(|p| p.equity == run.initial_cash));
     }
 
     /// With no exit rules at all, the position has to survive to expiry and
@@ -1821,9 +1847,9 @@ mod tests {
 
         // The curve must end where the summary says it ended, at the settlement
         // instant — not at the final option bar's mark a day earlier.
-        let &(last_ts, last_equity) = run.equity_curve.last().unwrap();
-        assert_eq!(last_ts, series.expiry_instant());
-        assert_eq!(last_equity, run.final_equity);
+        let last = run.equity_curve.last().unwrap();
+        assert_eq!(last.ts, series.expiry_instant());
+        assert_eq!(last.equity, run.final_equity);
 
         let (traded, settled) = run.portfolio.realized_split();
         assert_eq!(traded, 0.0, "nothing closed on a quote");

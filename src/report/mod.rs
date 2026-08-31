@@ -13,7 +13,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::engine::SymbolRun;
+use crate::engine::{EquityPoint, SymbolRun};
 use crate::model::{ForecastRecord, ModelEval, RankingFunnel, ScorerEval, ScorerRecord};
 use crate::portfolio::{ClosedTrade, ExitReason, Portfolio};
 
@@ -148,7 +148,7 @@ fn assemble(
     runs: &[SymbolRun],
     capital_deployed: f64,
     final_equity: f64,
-    drawdown_curve: &[(DateTime<Utc>, f64)],
+    drawdown_curve: &[EquityPoint],
 ) -> Report {
     let mut census = Census::default();
     let mut symbols = Vec::new();
@@ -501,37 +501,45 @@ fn reason_key(reason: ExitReason) -> &'static str {
 /// Every symbol's equity summed on the union of their timestamps, each carried
 /// forward from its last print. Equal capital per symbol, held from the start —
 /// so the combined curve starts at the sum of the initial cash.
-pub fn combined_curve(runs: &[SymbolRun]) -> Vec<(DateTime<Utc>, f64)> {
+pub fn combined_curve(runs: &[SymbolRun]) -> Vec<EquityPoint> {
     let mut stamps: Vec<DateTime<Utc>> = runs
         .iter()
-        .flat_map(|run| run.equity_curve.iter().map(|&(ts, _)| ts))
+        .flat_map(|run| run.equity_curve.iter().map(|p| p.ts))
         .collect();
     stamps.sort_unstable();
     stamps.dedup();
 
     let mut cursors = vec![0usize; runs.len()];
-    let mut last: Vec<f64> = runs.iter().map(|run| run.initial_cash).collect();
+    // Each symbol's last-known equity carries forward at its own initial cash and
+    // zero invested until its first bar prints.
+    let mut last_equity: Vec<f64> = runs.iter().map(|run| run.initial_cash).collect();
+    let mut last_invested: Vec<f64> = vec![0.0; runs.len()];
     let mut out = Vec::with_capacity(stamps.len());
 
     for stamp in stamps {
         for (i, run) in runs.iter().enumerate() {
-            while cursors[i] < run.equity_curve.len() && run.equity_curve[cursors[i]].0 <= stamp {
-                last[i] = run.equity_curve[cursors[i]].1;
+            while cursors[i] < run.equity_curve.len() && run.equity_curve[cursors[i]].ts <= stamp {
+                last_equity[i] = run.equity_curve[cursors[i]].equity;
+                last_invested[i] = run.equity_curve[cursors[i]].invested;
                 cursors[i] += 1;
             }
         }
-        out.push((stamp, last.iter().sum()));
+        out.push(EquityPoint {
+            ts: stamp,
+            equity: last_equity.iter().sum(),
+            invested: last_invested.iter().sum(),
+        });
     }
     out
 }
 
-pub fn max_drawdown(curve: &[(DateTime<Utc>, f64)]) -> f64 {
+pub fn max_drawdown(curve: &[EquityPoint]) -> f64 {
     let mut peak = f64::NEG_INFINITY;
     let mut worst: f64 = 0.0;
-    for &(_, equity) in curve {
-        peak = peak.max(equity);
+    for point in curve {
+        peak = peak.max(point.equity);
         if peak > 0.0 {
-            worst = worst.max((peak - equity) / peak);
+            worst = worst.max((peak - point.equity) / peak);
         }
     }
     worst
@@ -544,7 +552,7 @@ pub fn write_csvs(
     dir: &Path,
     report: &Report,
     runs: &[SymbolRun],
-    curve: &[(DateTime<Utc>, f64)],
+    curve: &[EquityPoint],
 ) -> Result<()> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("creating output directory {}", dir.display()))?;
@@ -570,9 +578,15 @@ pub fn write_csvs(
     }
     std::fs::write(dir.join("trades.csv"), trades)?;
 
-    let mut equity = String::from("ts,equity\n");
-    for (ts, value) in curve {
-        equity.push_str(&format!("{},{:.2}\n", ts.to_rfc3339(), value));
+    let mut equity = String::from("ts,equity,invested\n");
+    for p in curve {
+        // `+ 0.0` normalises a floating-point negative zero to a plain 0.00.
+        equity.push_str(&format!(
+            "{},{:.2},{:.2}\n",
+            p.ts.to_rfc3339(),
+            p.equity + 0.0,
+            p.invested + 0.0
+        ));
     }
     std::fs::write(dir.join("equity.csv"), equity)?;
 
@@ -652,20 +666,23 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 7, 1, hour, 0, 0).unwrap()
     }
 
+    fn ep(hour: u32, equity: f64) -> EquityPoint {
+        EquityPoint {
+            ts: ts(hour),
+            equity,
+            invested: 0.0,
+        }
+    }
+
     #[test]
     fn drawdown_measures_the_deepest_fall_from_a_peak() {
-        let curve = vec![
-            (ts(13), 100.0),
-            (ts(14), 120.0),
-            (ts(15), 90.0),
-            (ts(16), 110.0),
-        ];
+        let curve = vec![ep(13, 100.0), ep(14, 120.0), ep(15, 90.0), ep(16, 110.0)];
         assert!((max_drawdown(&curve) - 0.25).abs() < 1e-12);
     }
 
     #[test]
     fn a_curve_that_only_rises_has_no_drawdown() {
-        let curve = vec![(ts(13), 100.0), (ts(14), 110.0), (ts(15), 120.0)];
+        let curve = vec![ep(13, 100.0), ep(14, 110.0), ep(15, 120.0)];
         assert_eq!(max_drawdown(&curve), 0.0);
         assert_eq!(max_drawdown(&[]), 0.0);
     }
@@ -678,15 +695,15 @@ mod tests {
         use crate::engine::{Census as EngineCensus, SymbolRun};
         use crate::portfolio::Portfolio;
 
-        let run = |symbol: &str, points: Vec<(DateTime<Utc>, f64)>| SymbolRun {
+        let run = |symbol: &str, points: Vec<EquityPoint>| SymbolRun {
             symbol: symbol.into(),
             strategy: "t".into(),
             expiry: chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
             bars: points.len(),
-            first_ts: points.first().map(|p| p.0),
-            last_ts: points.last().map(|p| p.0),
+            first_ts: points.first().map(|p| p.ts),
+            last_ts: points.last().map(|p| p.ts),
             initial_cash: 100.0,
-            final_equity: points.last().map(|p| p.1).unwrap_or(100.0),
+            final_equity: points.last().map(|p| p.equity).unwrap_or(100.0),
             census: EngineCensus::default(),
             signal_diagnostics: BTreeMap::new(),
             option_quality: Quality::default(),
@@ -699,14 +716,14 @@ mod tests {
         };
 
         let runs = vec![
-            run("A", vec![(ts(13), 100.0), (ts(15), 120.0)]),
-            run("B", vec![(ts(14), 90.0)]),
+            run("A", vec![ep(13, 100.0), ep(15, 120.0)]),
+            run("B", vec![ep(14, 90.0)]),
         ];
         let curve = combined_curve(&runs);
 
         assert_eq!(curve.len(), 3, "the union of both symbols' timestamps");
-        assert_eq!(curve[0], (ts(13), 200.0), "B still at its initial cash");
-        assert_eq!(curve[1], (ts(14), 190.0), "A carried forward at 100");
-        assert_eq!(curve[2], (ts(15), 210.0), "B carried forward at 90");
+        assert_eq!((curve[0].ts, curve[0].equity), (ts(13), 200.0), "B still at its initial cash");
+        assert_eq!((curve[1].ts, curve[1].equity), (ts(14), 190.0), "A carried forward at 100");
+        assert_eq!((curve[2].ts, curve[2].equity), (ts(15), 210.0), "B carried forward at 90");
     }
 }

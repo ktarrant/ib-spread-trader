@@ -278,7 +278,7 @@ fn the_reference_strategy_reproduces_its_recorded_run() {
     let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
     assert!((totals.total_pnl - booked).abs() < 1e-6);
     let curve = report::combined_curve(&runs);
-    assert!((curve.last().unwrap().1 - totals.final_equity).abs() < 1e-6);
+    assert!((curve.last().unwrap().equity - totals.final_equity).abs() < 1e-6);
 }
 
 /// Pin the new signal's whole gate funnel as well as its trade. This is a
@@ -385,7 +385,7 @@ fn the_ranked_strategy_reproduces_its_recorded_run() {
     let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
     assert!((totals.total_pnl - booked).abs() < 1e-6);
     let curve = report::combined_curve(&runs);
-    assert!((curve.last().unwrap().1 - totals.final_equity).abs() < 1e-6);
+    assert!((curve.last().unwrap().equity - totals.final_equity).abs() < 1e-6);
 }
 
 /// The shared account runs all twelve symbols against one $20k pool over a
@@ -468,7 +468,7 @@ fn the_shared_account_runs_all_symbols_against_one_pool() {
     // Cash, the trade log and the single account curve must agree.
     let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
     assert!((totals.total_pnl - booked).abs() < 1e-6);
-    assert!((shared.equity_curve.last().unwrap().1 - totals.final_equity).abs() < 1e-6);
+    assert!((shared.equity_curve.last().unwrap().equity - totals.final_equity).abs() < 1e-6);
 }
 
 /// META's ladder reaches barely above the money on many bars, which is the real
@@ -504,5 +504,5 @@ fn a_never_firing_strategy_returns_its_capital_exactly_on_real_data() {
 
     assert_eq!(run.census.triggers, 0);
     assert_eq!(run.final_equity, run.initial_cash);
-    assert!(run.equity_curve.iter().all(|&(_, e)| e == run.initial_cash));
+    assert!(run.equity_curve.iter().all(|p| p.equity == run.initial_cash));
 }
