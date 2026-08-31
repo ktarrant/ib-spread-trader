@@ -15,7 +15,7 @@ use std::path::Path;
 
 use crate::engine::SymbolRun;
 use crate::model::{ForecastRecord, ModelEval, RankingFunnel, ScorerEval, ScorerRecord};
-use crate::portfolio::{ClosedTrade, ExitReason};
+use crate::portfolio::{ClosedTrade, ExitReason, Portfolio};
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Census {
@@ -24,6 +24,9 @@ pub struct Census {
     pub at_position_limit: usize,
     pub unfillable_intents: usize,
     pub synthetic_exits: usize,
+    /// A ranked choice could not be funded — the shared account was full. Zero
+    /// unless sizing against a shared pool.
+    pub capital_limited: usize,
     pub too_close_to_expiry: usize,
     pub earnings_blackout: usize,
     pub signal_diagnostics: BTreeMap<String, usize>,
@@ -134,7 +137,19 @@ pub struct Report {
     pub caveats: Vec<String>,
 }
 
-pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> Report {
+/// Aggregate per-symbol runs into a report. `capital_deployed`, `final_equity`
+/// and `drawdown_curve` are passed explicitly because they differ between the
+/// per-symbol account (summed across runs) and the shared account (one pool, one
+/// curve). Everything else — trades, census, per-symbol columns, model/scorer
+/// eval — is derived from the runs the same way for both.
+fn assemble(
+    strategy: &str,
+    expiry: chrono::NaiveDate,
+    runs: &[SymbolRun],
+    capital_deployed: f64,
+    final_equity: f64,
+    drawdown_curve: &[(DateTime<Utc>, f64)],
+) -> Report {
     let mut census = Census::default();
     let mut symbols = Vec::new();
     let mut trades: Vec<ClosedTrade> = Vec::new();
@@ -160,6 +175,7 @@ pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> R
         census.at_position_limit += run.census.at_position_limit;
         census.unfillable_intents += run.census.unfillable_intents;
         census.synthetic_exits += run.census.synthetic_exits;
+        census.capital_limited += run.census.capital_limited;
         census.too_close_to_expiry += run.census.too_close_to_expiry;
         census.earnings_blackout += run.census.earnings_blackout;
         census.ranking.merge(&run.census.ranking);
@@ -186,8 +202,6 @@ pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> R
 
     trades.sort_by_key(|trade| trade.closed_at);
 
-    let capital_deployed: f64 = runs.iter().map(|run| run.initial_cash).sum();
-    let final_equity: f64 = runs.iter().map(|run| run.final_equity).sum();
     let total_pnl = final_equity - capital_deployed;
     let traded_pnl: f64 = symbols.iter().map(|s| s.traded_pnl).sum();
     let settled_pnl: f64 = symbols.iter().map(|s| s.settled_pnl).sum();
@@ -229,7 +243,7 @@ pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> R
         best_trade: pnls.iter().copied().reduce(f64::max),
         worst_trade: pnls.iter().copied().reduce(f64::min),
         exits_by_reason,
-        max_drawdown: max_drawdown(&combined_curve(runs)),
+        max_drawdown: max_drawdown(drawdown_curve),
         census,
     };
 
@@ -248,6 +262,95 @@ pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> R
         scorer_eval,
         caveats,
     }
+}
+
+/// Per-symbol account: each symbol deployed its own `initial_cash`, so the
+/// account total is their sum and the curve is the symbols stitched together.
+pub fn build(strategy: &str, expiry: chrono::NaiveDate, runs: &[SymbolRun]) -> Report {
+    let capital_deployed: f64 = runs.iter().map(|run| run.initial_cash).sum();
+    let final_equity: f64 = runs.iter().map(|run| run.final_equity).sum();
+    let curve = combined_curve(runs);
+    assemble(strategy, expiry, runs, capital_deployed, final_equity, &curve)
+}
+
+/// Per-symbol *views* of a shared-account run: each symbol's slice of the one
+/// shared portfolio's closed trades, plus its diagnostics. Reused by both
+/// `build_shared` (for the report) and `write_csvs` (for the per-symbol logs).
+pub fn shared_views(
+    strategy: &str,
+    expiry: chrono::NaiveDate,
+    shared: &crate::engine::SharedRun,
+) -> Vec<SymbolRun> {
+    shared
+        .per_symbol
+        .iter()
+        .map(|d| {
+            let closed: Vec<ClosedTrade> = shared
+                .portfolio
+                .closed
+                .iter()
+                .filter(|t| t.symbol == d.symbol)
+                .cloned()
+                .collect();
+            let symbol_pnl: f64 = closed.iter().map(|t| t.pnl).sum();
+            SymbolRun {
+                symbol: d.symbol.clone(),
+                strategy: strategy.to_string(),
+                expiry,
+                bars: d.bars,
+                first_ts: shared.first_ts,
+                last_ts: shared.last_ts,
+                // Zeroed so the per-symbol pnl column reads symbol_pnl; the
+                // account capital is passed to `assemble` explicitly.
+                initial_cash: 0.0,
+                final_equity: symbol_pnl,
+                census: d.census.clone(),
+                signal_diagnostics: d.signal_diagnostics.clone(),
+                option_quality: d.option_quality,
+                underlying_quality: d.underlying_quality,
+                // A shared account has one curve; per-symbol drawdown is not
+                // separable, so the per-symbol column is left empty (0).
+                portfolio: Portfolio::from_closed(0.0, closed),
+                equity_curve: Vec::new(),
+                settlement_price: d.settlement_price,
+                forecasts: d.forecasts.clone(),
+                scorer_records: d.scorer_records.clone(),
+            }
+        })
+        .collect()
+}
+
+/// Shared account: one `initial_cash` pool and one equity curve for the whole
+/// account. Each symbol becomes a *view* — its slice of the shared portfolio's
+/// closed trades — so the per-symbol columns, census, and model/scorer eval
+/// aggregate exactly as in the per-symbol build, while the account totals come
+/// from the single pool.
+pub fn build_shared(
+    strategy: &str,
+    expiry: chrono::NaiveDate,
+    shared: &crate::engine::SharedRun,
+) -> Report {
+    let runs = shared_views(strategy, expiry, shared);
+    let mut report = assemble(
+        strategy,
+        expiry,
+        &runs,
+        shared.initial_cash,
+        shared.final_equity,
+        &shared.equity_curve,
+    );
+    report.caveats.insert(
+        0,
+        format!(
+            "Shared account: all {} symbols drew on one ${:.0} pool, funded \
+             best-score-first and capped at one position per symbol — so returns \
+             reflect a single limited-capital account, not the sum of independent \
+             per-symbol runs.",
+            shared.per_symbol.len(),
+            shared.initial_cash,
+        ),
+    );
+    report
 }
 
 /// What the numbers above cannot support, stated with them rather than after.
@@ -434,8 +537,15 @@ pub fn max_drawdown(curve: &[(DateTime<Utc>, f64)]) -> f64 {
     worst
 }
 
-/// Write the trade log and the combined equity curve beside the JSON summary.
-pub fn write_csvs(dir: &Path, report: &Report, runs: &[SymbolRun]) -> Result<()> {
+/// Write the trade log and the equity curve beside the JSON summary. The curve
+/// is passed in because it differs between the per-symbol account (symbols
+/// stitched together) and the shared account (its single account curve).
+pub fn write_csvs(
+    dir: &Path,
+    report: &Report,
+    runs: &[SymbolRun],
+    curve: &[(DateTime<Utc>, f64)],
+) -> Result<()> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("creating output directory {}", dir.display()))?;
 
@@ -461,7 +571,7 @@ pub fn write_csvs(dir: &Path, report: &Report, runs: &[SymbolRun]) -> Result<()>
     std::fs::write(dir.join("trades.csv"), trades)?;
 
     let mut equity = String::from("ts,equity\n");
-    for (ts, value) in combined_curve(runs) {
+    for (ts, value) in curve {
         equity.push_str(&format!("{},{:.2}\n", ts.to_rfc3339(), value));
     }
     std::fs::write(dir.join("equity.csv"), equity)?;

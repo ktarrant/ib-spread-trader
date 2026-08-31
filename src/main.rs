@@ -4,7 +4,7 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, Utc};
 use clap::{Parser, Subcommand};
-use ib_spread_trader::config::StrategyConfig;
+use ib_spread_trader::config::{AccountMode, StrategyConfig};
 use ib_spread_trader::data::{
     ChainSeries, Snapshot, chain_coverage, snapshot::default_snapshot_path,
 };
@@ -118,28 +118,54 @@ fn main() -> Result<()> {
             let strategy_config = StrategyConfig::load(&config)?;
             let run_config = strategy_config.run_config();
 
-            let mut runs = Vec::new();
+            // Load every symbol's series once, skipping those with no two-sided
+            // option bars (a zero-return run would dilute every real result).
+            let mut all_series = Vec::new();
             let mut skipped = Vec::new();
             for symbol in &strategy_config.symbols {
                 let series = ChainSeries::load(&snapshot, symbol, strategy_config.expiry)?;
                 if series.is_empty() {
-                    // A symbol with no two-sided bars is not a zero-return run;
-                    // averaging it in as one would dilute every real result.
                     skipped.push(symbol.clone());
-                    continue;
+                } else {
+                    all_series.push(series);
                 }
-                // A fresh strategy per symbol: signals carry indicator state.
-                let mut strategy = strategy_config.strategy()?;
-                runs.push(engine::run_symbol(&series, &mut strategy, &run_config)?);
             }
-            if runs.is_empty() {
+            if all_series.is_empty() {
                 bail!(
                     "no symbol in the config has two-sided option bars for {}; try `catalog`",
                     strategy_config.expiry
                 );
             }
 
-            let mut built = report::build(&strategy_config.name, strategy_config.expiry, &runs);
+            // The shared account runs all symbols against one portfolio over a
+            // merged timeline; the per-symbol account runs each independently.
+            // Both yield: the report, per-symbol runs (for the CSV logs), and the
+            // equity curve to write.
+            let (mut built, runs, curve) = if strategy_config.account == AccountMode::Shared {
+                let mut strategies: Vec<engine::Strategy> = all_series
+                    .iter()
+                    .map(|_| strategy_config.strategy())
+                    .collect::<anyhow::Result<_>>()?;
+                let shared = engine::run_shared(&all_series, &mut strategies, &run_config)?;
+                let built =
+                    report::build_shared(&strategy_config.name, strategy_config.expiry, &shared);
+                let views = report::shared_views(
+                    &strategy_config.name,
+                    strategy_config.expiry,
+                    &shared,
+                );
+                (built, views, shared.equity_curve)
+            } else {
+                let mut runs = Vec::new();
+                for series in &all_series {
+                    // A fresh strategy per symbol: signals carry indicator state.
+                    let mut strategy = strategy_config.strategy()?;
+                    runs.push(engine::run_symbol(series, &mut strategy, &run_config)?);
+                }
+                let built = report::build(&strategy_config.name, strategy_config.expiry, &runs);
+                let curve = report::combined_curve(&runs);
+                (built, runs, curve)
+            };
             if !skipped.is_empty() {
                 built.caveats.push(format!(
                     "{} symbol(s) had no two-sided option bars and were not run: {}.",
@@ -148,7 +174,7 @@ fn main() -> Result<()> {
                 ));
             }
             if let Some(dir) = &out {
-                report::write_csvs(dir, &built, &runs)?;
+                report::write_csvs(dir, &built, &runs, &curve)?;
                 // Always write the full JSON (with trades) for downstream tools.
                 let mut full = serde_json::to_value(&built)?;
                 if let Some(obj) = full.as_object_mut() {

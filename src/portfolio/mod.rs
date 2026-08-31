@@ -128,6 +128,19 @@ impl Portfolio {
         }
     }
 
+    /// A portfolio holding only these already-closed trades and no open
+    /// positions — for assembling a per-symbol *view* of a shared-account run,
+    /// where the real cash lives on the one shared portfolio.
+    pub fn from_closed(initial_cash: f64, closed: Vec<ClosedTrade>) -> Self {
+        Self {
+            cash: initial_cash,
+            initial_cash,
+            open: Vec::new(),
+            closed,
+            next_id: 1,
+        }
+    }
+
     /// Total capital committed to risk across the open positions — the sum of
     /// each position's max loss. This is what a capital allocator sizes against:
     /// cash paid for a debit, margin posted for a credit, both captured by

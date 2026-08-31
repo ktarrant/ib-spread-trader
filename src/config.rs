@@ -42,6 +42,12 @@ pub struct StrategyConfig {
     /// existing config keeps working untouched.
     #[serde(default)]
     pub mode: StrategyMode,
+    /// Whether each symbol gets its own `initial_cash` (the default, and what
+    /// every existing config does) or all symbols share one account. Shared
+    /// makes `initial_cash` a single pool that entries compete for, funded
+    /// best-score-first and sized against the capital still free.
+    #[serde(default)]
+    pub account: AccountMode,
     #[serde(default)]
     pub signal: SignalConfig,
     #[serde(default)]
@@ -76,6 +82,17 @@ pub enum StrategyMode {
     Staged,
     /// The price-target engine: features -> distribution -> ranked verticals.
     Ranked,
+}
+
+/// Whether the backtest runs one account per symbol or one shared across all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountMode {
+    /// Each symbol runs against its own `initial_cash`. The historical default.
+    #[default]
+    PerSymbol,
+    /// All symbols share one `initial_cash`, competing for it concurrently.
+    Shared,
 }
 
 fn default_name() -> String {
@@ -240,6 +257,11 @@ pub struct ExecutionConfig {
     pub timing: Timing,
     #[serde(default = "default_max_open")]
     pub max_open_positions: usize,
+    /// Cap on positions open in a single symbol at once. Absent leaves the
+    /// account-wide cap the only limit; a shared account defaults it to 1 (so
+    /// capital spreads across names) unless set here.
+    #[serde(default)]
+    pub max_positions_per_symbol: Option<usize>,
     /// Refuse new entries when fewer than this many calendar days remain before
     /// expiry. Prevents opening positions the before-expiry exit would
     /// immediately close. Set this to `min_days_before_expiry + buffer`.
@@ -277,6 +299,7 @@ impl Default for ExecutionConfig {
             max_debit: None,
             timing: Timing::default(),
             max_open_positions: default_max_open(),
+            max_positions_per_symbol: None,
             min_entry_days_before_expiry: default_min_entry_days_before_expiry(),
             earnings_blackout_days: None,
         }
@@ -722,6 +745,14 @@ impl StrategyConfig {
                 min_days_before_expiry: self.exit.min_days_before_expiry,
             },
             max_open_positions: self.execution.max_open_positions,
+            // A shared account defaults to one position per symbol so capital
+            // spreads across names; an explicit config value still wins.
+            max_positions_per_symbol: self.execution.max_positions_per_symbol.or(
+                match self.account {
+                    AccountMode::Shared => Some(1),
+                    AccountMode::PerSymbol => None,
+                },
+            ),
             min_entry_days_before_expiry: self.execution.min_entry_days_before_expiry,
             earnings_blackout_days: self.execution.earnings_blackout_days,
             // Validated in `validate()` (called by `load`), so `ok()` here only

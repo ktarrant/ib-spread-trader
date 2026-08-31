@@ -479,6 +479,47 @@ driftless**. Turn a drift weight up only once it beats the null out-of-sample. T
 null-beating gate is the floor: a config that cannot beat a random walk is not a
 better forecaster, whatever P&L it posted.
 
+## Two account models: per-symbol (default) and one shared pool
+
+`account = "shared"` in a strategy TOML runs **every symbol against one
+`initial_cash`**, instead of the default where each symbol gets its own. The
+default (`per_symbol`) is byte-identical to before — `run_symbol` per symbol,
+`report::build` summing them — so every golden test is untouched.
+
+The shared account exists because per-symbol sizing was quietly running *N*
+independent accounts: a `$20k` run was `$20k × 9 symbols ≈ $180k`, and the
+headline was their sum. Only a shared pool answers "what does one limited-capital
+account do". `run_shared` iterates a **single global timeline merged across all
+symbols** — sequential-per-symbol cannot model two names competing for the same
+dollars *at the same time* (it either double-counts or serializes them).
+
+Per timestamp, in order: execute due closes (frees capital) → fund the due opens
+**best-score-first** across symbols, each sized at fill against the capital still
+free → mark every symbol's positions and record one account equity point →
+decide (exits + entry) and queue for each symbol's next bar. Consequences that
+are deliberate, not bugs:
+
+- **Sizing moves to fill time** on this path (`Intent::Open` carries a
+  `SizingHint`; `execute` calls `size_lots`), because lots must be counted
+  against the capital actually free when the order fills, not one bar earlier.
+  The per-symbol path still sizes at decision time — its behaviour is unchanged.
+- **Low-value trades get squeezed out when capital is scarce** — best-first
+  funding plus `size_lots`'s `min(available)` cap means a full account funds only
+  the top scores; the rest count `census.capital_limited`.
+- **One position per symbol** (`max_positions_per_symbol`, defaulted to 1 in
+  shared mode) so capital diversifies across names rather than piling into one.
+- **`capital_at_risk` is what `initial_cash` bounds**, summed across all open
+  positions (a credit spread's margin, a debit's premium, a naked long's
+  premium). `the_shared_account_runs_all_symbols_against_one_pool` pins that peak
+  risk never exceeds the pool and ≤1 position is open per symbol.
+
+`SharedRun` carries the one portfolio + one equity curve + per-symbol
+`SymbolDiag`s; `report::build_shared` turns each symbol into a *view* over its
+slice of the shared trades, so the per-symbol columns and model/scorer eval
+aggregate exactly as before while the totals come from the single pool. The
+report shape is unchanged, so the viewer renders a shared run as-is. No
+market-impact model yet: a large lot count fills at the one-lot quote.
+
 ## Conventions from the capture side that this repo must not re-learn
 
 - **Timestamps are RFC3339 text with a literal `+00:00`.** Lexicographic `BETWEEN`

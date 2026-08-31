@@ -12,9 +12,13 @@ symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "
 expiry  = "2026-08-21"
 initial_cash = 20000.0
 mode    = "ranked"
+# One shared $20k account across all symbols, rather than $20k per symbol.
+# Entries compete for the pool: funded best-score-first, sized against the
+# capital still free, and capped at one position per symbol (the shared default).
+account = "shared"
 
-# The position cap is lifted well above what $20k can fund, so capital — not the
-# cap — decides how many positions run. earnings/expiry blackouts still apply.
+# The account-wide cap is lifted well above what $20k can fund, so capital — not
+# the cap — decides how many positions run. earnings/expiry blackouts still apply.
 [execution]
 timing = "next_bar"
 max_open_positions = 50

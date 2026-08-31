@@ -30,7 +30,7 @@ use crate::model::{
     PriceDistribution, PriceModel, RankingConfig, RankingFunnel, ScorerRecord, enumerate_verticals,
     expected_pl_and_score, rank,
 };
-use crate::portfolio::{ExitReason, Portfolio, TradePrediction};
+use crate::portfolio::{ExitReason, OpenPosition, Portfolio, TradePrediction};
 use crate::signal::{MarketView, Signal};
 use crate::spread::Spread;
 use crate::structure::Structure;
@@ -59,9 +59,14 @@ pub struct RunConfig {
     pub costs: Costs,
     pub timing: Timing,
     pub exits: ExitRules,
-    /// How many spreads may be open at once. One means the strategy is simply
-    /// in or out; without a cap a repeatedly-firing signal stacks positions.
+    /// How many spreads may be open at once **across the whole account**. One
+    /// means the strategy is simply in or out; without a cap a repeatedly-firing
+    /// signal stacks positions.
     pub max_open_positions: usize,
+    /// How many positions may be open **in a single symbol** at once. `None`
+    /// leaves the account-wide cap the only limit; the shared account defaults
+    /// this to 1 so capital diversifies across names rather than piling into one.
+    pub max_positions_per_symbol: Option<usize>,
     /// Refuse new entries when fewer than this many calendar days remain before
     /// expiry. Prevents opening positions the before-expiry exit would
     /// immediately close.
@@ -104,6 +109,7 @@ impl Default for RunConfig {
             timing: Timing::NextBar,
             exits: ExitRules::default(),
             max_open_positions: 1,
+            max_positions_per_symbol: None,
             min_entry_days_before_expiry: None,
             earnings_blackout_days: None,
             sizing: None,
@@ -196,8 +202,53 @@ fn entry_gate(
 /// A decision taken on one bar, to be executed on the next.
 #[derive(Debug, Clone)]
 enum Intent {
-    Open(Spread, Option<TradePrediction>, Option<f64>),
-    Close { id: usize, reason: ExitReason },
+    Open {
+        spread: Spread,
+        prediction: Option<TradePrediction>,
+        forecast_target: Option<f64>,
+        /// Present when sizing is deferred to fill time (the shared-account
+        /// path): `spread` is one lot and `execute` scales it against the
+        /// portfolio's capital then. `None` means `spread` is already sized.
+        sizing: Option<SizingHint>,
+    },
+    Close {
+        id: usize,
+        reason: ExitReason,
+    },
+}
+
+/// What `execute` needs to size a one-lot spread at fill time: the ranker's
+/// score (drives the budget) and one lot's max loss (divides it into lots).
+#[derive(Debug, Clone, Copy)]
+struct SizingHint {
+    score: f64,
+    one_lot_max_loss: f64,
+    /// The one-lot expected P/L, scaled by the filled lot count for the trade
+    /// prediction so it stays consistent with the position's realised size.
+    expected_pl: f64,
+}
+
+/// Turn a score and the capital already at risk into a lot count, holding the
+/// dollar risk (not the lot count) roughly constant across candidates. A
+/// baseline-scoring idea risks `risk_per_position` of capital; a higher score
+/// scales up linearly, capped per position and by the capital still free.
+/// Returns 0 when even one lot cannot be funded.
+fn size_lots(
+    sizing: &Sizing,
+    score: f64,
+    one_lot_max_loss: f64,
+    initial_cash: f64,
+    capital_at_risk: f64,
+) -> u32 {
+    if one_lot_max_loss <= 0.0 {
+        return 1;
+    }
+    let available = initial_cash - capital_at_risk;
+    let score_mult = (score / sizing.baseline_score).max(1.0);
+    let budget = (initial_cash * sizing.risk_per_position * score_mult)
+        .min(initial_cash * sizing.max_risk_per_position)
+        .min(available.max(0.0));
+    (budget / one_lot_max_loss).floor() as u32
 }
 
 /// Why a bar produced no trade despite a trigger.
@@ -316,7 +367,7 @@ pub fn run_symbol(
                     &opened_at_index,
                     seq,
                 )?;
-                if let Intent::Open(..) = intent
+                if let Intent::Open { .. } = intent
                     && let Some(position) = portfolio.open.last()
                 {
                     opened_at_index.insert(position.id, seq);
@@ -329,49 +380,14 @@ pub fn run_symbol(
             // 3. Exits.
             let next_earnings =
                 series.next_earnings_from(bar.ts.date_naive());
-            let mut exiting = Vec::new();
-            let mut synthetic_exiting: Vec<(usize, ExitReason)> = Vec::new();
-            for position in &portfolio.open {
-                match crate::execution::exit_credit(&position.spread, &bar) {
-                    Ok(credit) => {
-                        let gross = credit - position.entry_debit;
-                        let ctx = exits::ExitContext {
-                            gross_pnl: gross,
-                            underlying_price: bar.underlying.price(),
-                            bar_ts: bar.ts,
-                            expiry_instant: series.expiry_instant(),
-                            next_earnings,
-                        };
-                        if let Some(reason) = config.exits.triggered(position, &ctx) {
-                            exiting.push(Intent::Close {
-                                id: position.id,
-                                reason,
-                            });
-                        }
-                    }
-                    Err(_) => {
-                        let reason = bar
-                            .underlying
-                            .price()
-                            .and_then(|spot| {
-                                config
-                                    .exits
-                                    .underlying_price_triggered(&position.spread, spot)
-                            })
-                            .or_else(|| {
-                                config.exits.time_triggered(
-                                    position.opened_at,
-                                    bar.ts,
-                                    series.expiry_instant(),
-                                    next_earnings,
-                                )
-                            });
-                        if let Some(reason) = reason {
-                            synthetic_exiting.push((position.id, reason));
-                        }
-                    }
-                }
-            }
+            let (exiting, synthetic_exiting) = compute_exits(
+                &portfolio,
+                &series.symbol,
+                &bar,
+                series.expiry_instant(),
+                next_earnings,
+                &config.exits,
+            );
 
             for (id, reason) in &synthetic_exiting {
                 if let Some(spot) = bar.underlying.price() {
@@ -421,7 +437,12 @@ pub fn run_symbol(
                                 EntryGate::EarningsBlackout => census.earnings_blackout += 1,
                                 EntryGate::Open => match staged.selector.resolve(&spec, &bar) {
                                     Ok(spread) => {
-                                        entering = Some(Intent::Open(spread, None, None))
+                                        entering = Some(Intent::Open {
+                                            spread,
+                                            prediction: None,
+                                            forecast_target: None,
+                                            sizing: None,
+                                        })
                                     }
                                     Err(reject) => census.reject(&reject),
                                 },
@@ -430,48 +451,16 @@ pub fn run_symbol(
                     }
                 }
                 Strategy::Ranked(ranked) => {
-                    // Advance the feature engine every option bar, in order,
-                    // whether or not the gate lets us act — its indicators are
-                    // stateful, so a skipped bar would corrupt every later reading.
-                    let bar_date = bar.ts.date_naive();
-                    let earnings = EarningsDistance {
-                        days_to: next_earnings.map(|e| (e.date - bar_date).num_days()),
-                        days_since: series
-                            .previous_earnings_from(bar_date)
-                            .map(|e| (bar_date - e.date).num_days()),
-                    };
-                    let features = ranked.features.observe(&bar, earnings);
-
-                    // Horizon (capped at expiry), the distribution, and the basis
-                    // map. The distribution is needed both to log the forecast and
-                    // to rank, so it is computed once, on every option bar.
-                    let horizon_years = (ranked.ranking.horizon_days / 365.25)
-                        .min(features.year_fraction)
-                        .max(0.0);
-                    let remaining_years = (features.year_fraction - horizon_years).max(0.0);
-                    let forward_scale = if features.spot > 0.0 {
-                        features.forward / features.spot
-                    } else {
-                        1.0
-                    };
-                    let dist = ranked.model.forecast(&features, horizon_years);
-
-                    // Score the forecast against what the underlying actually did a
-                    // horizon later. Eval-only — never on the decision path. Uses
-                    // the *full* (uncapped) horizon so the realized read lands on a
-                    // fixed same-weekday bar; near expiry the target runs past the
-                    // window and the bar is simply not scored (see score_forecast).
-                    let full_horizon_years = ranked.ranking.horizon_days / 365.25;
-                    if let Some(record) = score_forecast(
+                    // Advance the feature engine and forecast on every option bar,
+                    // gate or no gate — its indicators are stateful, so a skipped
+                    // bar would corrupt every later reading.
+                    let ctx = ranked_observe(
+                        ranked,
                         series,
                         &bar,
-                        &features,
-                        &dist,
-                        full_horizon_years,
-                        ranked.model.as_ref(),
-                    ) {
-                        forecasts.push(record);
-                    }
+                        next_earnings,
+                        &mut forecasts,
+                    );
 
                     match entry_gate(
                         portfolio.open.len(),
@@ -485,61 +474,26 @@ pub fn run_symbol(
                         EntryGate::TooCloseToExpiry => census.too_close_to_expiry += 1,
                         EntryGate::EarningsBlackout => census.earnings_blackout += 1,
                         EntryGate::Open => {
-                            let mut funnel = RankingFunnel::default();
-                            let candidates = enumerate_verticals(
-                                &bar,
-                                &config.costs,
-                                &ranked.candidates,
-                                &mut funnel,
-                            );
-                            // Scorer evaluation: sample candidates and price them
-                            // forward to grade the score. Reads the candidates
-                            // before `rank` consumes them; eval-only.
-                            scorer_sample(
+                            if let Some((choice, forecast_target)) = ranked_choose(
+                                ranked,
                                 series,
                                 &bar,
-                                &candidates,
-                                &dist,
-                                remaining_years,
-                                forward_scale,
-                                full_horizon_years,
-                                ranked.ranking.forecast_target_quantile,
-                                ranked.ranking.scorer_sample_per_bar,
+                                config,
+                                &ctx,
+                                &mut census,
                                 &mut scorer_records,
-                            );
-                            let choice = rank(
-                                candidates,
-                                &dist,
-                                remaining_years,
-                                forward_scale,
-                                &ranked.ranking,
-                                &mut funnel,
-                            );
-                            census.ranking.merge(&funnel);
-                            if let Some(choice) = choice {
-                                // Position sizing: turn the score and the capital
-                                // left into a lot count. `None` sizing keeps one
-                                // lot (fixed behaviour); `Some` scales by
-                                // conviction, capped per position and by the
-                                // capital still uncommitted.
-                                let lots = match config.sizing {
+                            ) {
+                                // Per-symbol path: size at decision time against
+                                // this symbol's own portfolio.
+                                let lots = match &config.sizing {
                                     None => 1,
-                                    Some(sizing) => {
-                                        let one_lot_risk = choice.candidate.max_loss;
-                                        let available = config.initial_cash
-                                            - portfolio.capital_at_risk();
-                                        let score_mult =
-                                            (choice.score / sizing.baseline_score).max(1.0);
-                                        let budget = (config.initial_cash
-                                            * sizing.risk_per_position
-                                            * score_mult)
-                                            .min(
-                                                config.initial_cash
-                                                    * sizing.max_risk_per_position,
-                                            )
-                                            .min(available.max(0.0));
-                                        (budget / one_lot_risk).floor() as u32
-                                    }
+                                    Some(sizing) => size_lots(
+                                        sizing,
+                                        choice.score,
+                                        choice.candidate.max_loss,
+                                        config.initial_cash,
+                                        portfolio.capital_at_risk(),
+                                    ),
                                 };
                                 if lots == 0 {
                                     // Not enough capital left for even one lot.
@@ -552,32 +506,17 @@ pub fn run_symbol(
                                         score: choice.score,
                                         prob_profit: choice.prob_profit,
                                     };
-                                    // The forecast target: the favourable quantile
-                                    // of the entry distribution, in the trade's
-                                    // direction. A price, so size does not touch it.
-                                    let forecast_target =
-                                        ranked.ranking.forecast_target_quantile.map(|q| {
-                                            let level = if choice
-                                                .candidate
-                                                .spread
-                                                .profits_from_a_rise()
-                                            {
-                                                q
-                                            } else {
-                                                1.0 - q
-                                            };
-                                            dist.quantile(level)
-                                        });
                                     let spread = if lots == 1 {
                                         choice.candidate.spread
                                     } else {
                                         choice.candidate.spread.scaled(lots)
                                     };
-                                    entering = Some(Intent::Open(
+                                    entering = Some(Intent::Open {
                                         spread,
-                                        Some(prediction),
+                                        prediction: Some(prediction),
                                         forecast_target,
-                                    ));
+                                        sizing: None,
+                                    });
                                 }
                             }
                         }
@@ -600,7 +539,7 @@ pub fn run_symbol(
                             &opened_at_index,
                             seq,
                         )?;
-                        if let Intent::Open(..) = intent
+                        if let Intent::Open { .. } = intent
                             && let Some(position) = portfolio.open.last()
                         {
                             opened_at_index.insert(position.id, seq);
@@ -663,6 +602,565 @@ pub fn run_symbol(
         settlement_price: settlement,
         forecasts,
         scorer_records,
+    })
+}
+
+/// One symbol's diagnostics from a shared-account run — everything the report
+/// shows per symbol except the trades and equity, which live on the single
+/// shared portfolio and curve.
+pub struct SymbolDiag {
+    pub symbol: String,
+    pub bars: usize,
+    pub census: Census,
+    pub signal_diagnostics: BTreeMap<String, usize>,
+    pub option_quality: Quality,
+    pub underlying_quality: Quality,
+    pub forecasts: Vec<ForecastRecord>,
+    pub scorer_records: Vec<ScorerRecord>,
+    pub settlement_price: Option<f64>,
+}
+
+/// The result of a shared-account backtest: one portfolio and one equity curve
+/// for the whole account, with per-symbol diagnostics beside them.
+pub struct SharedRun {
+    pub strategy: String,
+    pub expiry: chrono::NaiveDate,
+    pub initial_cash: f64,
+    pub final_equity: f64,
+    pub portfolio: Portfolio,
+    pub equity_curve: Vec<(DateTime<Utc>, f64)>,
+    pub per_symbol: Vec<SymbolDiag>,
+    pub first_ts: Option<DateTime<Utc>>,
+    pub last_ts: Option<DateTime<Utc>>,
+}
+
+/// The score a queued open sorts by when the shared account funds best-first.
+/// Opens with no sizing hint (the staged path) sort last.
+fn open_score(intent: &Intent) -> f64 {
+    match intent {
+        Intent::Open {
+            sizing: Some(hint), ..
+        } => hint.score,
+        _ => f64::MIN,
+    }
+}
+
+/// Replay every symbol against **one** shared portfolio over a single global
+/// timeline merged across all symbols. Capital is a common pool: at each
+/// timestamp the entries queued from the previous bar are funded
+/// **best-score-first** and sized at fill against the capital still free, so the
+/// whole account — not each symbol — is what `initial_cash` bounds. A per-symbol
+/// cap keeps it from piling into one name. Next-bar timing throughout.
+pub fn run_shared(
+    all_series: &[ChainSeries],
+    strategies: &mut [Strategy],
+    config: &RunConfig,
+) -> Result<SharedRun> {
+    let n = all_series.len();
+    let mut portfolio = Portfolio::new(config.initial_cash);
+    let mut census: Vec<Census> = (0..n).map(|_| Census::default()).collect();
+    let mut pending: Vec<Vec<Intent>> = (0..n).map(|_| Vec::new()).collect();
+    let mut carried_trigger: Vec<Option<crate::signal::Trigger>> =
+        (0..n).map(|_| None).collect();
+    let mut forecasts: Vec<Vec<ForecastRecord>> = (0..n).map(|_| Vec::new()).collect();
+    let mut scorer_records: Vec<Vec<ScorerRecord>> = (0..n).map(|_| Vec::new()).collect();
+    // pos id -> the opening symbol's own bar index, for a per-symbol held count.
+    let mut opened_at_index: BTreeMap<usize, usize> = BTreeMap::new();
+    // pos id -> last mark, so the account curve can value a position between the
+    // sparse bars of its own symbol.
+    let mut marks: BTreeMap<usize, f64> = BTreeMap::new();
+    let mut sym_bars: Vec<usize> = vec![0; n];
+    let mut equity_curve: Vec<(DateTime<Utc>, f64)> = Vec::new();
+
+    // Merged, ordered global timeline: (ts, symbol_idx, option_index?).
+    let mut global: Vec<(DateTime<Utc>, usize, Option<usize>)> = Vec::new();
+    for (si, series) in all_series.iter().enumerate() {
+        for &(ts, oi) in series.merged_timeline().iter() {
+            global.push((ts, si, oi));
+        }
+    }
+    global.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+    // One position's mark: exit credit net of commission, else held at entry
+    // cost — the same rule as `Portfolio::equity`, applied per position.
+    let mark_of = |pos: &OpenPosition, bar: &ChainSnapshot| -> f64 {
+        match crate::execution::exit_credit(&pos.spread, bar) {
+            Ok(credit) => credit - config.costs.commission(&pos.spread),
+            Err(_) => pos.entry_debit,
+        }
+    };
+
+    let mut idx = 0;
+    while idx < global.len() {
+        let ts = global[idx].0;
+        let mut end = idx;
+        while end < global.len() && global[end].0 == ts {
+            end += 1;
+        }
+
+        // Option bars at this timestamp, each with its snapshot; advance the
+        // per-symbol bar counter so held/bars are measured in that symbol's own
+        // bars, not global steps.
+        let mut option_bars: Vec<(usize, ChainSnapshot)> = Vec::new();
+        for &(_, si, oi) in &global[idx..end] {
+            if let Some(index) = oi
+                && let Some(bar) = all_series[si].snapshot(index)
+            {
+                sym_bars[si] += 1;
+                option_bars.push((si, bar));
+            }
+        }
+
+        // 1a. Execute due CLOSES per symbol (frees capital), and collect the due
+        //     OPENS across symbols for best-first funding.
+        let mut open_queue: Vec<(usize, Intent)> = Vec::new();
+        for (si, bar) in &option_bars {
+            for intent in std::mem::take(&mut pending[*si]) {
+                match intent {
+                    Intent::Close { id, reason } => {
+                        let held = sym_bars[*si]
+                            .saturating_sub(opened_at_index.get(&id).copied().unwrap_or(sym_bars[*si]));
+                        if portfolio
+                            .close(id, bar, &config.costs, reason, held)
+                            .is_err()
+                        {
+                            census[*si].unfillable_intents += 1;
+                        }
+                        marks.remove(&id);
+                    }
+                    open => open_queue.push((*si, open)),
+                }
+            }
+        }
+
+        // 1b. Fund opens best-score-first against the shared capital.
+        open_queue.sort_by(|a, b| {
+            open_score(&b.1)
+                .partial_cmp(&open_score(&a.1))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (si, intent) in open_queue {
+            let Some((_, bar)) = option_bars.iter().find(|(s, _)| *s == si) else {
+                continue;
+            };
+            let symbol = &all_series[si].symbol;
+            let in_symbol = portfolio
+                .open
+                .iter()
+                .filter(|p| &p.spread.symbol == symbol)
+                .count();
+            let per_symbol_cap = config.max_positions_per_symbol.unwrap_or(usize::MAX);
+            if in_symbol >= per_symbol_cap || portfolio.open.len() >= config.max_open_positions {
+                census[si].at_position_limit += 1;
+                continue;
+            }
+            let before = portfolio.open.len();
+            execute(
+                &intent,
+                bar,
+                &mut portfolio,
+                config,
+                &mut census[si],
+                &opened_at_index,
+                sym_bars[si],
+            )?;
+            if portfolio.open.len() > before {
+                let position = portfolio.open.last().expect("just opened");
+                opened_at_index.insert(position.id, sym_bars[si]);
+                marks.insert(position.id, mark_of(position, bar));
+            }
+        }
+
+        // 2. Mark every symbol's positions against its bar, then record one
+        //    account equity point for this timestamp.
+        for (si, bar) in &option_bars {
+            let symbol = &all_series[*si].symbol;
+            let ids: Vec<usize> = portfolio
+                .open
+                .iter()
+                .filter(|p| &p.spread.symbol == symbol)
+                .map(|p| p.id)
+                .collect();
+            for id in ids {
+                if let Some(pos) = portfolio.open.iter().find(|p| p.id == id) {
+                    marks.insert(id, mark_of(pos, bar));
+                }
+            }
+        }
+        if !option_bars.is_empty() {
+            let equity = portfolio.cash + marks.values().sum::<f64>();
+            equity_curve.push((ts, equity));
+        }
+
+        // 3. Decide per symbol: exits (queue real closes, execute synthetic) then
+        //    the entry, queued for that symbol's next option bar.
+        for (si, bar) in &option_bars {
+            let series = &all_series[*si];
+            let next_earnings = series.next_earnings_from(bar.ts.date_naive());
+            let (mut exiting, synthetic) = compute_exits(
+                &portfolio,
+                &series.symbol,
+                bar,
+                series.expiry_instant(),
+                next_earnings,
+                &config.exits,
+            );
+            for (id, reason) in &synthetic {
+                if let Some(spot) = bar.underlying.price() {
+                    let held = sym_bars[*si]
+                        .saturating_sub(opened_at_index.get(id).copied().unwrap_or(sym_bars[*si]));
+                    portfolio.close_at_intrinsic(*id, spot, bar.ts, &config.costs, *reason, held);
+                    census[*si].synthetic_exits += 1;
+                    marks.remove(id);
+                }
+            }
+
+            let mut entering: Option<Intent> = None;
+            match &mut strategies[*si] {
+                Strategy::Ranked(ranked) => {
+                    let ctx = ranked_observe(ranked, series, bar, next_earnings, &mut forecasts[*si]);
+                    match entry_gate(
+                        portfolio.open.len(),
+                        exiting.len(),
+                        config,
+                        series.expiry_instant(),
+                        bar.ts,
+                        next_earnings,
+                    ) {
+                        EntryGate::PositionLimit => census[*si].at_position_limit += 1,
+                        EntryGate::TooCloseToExpiry => census[*si].too_close_to_expiry += 1,
+                        EntryGate::EarningsBlackout => census[*si].earnings_blackout += 1,
+                        EntryGate::Open => {
+                            if let Some((choice, forecast_target)) = ranked_choose(
+                                ranked,
+                                series,
+                                bar,
+                                config,
+                                &ctx,
+                                &mut census[*si],
+                                &mut scorer_records[*si],
+                            ) {
+                                // Defer sizing to fill (a `SizingHint`) only when
+                                // sizing is configured; otherwise one lot.
+                                let sizing = config.sizing.map(|_| SizingHint {
+                                    score: choice.score,
+                                    one_lot_max_loss: choice.candidate.max_loss,
+                                    expected_pl: choice.expected_pl,
+                                });
+                                let prediction = TradePrediction {
+                                    expected_pl: choice.expected_pl,
+                                    score: choice.score,
+                                    prob_profit: choice.prob_profit,
+                                };
+                                entering = Some(Intent::Open {
+                                    spread: choice.candidate.spread,
+                                    prediction: Some(prediction),
+                                    forecast_target,
+                                    sizing,
+                                });
+                            }
+                        }
+                    }
+                }
+                Strategy::Staged(staged) => {
+                    let view = MarketView {
+                        symbol: &series.symbol,
+                        chain: bar,
+                    };
+                    let current = staged.signal.evaluate(&view);
+                    let trigger = current.or(carried_trigger[*si].take());
+                    carried_trigger[*si] = None;
+                    if let Some(trigger) = trigger {
+                        census[*si].triggers += 1;
+                        match staged.structure.build(&trigger, &view) {
+                            None => census[*si].declined += 1,
+                            Some(spec) => match entry_gate(
+                                portfolio.open.len(),
+                                exiting.len(),
+                                config,
+                                series.expiry_instant(),
+                                bar.ts,
+                                next_earnings,
+                            ) {
+                                EntryGate::PositionLimit => census[*si].at_position_limit += 1,
+                                EntryGate::TooCloseToExpiry => census[*si].too_close_to_expiry += 1,
+                                EntryGate::EarningsBlackout => census[*si].earnings_blackout += 1,
+                                EntryGate::Open => match staged.selector.resolve(&spec, bar) {
+                                    Ok(spread) => {
+                                        entering = Some(Intent::Open {
+                                            spread,
+                                            prediction: None,
+                                            forecast_target: None,
+                                            sizing: None,
+                                        })
+                                    }
+                                    Err(reject) => census[*si].reject(&reject),
+                                },
+                            },
+                        }
+                    }
+                }
+            }
+            exiting.extend(entering);
+            pending[*si] = exiting;
+        }
+
+        // 4. Stock-only bars (staged only): advance the signal, carry any trigger.
+        for &(_, si, oi) in &global[idx..end] {
+            if oi.is_none()
+                && let Strategy::Staged(staged) = &mut strategies[si]
+                && let Some(bar) = all_series[si].stock_only_snapshot(ts)
+            {
+                let view = MarketView {
+                    symbol: &all_series[si].symbol,
+                    chain: &bar,
+                };
+                let trigger = staged.signal.evaluate(&view);
+                if trigger.is_some() {
+                    carried_trigger[si] = trigger;
+                }
+            }
+        }
+
+        idx = end;
+    }
+
+    // Settlement: whatever survived the tape settles at intrinsic against its own
+    // symbol's expiry print, against the one shared portfolio.
+    let settlement: Vec<Option<f64>> = all_series
+        .iter()
+        .map(|s| {
+            s.underlying_asof(s.expiry_instant())
+                .and_then(|b| b.price())
+        })
+        .collect();
+    let had_open = !portfolio.open.is_empty();
+    let open_ids: Vec<(usize, usize)> = portfolio
+        .open
+        .iter()
+        .map(|p| {
+            let si = all_series
+                .iter()
+                .position(|s| s.symbol == p.spread.symbol)
+                .expect("position's symbol is in the run");
+            (p.id, si)
+        })
+        .collect();
+    for (id, si) in open_ids {
+        if let Some(price) = settlement[si] {
+            let held = sym_bars[si].saturating_sub(opened_at_index.get(&id).copied().unwrap_or(0));
+            portfolio.settle_at_expiry(id, price, all_series[si].expiry_instant(), held);
+            marks.remove(&id);
+        }
+    }
+    let final_equity = portfolio.cash
+        + portfolio
+            .open
+            .iter()
+            .filter_map(|p| marks.get(&p.id))
+            .sum::<f64>();
+    if had_open && let Some(last_expiry) = all_series.iter().map(|s| s.expiry_instant()).max() {
+        equity_curve.push((last_expiry, final_equity));
+    }
+
+    let strategy_name = strategies
+        .first()
+        .map(|s| s.name().to_string())
+        .unwrap_or_default();
+    let per_symbol: Vec<SymbolDiag> = (0..n)
+        .map(|si| SymbolDiag {
+            symbol: all_series[si].symbol.clone(),
+            bars: all_series[si].merged_timeline().len(),
+            census: std::mem::take(&mut census[si]),
+            signal_diagnostics: strategies[si].signal_diagnostics(),
+            option_quality: all_series[si].option_quality,
+            underlying_quality: all_series[si].underlying_quality,
+            forecasts: std::mem::take(&mut forecasts[si]),
+            scorer_records: std::mem::take(&mut scorer_records[si]),
+            settlement_price: settlement[si],
+        })
+        .collect();
+
+    Ok(SharedRun {
+        strategy: strategy_name,
+        expiry: all_series.first().map(|s| s.expiry).unwrap_or_default(),
+        initial_cash: config.initial_cash,
+        final_equity,
+        portfolio,
+        equity_curve,
+        per_symbol,
+        first_ts: global.first().map(|&(ts, _, _)| ts),
+        last_ts: global.last().map(|&(ts, _, _)| ts),
+    })
+}
+
+/// Exits for the open positions of one `symbol`, evaluated against `bar`.
+/// Returns the closes to queue (priced on a real quote) and the intrinsic closes
+/// to execute immediately (the position's legs stopped quoting). The symbol
+/// filter is what lets the shared account evaluate one name's positions against
+/// that name's bar; for the per-symbol loop every position matches.
+fn compute_exits(
+    portfolio: &Portfolio,
+    symbol: &str,
+    bar: &ChainSnapshot,
+    expiry_instant: DateTime<Utc>,
+    next_earnings: Option<&EarningsEvent>,
+    exits: &ExitRules,
+) -> (Vec<Intent>, Vec<(usize, ExitReason)>) {
+    let mut exiting = Vec::new();
+    let mut synthetic = Vec::new();
+    for position in portfolio.open.iter().filter(|p| p.spread.symbol == symbol) {
+        match crate::execution::exit_credit(&position.spread, bar) {
+            Ok(credit) => {
+                let gross = credit - position.entry_debit;
+                let ctx = exits::ExitContext {
+                    gross_pnl: gross,
+                    underlying_price: bar.underlying.price(),
+                    bar_ts: bar.ts,
+                    expiry_instant,
+                    next_earnings,
+                };
+                if let Some(reason) = exits.triggered(position, &ctx) {
+                    exiting.push(Intent::Close {
+                        id: position.id,
+                        reason,
+                    });
+                }
+            }
+            Err(_) => {
+                let reason = bar
+                    .underlying
+                    .price()
+                    .and_then(|spot| exits.underlying_price_triggered(&position.spread, spot))
+                    .or_else(|| {
+                        exits.time_triggered(
+                            position.opened_at,
+                            bar.ts,
+                            expiry_instant,
+                            next_earnings,
+                        )
+                    });
+                if let Some(reason) = reason {
+                    synthetic.push((position.id, reason));
+                }
+            }
+        }
+    }
+    (exiting, synthetic)
+}
+
+/// Everything a ranked option bar computes before the entry gate: the forecast
+/// distribution and the basis map ranking needs, plus the logged forecast. This
+/// advances the feature engine — so it MUST run on every option bar, gate or no
+/// gate, in both the per-symbol and shared-account loops.
+struct RankedContext {
+    dist: PriceDistribution,
+    remaining_years: f64,
+    forward_scale: f64,
+    full_horizon_years: f64,
+}
+
+fn ranked_observe(
+    ranked: &mut RankedStrategy,
+    series: &ChainSeries,
+    bar: &ChainSnapshot,
+    next_earnings: Option<&EarningsEvent>,
+    forecasts: &mut Vec<ForecastRecord>,
+) -> RankedContext {
+    let bar_date = bar.ts.date_naive();
+    let earnings = EarningsDistance {
+        days_to: next_earnings.map(|e| (e.date - bar_date).num_days()),
+        days_since: series
+            .previous_earnings_from(bar_date)
+            .map(|e| (bar_date - e.date).num_days()),
+    };
+    let features = ranked.features.observe(bar, earnings);
+
+    // Horizon (capped at expiry), the distribution, and the basis map, computed
+    // once per option bar because both logging and ranking need them.
+    let horizon_years = (ranked.ranking.horizon_days / 365.25)
+        .min(features.year_fraction)
+        .max(0.0);
+    let remaining_years = (features.year_fraction - horizon_years).max(0.0);
+    let forward_scale = if features.spot > 0.0 {
+        features.forward / features.spot
+    } else {
+        1.0
+    };
+    let dist = ranked.model.forecast(&features, horizon_years);
+
+    // Score the forecast against what the underlying actually did a horizon
+    // later. Eval-only — never on the decision path. Uses the *full* (uncapped)
+    // horizon so the realized read lands on a fixed same-weekday bar.
+    let full_horizon_years = ranked.ranking.horizon_days / 365.25;
+    if let Some(record) = score_forecast(
+        series,
+        bar,
+        &features,
+        &dist,
+        full_horizon_years,
+        ranked.model.as_ref(),
+    ) {
+        forecasts.push(record);
+    }
+
+    RankedContext {
+        dist,
+        remaining_years,
+        forward_scale,
+        full_horizon_years,
+    }
+}
+
+/// Candidate enumeration, scorer sampling, and ranking for one option bar, once
+/// the entry gate has said Open. Returns the best **one-lot** choice and its
+/// forecast target; sizing is the caller's, so it can differ per account model.
+fn ranked_choose(
+    ranked: &RankedStrategy,
+    series: &ChainSeries,
+    bar: &ChainSnapshot,
+    config: &RunConfig,
+    ctx: &RankedContext,
+    census: &mut Census,
+    scorer_records: &mut Vec<ScorerRecord>,
+) -> Option<(crate::model::RankedChoice, Option<f64>)> {
+    let mut funnel = RankingFunnel::default();
+    let candidates = enumerate_verticals(bar, &config.costs, &ranked.candidates, &mut funnel);
+    // Scorer evaluation: sample candidates and price them forward to grade the
+    // score. Reads the candidates before `rank` consumes them; eval-only.
+    scorer_sample(
+        series,
+        bar,
+        &candidates,
+        &ctx.dist,
+        ctx.remaining_years,
+        ctx.forward_scale,
+        ctx.full_horizon_years,
+        ranked.ranking.forecast_target_quantile,
+        ranked.ranking.scorer_sample_per_bar,
+        scorer_records,
+    );
+    let choice = rank(
+        candidates,
+        &ctx.dist,
+        ctx.remaining_years,
+        ctx.forward_scale,
+        &ranked.ranking,
+        &mut funnel,
+    );
+    census.ranking.merge(&funnel);
+    choice.map(|choice| {
+        // The forecast target: the favourable quantile of the entry distribution,
+        // in the trade's direction. A price, so lot count never touches it.
+        let forecast_target = ranked.ranking.forecast_target_quantile.map(|q| {
+            let level = if choice.candidate.spread.profits_from_a_rise() {
+                q
+            } else {
+                1.0 - q
+            };
+            ctx.dist.quantile(level)
+        });
+        (choice, forecast_target)
     })
 }
 
@@ -802,13 +1300,50 @@ fn execute(
     index: usize,
 ) -> Result<()> {
     match intent {
-        Intent::Open(spread, prediction, forecast_target) => {
+        Intent::Open {
+            spread,
+            prediction,
+            forecast_target,
+            sizing,
+        } => {
+            // A deferred sizing hint means `spread` is one lot and the shared
+            // account sizes it now, against the capital committed across every
+            // symbol. Zero lots means the account is full — a real outcome.
+            let (sized_spread, prediction) = match sizing {
+                None => (spread.clone(), *prediction),
+                Some(hint) => {
+                    let lots = match &config.sizing {
+                        None => 1,
+                        Some(sizing) => size_lots(
+                            sizing,
+                            hint.score,
+                            hint.one_lot_max_loss,
+                            config.initial_cash,
+                            portfolio.capital_at_risk(),
+                        ),
+                    };
+                    if lots == 0 {
+                        census.capital_limited += 1;
+                        return Ok(());
+                    }
+                    let scaled = prediction.map(|mut p| {
+                        p.expected_pl = hint.expected_pl * lots as f64;
+                        p
+                    });
+                    let spread = if lots == 1 {
+                        spread.clone()
+                    } else {
+                        spread.scaled(lots)
+                    };
+                    (spread, scaled)
+                }
+            };
             // The bar that arrives may not quote what the previous one did. A
             // missed fill is a real outcome, counted rather than forced.
-            match portfolio.open(spread.clone(), bar, &config.costs) {
+            match portfolio.open(sized_spread, bar, &config.costs) {
                 Ok(_) => {
                     if let Some(position) = portfolio.open.last_mut() {
-                        position.prediction = *prediction;
+                        position.prediction = prediction;
                         position.forecast_target = *forecast_target;
                     }
                 }
@@ -1092,6 +1627,34 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    /// The sizing math the shared account funds each entry with: a baseline
+    /// score buys `risk_per_position` of capital, a higher score scales up
+    /// linearly to the per-position cap, and once capital is committed even a
+    /// good score gets nothing — the "only high-value trades when low on
+    /// capital" behaviour the account relies on.
+    #[test]
+    fn size_lots_scales_with_score_and_stops_when_capital_is_committed() {
+        let sizing = Sizing {
+            risk_per_position: 0.20,
+            max_risk_per_position: 0.50,
+            baseline_score: 0.02,
+        };
+        let cash = 20_000.0;
+        let one_lot = 400.0; // $400 max loss per lot
+
+        // Baseline score, empty account: 20% of $20k = $4k budget -> 10 lots.
+        assert_eq!(size_lots(&sizing, 0.02, one_lot, cash, 0.0), 10);
+        // Twice the baseline score doubles the budget to $8k -> 20 lots.
+        assert_eq!(size_lots(&sizing, 0.04, one_lot, cash, 0.0), 20);
+        // A very high score is capped at 50% of capital ($10k -> 25 lots), not
+        // scaled without bound.
+        assert_eq!(size_lots(&sizing, 1.0, one_lot, cash, 0.0), 25);
+        // With $19.8k already at risk, only $200 is free — not even one lot.
+        assert_eq!(size_lots(&sizing, 1.0, one_lot, cash, 19_800.0), 0);
+        // With $19.6k at risk, exactly one lot fits.
+        assert_eq!(size_lots(&sizing, 1.0, one_lot, cash, 19_600.0), 1);
     }
 
     /// The fixture has to be trustworthy before anything is concluded from it:
