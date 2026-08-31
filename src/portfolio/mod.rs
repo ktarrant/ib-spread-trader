@@ -103,6 +103,9 @@ pub struct ClosedTrade {
     /// The ranked model's prediction at entry, to compare against realized `pnl`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prediction: Option<TradePrediction>,
+    /// The forecast-target price the position was set to close at, for the chart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forecast_target: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,6 +190,7 @@ impl Portfolio {
             synthetic_price: false,
             max_loss: position.max_loss,
             prediction: position.prediction,
+            forecast_target: position.forecast_target,
         };
         self.closed.push(trade.clone());
         Ok(Some(trade))
@@ -229,6 +233,7 @@ impl Portfolio {
             synthetic_price: true,
             max_loss: position.max_loss,
             prediction: position.prediction,
+            forecast_target: position.forecast_target,
         };
         self.closed.push(trade.clone());
         Some(trade)
@@ -272,6 +277,7 @@ impl Portfolio {
             synthetic_price: false,
             max_loss: position.max_loss,
             prediction: position.prediction,
+            forecast_target: position.forecast_target,
         };
         self.closed.push(trade.clone());
         Some(trade)

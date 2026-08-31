@@ -89,12 +89,31 @@ pub fn expected_pl_and_score(
     dist: &PriceDistribution,
     remaining_years: f64,
     forward_scale: f64,
+    forecast_target_quantile: Option<f64>,
 ) -> (f64, f64) {
-    let expected_value = dist.expected(|s| {
+    let value_at = |s: f64| {
         candidate
             .spread
             .model_value(s * forward_scale, remaining_years, &candidate.leg_vols)
-    });
+    };
+
+    // When a forecast-target exit is configured, score the trade the way it is
+    // actually managed: we take profit at the target, so the payoff is capped at
+    // the target's value for any outcome that reaches it, and read at the horizon
+    // otherwise. This makes far-OTM lottery tickets — whose target value is ~0 —
+    // score poorly, and pulls selection toward strikes inside the forecast.
+    let expected_value = match forecast_target_quantile {
+        None => dist.expected(value_at),
+        Some(q) => {
+            let bullish = candidate.spread.profits_from_a_rise();
+            let target = dist.quantile(if bullish { q } else { 1.0 - q });
+            let value_at_target = value_at(target);
+            dist.expected(|s| {
+                let reached = if bullish { s >= target } else { s <= target };
+                if reached { value_at_target } else { value_at(s) }
+            })
+        }
+    };
     // The model value is a mid mark; a real exit crosses the book, so charge the
     // exit spread here rather than let the score read optimistically.
     let expected_pl = expected_value - candidate.cost_basis - candidate.exit_spread_cost;
@@ -133,8 +152,13 @@ pub fn rank(
     let mut best: Option<RankedChoice> = None;
 
     for candidate in candidates {
-        let (expected_pl, score) =
-            expected_pl_and_score(&candidate, dist, remaining_years, forward_scale);
+        let (expected_pl, score) = expected_pl_and_score(
+            &candidate,
+            dist,
+            remaining_years,
+            forward_scale,
+            cfg.forecast_target_quantile,
+        );
         if expected_pl <= cfg.min_expected_pl {
             continue;
         }

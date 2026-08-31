@@ -474,6 +474,7 @@ pub fn run_symbol(
                                 remaining_years,
                                 forward_scale,
                                 full_horizon_years,
+                                ranked.ranking.forecast_target_quantile,
                                 ranked.ranking.scorer_sample_per_bar,
                                 &mut scorer_records,
                             );
@@ -496,9 +497,8 @@ pub fn run_symbol(
                                 // the entry distribution, in the trade's direction.
                                 let forecast_target =
                                     ranked.ranking.forecast_target_quantile.map(|q| {
-                                        let level = if exits::profits_from_a_rise(
-                                            &choice.candidate.spread,
-                                        ) {
+                                        let level = if choice.candidate.spread.profits_from_a_rise()
+                                        {
                                             q
                                         } else {
                                             1.0 - q
@@ -612,6 +612,7 @@ fn scorer_sample(
     remaining_years: f64,
     forward_scale: f64,
     full_horizon_years: f64,
+    forecast_target_quantile: Option<f64>,
     sample_per_bar: usize,
     out: &mut Vec<ScorerRecord>,
 ) {
@@ -619,17 +620,46 @@ fn scorer_sample(
         return;
     }
     let horizon_secs = (full_horizon_years * SECONDS_PER_YEAR) as i64;
-    let Some(horizon_chain) = series.snapshot_at(bar.ts + Duration::seconds(horizon_secs)) else {
+    let horizon_ts = bar.ts + Duration::seconds(horizon_secs);
+    let Some(horizon_chain) = series.snapshot_at(horizon_ts) else {
         return;
     };
+    // Option bars strictly after entry, up to the horizon — the window a
+    // forecast-target exit could fire in.
+    let future_bars: Vec<DateTime<Utc>> = series
+        .timestamps()
+        .filter(|&ts| ts > bar.ts && ts <= horizon_ts)
+        .collect();
+
+    let close_value = |chain: &ChainSnapshot, candidate: &Candidate| {
+        crate::execution::exit_credit(&candidate.spread, chain)
+            .unwrap_or_else(|_| candidate.spread.payoff_at(chain.reference_price()))
+    };
+
     let stride = (candidates.len() / sample_per_bar).max(1);
     for candidate in candidates.iter().step_by(stride).take(sample_per_bar) {
-        let (expected_pl, score) =
-            expected_pl_and_score(candidate, dist, remaining_years, forward_scale);
-        // Realized: the entry cost is already in `cost_basis`; close on the
-        // horizon bar's quotes, falling back to intrinsic if a leg stopped quoting.
-        let realized_value = crate::execution::exit_credit(&candidate.spread, &horizon_chain)
-            .unwrap_or_else(|_| candidate.spread.payoff_at(horizon_chain.reference_price()));
+        let (expected_pl, score) = expected_pl_and_score(
+            candidate,
+            dist,
+            remaining_years,
+            forward_scale,
+            forecast_target_quantile,
+        );
+        // Realized: close the way the strategy would — at the forecast target on
+        // the first bar the underlying reaches it, else on the horizon bar. The
+        // entry cost is already in `cost_basis`; a leg that stopped quoting falls
+        // back to intrinsic.
+        let target_close = forecast_target_quantile.and_then(|q| {
+            let bullish = candidate.spread.profits_from_a_rise();
+            let target = dist.quantile(if bullish { q } else { 1.0 - q });
+            future_bars.iter().find_map(|&ts| {
+                let spot = series.underlying_at(ts)?.price()?;
+                let reached = if bullish { spot >= target } else { spot <= target };
+                let chain = reached.then(|| series.snapshot_at(ts))??;
+                Some(close_value(&chain, candidate))
+            })
+        });
+        let realized_value = target_close.unwrap_or_else(|| close_value(&horizon_chain, candidate));
         let realized_pl = realized_value - candidate.cost_basis;
         out.push(ScorerRecord {
             ts: bar.ts,

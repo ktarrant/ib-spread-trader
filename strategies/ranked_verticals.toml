@@ -75,7 +75,11 @@ quantity = 1
 # forecasts on the weekend, where the realized read collapsed to the prior Friday.
 [ranking]
 horizon_days = 7.0
-min_score = 0.10
+# The score models the forecast-target exit (payoff capped at the target), which
+# is a smaller number than the old held-to-horizon score — so the threshold is
+# retuned down from 0.10. Too high collapses to a handful of trades; too low
+# over-trades into losers.
+min_score = 0.02
 min_expected_pl = 0.0
 # Close when the underlying reaches this quantile of the entry forecast in the
 # trade's favour — the same forecast that set the strikes says the move has

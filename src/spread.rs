@@ -74,6 +74,15 @@ impl Spread {
         self.legs.iter().map(|leg| leg.payoff_at(underlying)).sum()
     }
 
+    /// Whether the structure profits from the underlying **rising** — its payoff
+    /// is greater far above the strikes than at zero. This is the trade's
+    /// direction, for any vertical or naked long, and it decides which way a
+    /// forecast target points.
+    pub fn profits_from_a_rise(&self) -> bool {
+        let highest = self.legs.iter().map(|leg| leg.strike).fold(0.0_f64, f64::max);
+        self.payoff_at(highest * 2.0 + 1.0) > self.payoff_at(0.0)
+    }
+
     /// Mark-to-model value of the whole structure, in dollars, using Black-76
     /// with time value at a hypothesised `forward` and a vol **per leg**.
     ///

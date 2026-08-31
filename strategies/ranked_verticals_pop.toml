@@ -72,7 +72,7 @@ quantity = 1
 [ranking]
 horizon_days = 7.0
 metric = "prob_profit"
-min_score = 0.0
+min_score = 0.02
 min_expected_pl = 0.0
 forecast_target_quantile = 0.85
 # Evaluation: price this many candidates per bar forward to the horizon, to test

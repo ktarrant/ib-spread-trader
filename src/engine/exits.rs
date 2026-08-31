@@ -193,17 +193,9 @@ pub fn in_earnings_blackout(
 
 /// True when the underlying has crossed the short strike in the direction that
 /// means the spread is near max profit.
-/// Whether the structure profits from the underlying rising — its payoff is
-/// higher far above the strikes than at zero. Determines which way the forecast
-/// target points (up for a bull, down for a bear), for any vertical or naked long.
-pub fn profits_from_a_rise(spread: &Spread) -> bool {
-    let highest = spread.legs.iter().map(|l| l.strike).fold(0.0_f64, f64::max);
-    spread.payoff_at(highest * 2.0 + 1.0) > spread.payoff_at(0.0)
-}
-
 /// Whether the underlying has reached the forecast target in the trade's favour.
 fn forecast_target_reached(spread: &Spread, spot: f64, target: f64) -> bool {
-    if profits_from_a_rise(spread) {
+    if spread.profits_from_a_rise() {
         spot >= target
     } else {
         spot <= target
