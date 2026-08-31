@@ -139,6 +139,17 @@ fn push_bounded(values: &mut VecDeque<f64>, value: f64, capacity: usize) {
 /// through zero is undefined, and defaulting it to something would invent a move
 /// the tape never showed.
 pub fn realized_vol(closes: &[f64]) -> Option<f64> {
+    realized_vol_winsorized(closes, 0.0)
+}
+
+/// Realized volatility with each return **winsorized** to `k` robust sigmas
+/// before the stddev is taken, so a single jump — an overnight or weekend gap —
+/// cannot masquerade as sustained diffusion volatility and blow the estimate up.
+///
+/// The scale is a MAD around the median return, which the outlier itself barely
+/// moves, so the cap is set by the *typical* return and the gap is pulled back to
+/// it. `k <= 0` disables winsorizing and reproduces [`realized_vol`] exactly.
+pub fn realized_vol_winsorized(closes: &[f64], k: f64) -> Option<f64> {
     if closes.len() < 2 {
         return None;
     }
@@ -146,7 +157,22 @@ pub fn realized_vol(closes: &[f64]) -> Option<f64> {
         .windows(2)
         .map(|w| (w[0] > 0.0 && w[1] > 0.0).then(|| (w[1] / w[0]).ln()))
         .collect();
-    let returns = returns?;
+    let mut returns = returns?;
+
+    if k > 0.0 {
+        let median = median_of(&returns);
+        let deviations: Vec<f64> = returns.iter().map(|r| (r - median).abs()).collect();
+        // 1.4826 makes the MAD a consistent estimator of the standard deviation
+        // for Gaussian data.
+        let scale = 1.4826 * median_of(&deviations);
+        if scale > 0.0 {
+            let cap = k * scale;
+            for r in &mut returns {
+                *r = median + (*r - median).clamp(-cap, cap);
+            }
+        }
+    }
+
     let mean = returns.iter().sum::<f64>() / returns.len() as f64;
     let variance = returns
         .iter()
@@ -154,6 +180,20 @@ pub fn realized_vol(closes: &[f64]) -> Option<f64> {
         .sum::<f64>()
         / returns.len() as f64;
     Some(variance.sqrt())
+}
+
+/// Median of a slice, by value. Copies and sorts; the windows here are small.
+fn median_of(values: &[f64]) -> f64 {
+    let mut sorted: Vec<f64> = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let n = sorted.len();
+    if n == 0 {
+        0.0
+    } else if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        0.5 * (sorted[n / 2 - 1] + sorted[n / 2])
+    }
 }
 
 /// Realized volatility over a rolling window, silent until the window is full.
@@ -166,16 +206,25 @@ pub fn realized_vol(closes: &[f64]) -> Option<f64> {
 pub struct RealizedVol {
     closes: VecDeque<f64>,
     period: usize,
+    /// Winsorize each return to this many robust sigmas; `0` = no winsorizing.
+    winsor_k: f64,
 }
 
 impl RealizedVol {
     pub fn new(period: usize) -> Result<Self> {
+        Self::with_winsor(period, 0.0)
+    }
+
+    /// As [`new`](Self::new), but winsorizing each return to `winsor_k` robust
+    /// sigmas so a gap cannot inflate the estimate (see [`realized_vol_winsorized`]).
+    pub fn with_winsor(period: usize, winsor_k: f64) -> Result<Self> {
         if period == 0 {
             bail!("realized-vol period must be at least 1");
         }
         Ok(Self {
             closes: VecDeque::with_capacity(period + 1),
             period,
+            winsor_k,
         })
     }
 
@@ -187,7 +236,7 @@ impl RealizedVol {
             return None;
         }
         let window: Vec<f64> = self.closes.iter().copied().collect();
-        realized_vol(&window)
+        realized_vol_winsorized(&window, self.winsor_k)
     }
 }
 
@@ -379,6 +428,22 @@ mod tests {
         let r1: f64 = (110.0f64 / 100.0).ln();
         let r2: f64 = (105.0f64 / 110.0).ln();
         assert!((got - (r1 - r2).abs() / 2.0).abs() < 1e-12, "{got}");
+    }
+
+    #[test]
+    fn winsorizing_tames_a_single_gap() {
+        // Nine quiet moves and one 10% gap.
+        let returns = [0.005, -0.004, 0.006, -0.005, 0.004, -0.006, 0.003, -0.004, 0.005, 0.10];
+        let mut closes = vec![100.0];
+        for r in returns {
+            closes.push(closes.last().unwrap() * (1.0 + r));
+        }
+        let raw = realized_vol(&closes).unwrap();
+        let tamed = realized_vol_winsorized(&closes, 3.0).unwrap();
+        assert!(tamed < raw, "raw {raw}, tamed {tamed}");
+        assert!(tamed < 0.02, "the gap no longer dominates: {tamed}");
+        // k <= 0 reproduces the raw estimate exactly.
+        assert_eq!(realized_vol_winsorized(&closes, 0.0), realized_vol(&closes));
     }
 
     #[test]

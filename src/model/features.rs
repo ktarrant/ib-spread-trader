@@ -25,6 +25,9 @@ pub struct FeatureConfig {
     pub trend_slow: usize,
     pub atr_period: usize,
     pub realized_vol_period: usize,
+    /// Winsorize each return to this many robust sigmas before measuring realized
+    /// vol, so an overnight/weekend gap cannot inflate the forecast. `0` = off.
+    pub realized_vol_winsor_k: f64,
     /// Log-moneyness magnitude at which put/call skew is measured (e.g. 0.05).
     pub skew_moneyness: f64,
 }
@@ -36,6 +39,7 @@ impl Default for FeatureConfig {
             trend_slow: 30,
             atr_period: 14,
             realized_vol_period: 20,
+            realized_vol_winsor_k: 3.0,
             skew_moneyness: 0.05,
         }
     }
@@ -110,7 +114,10 @@ impl FeatureEngine {
             trend_slow: Sma::new(config.trend_slow)?,
             atr: Atr::new(config.atr_period)?,
             vwap: Vwap::new(),
-            realized_vol: RealizedVol::new(config.realized_vol_period)?,
+            realized_vol: RealizedVol::with_winsor(
+                config.realized_vol_period,
+                config.realized_vol_winsor_k,
+            )?,
             skew_moneyness: config.skew_moneyness,
         })
     }
@@ -222,6 +229,7 @@ mod tests {
             trend_slow: 3,
             atr_period: 2,
             realized_vol_period: 2,
+            realized_vol_winsor_k: 3.0,
             skew_moneyness: 0.05,
         }
     }

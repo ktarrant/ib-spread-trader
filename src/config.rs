@@ -317,6 +317,7 @@ pub struct FeaturesConfig {
     pub trend_slow: usize,
     pub atr_period: usize,
     pub realized_vol_period: usize,
+    pub realized_vol_winsor_k: f64,
     pub skew_moneyness: f64,
 }
 
@@ -328,6 +329,7 @@ impl Default for FeaturesConfig {
             trend_slow: d.trend_slow,
             atr_period: d.atr_period,
             realized_vol_period: d.realized_vol_period,
+            realized_vol_winsor_k: d.realized_vol_winsor_k,
             skew_moneyness: d.skew_moneyness,
         }
     }
@@ -340,6 +342,7 @@ impl FeaturesConfig {
             trend_slow: self.trend_slow,
             atr_period: self.atr_period,
             realized_vol_period: self.realized_vol_period,
+            realized_vol_winsor_k: self.realized_vol_winsor_k,
             skew_moneyness: self.skew_moneyness,
         }
     }

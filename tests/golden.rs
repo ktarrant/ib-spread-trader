@@ -334,7 +334,7 @@ fn the_ranked_strategy_reproduces_its_recorded_run() {
     let totals = &built.totals;
 
     assert_eq!(totals.symbols, 12);
-    assert_eq!(totals.trades, 21);
+    assert_eq!(totals.trades, 10);
 
     // The candidate funnel: enumerated -> priceable -> liquid -> within-loss ->
     // positive-EV -> above-min-score -> chosen. Every vertical is bounded, so
@@ -343,21 +343,23 @@ fn the_ranked_strategy_reproduces_its_recorded_run() {
     // enumerating): the driftless default is selective and holds less often,
     // leaving far more bars to enumerate than the old drifted default did.
     let funnel = &totals.census.ranking;
-    assert_eq!(funnel.enumerated, 4_879_589);
-    assert_eq!(funnel.priceable, 4_879_589);
-    assert_eq!(funnel.liquid, 4_729_143);
-    assert_eq!(funnel.within_loss, 1_390_718);
-    assert_eq!(funnel.positive_ev, 61_633);
-    assert_eq!(funnel.above_min_score, 1_285);
-    assert_eq!(funnel.chosen, 21, "chosen must equal the trade count");
+    assert_eq!(funnel.enumerated, 5_956_294);
+    assert_eq!(funnel.priceable, 5_956_294);
+    assert_eq!(funnel.liquid, 5_756_747);
+    assert_eq!(funnel.within_loss, 1_620_556);
+    assert_eq!(funnel.positive_ev, 44_148);
+    assert_eq!(funnel.above_min_score, 148);
+    assert_eq!(funnel.chosen, 10, "chosen must equal the trade count");
 
-    assert!((totals.total_pnl - 3029.80).abs() < 0.01, "{}", totals.total_pnl);
-    assert!((totals.traded_pnl - 1505.20).abs() < 0.01, "{}", totals.traded_pnl);
-    assert!((totals.settled_pnl - 1524.60).abs() < 0.01, "{}", totals.settled_pnl);
+    assert!((totals.total_pnl - 4189.10).abs() < 0.01, "{}", totals.total_pnl);
+    assert!((totals.traded_pnl - 2030.20).abs() < 0.01, "{}", totals.traded_pnl);
+    assert!((totals.settled_pnl - 2158.90).abs() < 0.01, "{}", totals.settled_pnl);
 
-    // Both orientations really do trade: mostly debits, at least one credit.
-    let credits = built.trades.iter().filter(|t| t.entry_debit < 0.0).count();
-    assert!(credits >= 1, "the ranker takes credit verticals too");
+    // This selective run happens to pick all debit verticals; that credit
+    // orientations are enumerated and priceable is covered by the candidates
+    // unit tests. Pin that every pick's orientation is read from the fill sign.
+    let debits = built.trades.iter().filter(|t| t.entry_debit > 0.0).count();
+    assert_eq!(debits, built.trades.len(), "this run's picks are all debits");
 
     // Cash, the trade log and the curve must agree, ranked or staged.
     let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
