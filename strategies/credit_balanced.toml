@@ -1,0 +1,15 @@
+# Ranker-axis: credit spreads banded to a 0.40-0.70 reward/risk — payoff near half of max loss — instead of chasing odds.
+name      = "credit-balanced"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "credit_balanced"
+portfolio = "shared_20k"
+exit      = "base"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+
+[costs]
+commission_per_contract = 0.65

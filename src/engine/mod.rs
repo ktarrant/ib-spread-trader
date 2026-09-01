@@ -190,13 +190,22 @@ fn entry_gate(
     }
 }
 
+/// The two prices the entry forecast set for a position: where it takes profit,
+/// and where the forecast has been left behind. Carried together because they
+/// are read from the same distribution at the same instant.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ForecastBounds {
+    pub target: Option<f64>,
+    pub stop: Option<f64>,
+}
+
 /// A decision taken on one bar, to be executed on the next.
 #[derive(Debug, Clone)]
 enum Intent {
     Open {
         spread: Spread,
         prediction: Option<TradePrediction>,
-        forecast_target: Option<f64>,
+        bounds: ForecastBounds,
         /// Present when allocation is deferred to fill time (the shared-account
         /// path): `spread` is one lot and `execute` scales it against the
         /// portfolio's capital then. `None` means `spread` is already sized.
@@ -430,7 +439,7 @@ pub fn run_symbol(
                                         entering = Some(Intent::Open {
                                             spread,
                                             prediction: None,
-                                            forecast_target: None,
+                                            bounds: ForecastBounds::default(),
                                             allocation: None,
                                             leg_vols: Vec::new(),
                                         })
@@ -457,7 +466,7 @@ pub fn run_symbol(
                         EntryGate::TooCloseToExpiry => census.too_close_to_expiry += 1,
                         EntryGate::EarningsBlackout => census.earnings_blackout += 1,
                         EntryGate::Open => {
-                            if let Some((choice, forecast_target)) = ranked_choose(
+                            if let Some((choice, bounds)) = ranked_choose(
                                 ranked,
                                 series,
                                 &bar,
@@ -502,7 +511,7 @@ pub fn run_symbol(
                                     entering = Some(Intent::Open {
                                         spread,
                                         prediction: Some(prediction),
-                                        forecast_target,
+                                        bounds,
                                         allocation: None,
                                         leg_vols,
                                     });
@@ -840,7 +849,7 @@ pub fn run_shared(
                         EntryGate::TooCloseToExpiry => census[*si].too_close_to_expiry += 1,
                         EntryGate::EarningsBlackout => census[*si].earnings_blackout += 1,
                         EntryGate::Open => {
-                            if let Some((choice, forecast_target)) = ranked_choose(
+                            if let Some((choice, bounds)) = ranked_choose(
                                 ranked,
                                 series,
                                 bar,
@@ -865,7 +874,7 @@ pub fn run_shared(
                                     leg_vols: choice.candidate.leg_vols.clone(),
                                     spread: choice.candidate.spread,
                                     prediction: Some(prediction),
-                                    forecast_target,
+                                    bounds,
                                     allocation,
                                 });
                             }
@@ -900,7 +909,7 @@ pub fn run_shared(
                                         entering = Some(Intent::Open {
                                             spread,
                                             prediction: None,
-                                            forecast_target: None,
+                                            bounds: ForecastBounds::default(),
                                             allocation: None,
                                             leg_vols: Vec::new(),
                                         })
@@ -1155,7 +1164,7 @@ fn ranked_choose(
     ctx: &RankedContext,
     census: &mut Census,
     scorer_records: &mut Vec<ScorerRecord>,
-) -> Option<(crate::model::RankedChoice, Option<f64>)> {
+) -> Option<(crate::model::RankedChoice, ForecastBounds)> {
     let mut funnel = RankingFunnel::default();
     let candidates = enumerate_verticals(bar, &config.costs, &ranked.candidates, &mut funnel);
     // Scorer evaluation: sample candidates and price them forward to grade the
@@ -1181,17 +1190,22 @@ fn ranked_choose(
     );
     census.ranking.merge(&funnel);
     choice.map(|choice| {
-        // The forecast target: the favourable quantile of the entry distribution,
-        // in the trade's direction. A price, so lot count never touches it.
-        let forecast_target = config.exits.forecast_target_quantile.map(|q| {
-            let level = if choice.candidate.spread.profits_from_a_rise() {
-                q
-            } else {
-                1.0 - q
-            };
-            ctx.dist.quantile(level)
-        });
-        (choice, forecast_target)
+        // Both bounds of the entry distribution, read in the trade's direction:
+        // the favourable quantile it takes profit at, and the adverse one past
+        // which the forecast no longer covers it. Prices, so lot count never
+        // touches either.
+        let rises = choice.candidate.spread.profits_from_a_rise();
+        let quantile_toward = |q: f64| ctx.dist.quantile(if rises { q } else { 1.0 - q });
+        let bounds = ForecastBounds {
+            target: config.exits.forecast_target_quantile.map(&quantile_toward),
+            // The adverse side is the mirror image: 0.85 means the 85th
+            // percentile of the move *against* the position.
+            stop: config
+                .exits
+                .forecast_stop_quantile
+                .map(|q| quantile_toward(1.0 - q)),
+        };
+        (choice, bounds)
     })
 }
 
@@ -1332,7 +1346,7 @@ fn execute(
         Intent::Open {
             spread,
             prediction,
-            forecast_target,
+            bounds,
             allocation,
             leg_vols,
         } => {
@@ -1385,7 +1399,8 @@ fn execute(
                 Ok(_) => {
                     if let Some(position) = portfolio.open.last_mut() {
                         position.prediction = prediction;
-                        position.forecast_target = *forecast_target;
+                        position.forecast_target = bounds.target;
+                        position.forecast_stop = bounds.stop;
                         position.leg_vols = leg_vols.clone();
                     }
                 }

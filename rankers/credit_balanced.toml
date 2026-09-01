@@ -1,0 +1,33 @@
+# Credit spreads that balance odds against payoff.
+#
+# credit_pop (no odds gate) selects a median reward/risk of 0.92 — a near-the-
+# money short strike, a big credit on close to a coin flip. credit_pop_high
+# (70% odds) selects 0.20 — far out of the money, a small credit against a full-
+# width risk. Neither is what a credit seller wants, and the second is worse:
+# a probability floor selects *against* payoff, because high odds mean a distant
+# short strike.
+#
+# So the band is the instrument, not the probability. reward/risk in 0.40–0.70
+# puts max profit near half of max loss, which is a short strike around the
+# 30-delta rather than the 10-delta — and `min_width` keeps the wings far enough
+# apart that the credit is worth the four crossings of the book it costs.
+# `min_prob_profit` stays modest: it is a floor on the odds, not the selector.
+[candidates]
+rights = ["call", "put"]
+allow_debit = false
+allow_credit = true
+allow_naked_long = false
+min_width = 5.0
+max_relative_spread = 0.35
+max_loss = 500.0
+min_reward_risk = 0.40
+max_reward_risk = 0.70
+quantity = 1
+
+[ranking]
+metric = "prob_profit"
+min_score = 0.02
+min_expected_pl = 0.0
+min_prob_profit = 0.55
+forecast_target_quantile = 0.85
+scorer_sample_per_bar = 20

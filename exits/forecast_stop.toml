@@ -1,0 +1,16 @@
+# The base exits plus the adverse-forecast stop: close when the underlying leaves
+# the range the entry forecast gave it, against the position.
+#
+# This is the give-up for a credit spread that has *truly* gone bad, as opposed
+# to one that is merely behind. The live-POP floor reads a probability and fires
+# while a short-premium position still has the time it needs; this reads a price,
+# and only once the move the trade was underwritten against has actually
+# happened. 0.85 mirrors the profit-side target: the 85th percentile of the move
+# against the position.
+forecast_target_quantile = 0.85
+forecast_stop_quantile = 0.85
+profit_target_pct = 50.0
+stop_loss_pct = 100.0
+close_before_earnings = true
+underlying_past_short_strike = true
+close_after_forecast_horizon = true

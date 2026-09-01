@@ -333,6 +333,10 @@ pub struct ExitConfig {
     /// inherit `ranking.forecast_target_quantile` for backward compatibility.
     #[serde(default)]
     pub forecast_target_quantile: Option<f64>,
+    /// Adverse forecast quantile past which to close — the bounds the trade was
+    /// underwritten inside, breached. `None` disables it.
+    #[serde(default)]
+    pub forecast_stop_quantile: Option<f64>,
     /// Percentage of max profit at which to close.
     #[serde(default)]
     pub profit_target_pct: Option<f64>,
@@ -374,6 +378,7 @@ impl Default for ExitConfig {
     fn default() -> Self {
         Self {
             forecast_target_quantile: None,
+            forecast_stop_quantile: None,
             profit_target_pct: None,
             stop_loss_pct: None,
             underlying_past_short_strike: false,
@@ -904,6 +909,9 @@ pub struct CandidatesConfig {
     pub max_width: Option<f64>,
     pub max_relative_spread: f64,
     pub max_loss: f64,
+    /// Band on `max_profit / max_loss`. See `CandidateConfig`.
+    pub min_reward_risk: Option<f64>,
+    pub max_reward_risk: Option<f64>,
     pub quantity: u32,
 }
 
@@ -920,6 +928,8 @@ impl Default for CandidatesConfig {
             max_width: None,
             max_relative_spread: d.max_relative_spread,
             max_loss: d.max_loss,
+            min_reward_risk: d.min_reward_risk,
+            max_reward_risk: d.max_reward_risk,
             quantity: d.quantity,
         }
     }
@@ -939,6 +949,11 @@ impl CandidatesConfig {
         if self.max_loss.is_nan() || self.max_loss <= 0.0 {
             bail!("`candidates.max_loss` must be positive");
         }
+        if let (Some(lo), Some(hi)) = (self.min_reward_risk, self.max_reward_risk)
+            && lo > hi
+        {
+            bail!("candidates.min_reward_risk ({lo}) exceeds max_reward_risk ({hi})");
+        }
         Ok(CandidateConfig {
             rights: self.rights.clone(),
             allow_debit: self.allow_debit,
@@ -948,6 +963,8 @@ impl CandidatesConfig {
             max_width: self.max_width.unwrap_or(f64::INFINITY),
             max_relative_spread: self.max_relative_spread,
             max_loss: self.max_loss,
+            min_reward_risk: self.min_reward_risk,
+            max_reward_risk: self.max_reward_risk,
             quantity: self.quantity,
         })
     }
@@ -1085,6 +1102,14 @@ impl StrategyConfig {
             && !(0.5..=1.0).contains(&q)
         {
             bail!("`exit.forecast_target_quantile` must be in 0.5..=1.0");
+        }
+        if let Some(q) = exit.forecast_stop_quantile
+            && !(0.5..=1.0).contains(&q)
+        {
+            bail!("`exit.forecast_stop_quantile` must be in 0.5..=1.0");
+        }
+        if exit.forecast_stop_quantile.is_some() && self.mode != StrategyMode::Ranked {
+            bail!("exit.forecast_stop_quantile needs the forecast and applies only to ranked mode");
         }
         // The ranked engine caps the scoring horizon at expiry, so a new entry
         // opened inside `horizon_days` of expiry would be scored on a silently
@@ -1362,6 +1387,7 @@ impl StrategyConfig {
                 forecast_target_quantile: exit
                     .forecast_target_quantile
                     .or(ranker.ranking.forecast_target_quantile),
+                forecast_stop_quantile: exit.forecast_stop_quantile,
                 profit_target_pct: exit.profit_target_pct,
                 stop_loss_pct: exit.stop_loss_pct,
                 underlying_past_short_strike: exit.underlying_past_short_strike,

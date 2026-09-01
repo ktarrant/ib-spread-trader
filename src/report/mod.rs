@@ -504,6 +504,7 @@ fn reason_key(reason: ExitReason) -> &'static str {
         ExitReason::UnderlyingPastShortStrike => "underlying_past_short",
         ExitReason::ForecastHorizon => "forecast_horizon",
         ExitReason::PopFloor => "pop_floor",
+        ExitReason::ForecastStop => "forecast_stop",
         ExitReason::TrailingStop => "trailing_stop",
         ExitReason::MomentumExit => "momentum_exit",
         ExitReason::TimeDecay => "time_decay",

@@ -24,6 +24,17 @@ pub struct ExitRules {
     /// Favorable quantile used to materialize an entry's forecast price target.
     /// It belongs to the exit bundle even though the target is fixed at entry.
     pub forecast_target_quantile: Option<f64>,
+    /// The mirror of the target: close when the underlying reaches this quantile
+    /// of the entry forecast *against* the position — the bounds the trade was
+    /// underwritten inside, breached.
+    ///
+    /// This is what "truly gone bad" means for a credit spread, and why it is not
+    /// the live-POP floor. The floor reads a *probability*, so it fires on a
+    /// position that is merely behind and still has the time it needs; this fires
+    /// on a *price*, and only once the underlying has left the range the forecast
+    /// gave it. Expressed like `forecast_target_quantile` — 0.85 means the 85th
+    /// percentile of the move against the trade.
+    pub forecast_stop_quantile: Option<f64>,
     /// Close once gross P&L reaches this percentage of max profit.
     pub profit_target_pct: Option<f64>,
     /// Close once gross P&L falls to minus this percentage of the debit paid.
@@ -103,6 +114,17 @@ impl ExitRules {
             && ctx.gross_pnl >= max_profit * pct / 100.0
         {
             return Some(ExitReason::ProfitTarget);
+        }
+
+        // 2a. The adverse bound: the underlying has left the range the entry
+        //     forecast gave it, so the thesis the trade was written on is gone.
+        //     Ahead of the profit-side rules below it because a breach is not a
+        //     state to keep trading through.
+        if let Some(stop) = position.forecast_stop
+            && let Some(spot) = ctx.underlying_price
+            && forecast_stop_reached(&position.spread, spot, stop)
+        {
+            return Some(ExitReason::ForecastStop);
         }
 
         // 2. Forecast target reached — the move the trade bet on has played out.
@@ -314,6 +336,17 @@ fn forecast_target_reached(spread: &Spread, spot: f64, target: f64) -> bool {
     }
 }
 
+/// The adverse mirror: the underlying has moved *against* the position past the
+/// bound. A structure that profits from a rise is stopped by a fall, and vice
+/// versa — the opposite comparison to `forecast_target_reached`.
+fn forecast_stop_reached(spread: &Spread, spot: f64, stop: f64) -> bool {
+    if spread.profits_from_a_rise() {
+        spot <= stop
+    } else {
+        spot >= stop
+    }
+}
+
 /// A naked long — a single-leg long, no short leg to define a spread.
 fn is_naked_long(position: &OpenPosition) -> bool {
     !position.spread.legs.iter().any(|l| l.side == Side::Short)
@@ -406,6 +439,7 @@ mod tests {
             spread,
             prediction: None,
             forecast_target: None,
+            forecast_stop: None,
             leg_vols: Vec::new(),
             peak_value: None,
         }
@@ -611,6 +645,7 @@ mod tests {
             spread,
             prediction: None,
             forecast_target: None,
+            forecast_stop: None,
             leg_vols: Vec::new(),
             peak_value: None,
         };
@@ -663,6 +698,7 @@ mod tests {
             spread,
             prediction: None,
             forecast_target: None,
+            forecast_stop: None,
             leg_vols: Vec::new(),
             peak_value: None,
         };
@@ -819,6 +855,39 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// "Truly gone bad" is a price statement, not a probability one: the
+    /// underlying has left the range the entry forecast gave it. That is why this
+    /// is not the live-POP floor, which fires on a position merely behind.
+    #[test]
+    fn the_forecast_stop_fires_only_once_the_underlying_leaves_its_entry_bounds() {
+        let rules = ExitRules {
+            forecast_stop_quantile: Some(0.85),
+            ..Default::default()
+        };
+
+        // A bull call (profits from a rise) stopped by a *fall* through 735.
+        let mut bull = position();
+        bull.forecast_stop = Some(735.0);
+        assert_eq!(rules.triggered(&bull, &ctx(-50.0, 734.0)), Some(ExitReason::ForecastStop));
+        assert_eq!(rules.triggered(&bull, &ctx(-50.0, 736.0)), None, "still inside the bounds");
+
+        // A bear put (profits from a fall) is stopped by a *rise* — the mirror.
+        let mut bear = position();
+        bear.spread = Spread::new(
+            "SPY",
+            vec![
+                Leg { contract_id: 1, strike: 760.0, right: OptionRight::Put, side: Side::Long, quantity: 1 },
+                Leg { contract_id: 2, strike: 755.0, right: OptionRight::Put, side: Side::Short, quantity: 1 },
+            ],
+        );
+        bear.forecast_stop = Some(775.0);
+        assert_eq!(rules.triggered(&bear, &ctx(-50.0, 776.0)), Some(ExitReason::ForecastStop));
+        assert_eq!(rules.triggered(&bear, &ctx(-50.0, 774.0)), None);
+
+        // And a position with no bound set is never stopped by it.
+        assert_eq!(rules.triggered(&position(), &ctx(-50.0, 100.0)), None);
     }
 
     #[test]

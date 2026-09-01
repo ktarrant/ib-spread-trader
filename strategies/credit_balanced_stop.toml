@@ -1,0 +1,15 @@
+# Both sides of the ask: the balanced universe, plus the adverse-forecast stop for a position that has genuinely gone wrong.
+name      = "credit-balanced-stop"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "credit_balanced"
+portfolio = "shared_20k"
+exit      = "forecast_stop"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+
+[costs]
+commission_per_contract = 0.65

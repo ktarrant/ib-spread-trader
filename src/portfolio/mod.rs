@@ -43,6 +43,10 @@ pub enum ExitReason {
     /// A debit spread's live probability of profit fell below the floor — the
     /// give-up when the model no longer expects the trade to work out.
     PopFloor,
+    /// The underlying left the bounds the entry forecast gave it, against the
+    /// position. The give-up for a trade that has genuinely gone wrong, as
+    /// opposed to one that is merely behind.
+    ForecastStop,
     /// A naked long gave back too much of its peak gain — the trailing stop that
     /// lets a winner run while protecting the run.
     TrailingStop,
@@ -91,6 +95,10 @@ pub struct OpenPosition {
     /// position (a favorable quantile of the entry forecast). `None` unless the
     /// ranked config enabled it.
     pub forecast_target: Option<f64>,
+    /// The mirror: the *adverse* quantile of the entry forecast, past which the
+    /// underlying has left the bounds this trade was underwritten inside.
+    /// `None` unless the exit bundle enabled it.
+    pub forecast_stop: Option<f64>,
     /// Each leg's entry implied vol (sticky-strike), carried from the chosen
     /// candidate. Empty for the staged path. Lets the live-POP exit re-score the
     /// spread against the current distribution with the vols it was priced at.
@@ -136,6 +144,9 @@ pub struct ClosedTrade {
     /// The forecast-target price the position was set to close at, for the chart.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forecast_target: Option<f64>,
+    /// The adverse bound it was set to stop at, for the same chart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forecast_stop: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -223,6 +234,7 @@ impl Portfolio {
             entry_commission: commission,
             prediction: None,
             forecast_target: None,
+            forecast_stop: None,
             leg_vols: Vec::new(),
             peak_value: None,
         });
@@ -262,6 +274,7 @@ impl Portfolio {
             max_loss: position.max_loss,
             prediction: position.prediction,
             forecast_target: position.forecast_target,
+            forecast_stop: position.forecast_stop,
         };
         self.closed.push(trade.clone());
         Ok(Some(trade))
@@ -305,6 +318,7 @@ impl Portfolio {
             max_loss: position.max_loss,
             prediction: position.prediction,
             forecast_target: position.forecast_target,
+            forecast_stop: position.forecast_stop,
         };
         self.closed.push(trade.clone());
         Some(trade)
@@ -349,6 +363,7 @@ impl Portfolio {
             max_loss: position.max_loss,
             prediction: position.prediction,
             forecast_target: position.forecast_target,
+            forecast_stop: position.forecast_stop,
         };
         self.closed.push(trade.clone());
         Some(trade)

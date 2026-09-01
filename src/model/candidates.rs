@@ -34,6 +34,15 @@ pub struct CandidateConfig {
     pub max_relative_spread: f64,
     /// Dollar cap on a candidate's max loss (capital at risk).
     pub max_loss: f64,
+    /// Band on `max_profit / max_loss` — what the trade can make against what it
+    /// risks. A probability floor alone selects *against* this: high odds mean a
+    /// short strike far out of the money, which is a small credit on a full-width
+    /// risk. The floor refuses those; the ceiling refuses the opposite corner, a
+    /// near-the-money spread that collects a big credit on a coin flip. Together
+    /// they name the middle a credit seller actually wants. `None` disables
+    /// either side.
+    pub min_reward_risk: Option<f64>,
+    pub max_reward_risk: Option<f64>,
     pub quantity: u32,
 }
 
@@ -48,6 +57,8 @@ impl Default for CandidateConfig {
             max_width: f64::INFINITY,
             max_relative_spread: 0.5,
             max_loss: 500.0,
+            min_reward_risk: None,
+            max_reward_risk: None,
             quantity: 1,
         }
     }
@@ -90,6 +101,9 @@ pub struct RankingFunnel {
     pub liquid: usize,
     /// …of which stayed within the loss cap.
     pub within_loss: usize,
+    /// …of which sat inside the reward/risk band. Equal to `within_loss` unless
+    /// a band is configured.
+    pub balanced: usize,
     /// …of which had positive expected P/L under the model.
     pub positive_ev: usize,
     /// …of which cleared the minimum score.
@@ -107,11 +121,28 @@ impl RankingFunnel {
         self.priceable += other.priceable;
         self.liquid += other.liquid;
         self.within_loss += other.within_loss;
+        self.balanced += other.balanced;
         self.positive_ev += other.positive_ev;
         self.above_min_score += other.above_min_score;
         self.above_min_pop += other.above_min_pop;
         self.chosen += other.chosen;
     }
+}
+
+/// Whether a candidate's structural reward/risk sits inside the configured band.
+///
+/// An unbounded structure (a naked long call) has no ratio at all. It passes when
+/// no floor is set — the band is a credit-seller's instrument and should not
+/// silently delete naked longs from a universe that never asked for it — and
+/// fails a floor, because "at least this much reward per unit of risk" cannot be
+/// established for a max profit that does not exist.
+fn within_reward_risk(max_profit: Option<f64>, max_loss: f64, cfg: &CandidateConfig) -> bool {
+    let Some(max_profit) = max_profit else {
+        return cfg.min_reward_risk.is_none();
+    };
+    let ratio = max_profit / max_loss;
+    cfg.min_reward_risk.is_none_or(|floor| ratio >= floor)
+        && cfg.max_reward_risk.is_none_or(|cap| ratio <= cap)
 }
 
 /// A leg's relative bid/ask spread, `(ask - bid) / mid`. Infinite when the mid is
@@ -207,6 +238,11 @@ pub fn enumerate_verticals(
                 }
                 funnel.within_loss += 1;
 
+                if !within_reward_risk(max_profit, max_loss, cfg) {
+                    continue;
+                }
+                funnel.balanced += 1;
+
                 let leg_vols = vec![
                     long.implied_vol.expect("selectable leg has a vol"),
                     short.implied_vol.expect("selectable leg has a vol"),
@@ -278,6 +314,10 @@ pub fn enumerate_verticals(
                     }
                     OptionRight::Call => None,
                 };
+                if !within_reward_risk(max_profit, max_loss, cfg) {
+                    continue;
+                }
+                funnel.balanced += 1;
                 let exit_spread_cost =
                     0.5 * (long.ask - long.bid) * cfg.quantity as f64 * CONTRACT_MULTIPLIER;
 

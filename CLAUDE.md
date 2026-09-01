@@ -445,6 +445,66 @@ Do not read the returns: 8 trades is not a sample. The drawdown and the
 identical-runs fact are structural rather than P&L noise, and those are the parts
 worth carrying forward.
 
+### A probability floor selects *against* payoff — measure reward/risk instead
+
+The reason `credit_pop_high` disappoints is visible in what it picks. High odds
+mean a short strike far out of the money, which is a small credit against a
+full-width risk, so a probability floor is a filter on payoff with the sign
+inverted:
+
+| | median reward/risk | median width |
+|---|---|---|
+| `credit_pop` (no odds gate) | **0.92** | 9 |
+| `credit_pop_high` (70 % odds) | **0.20** | 5 |
+
+Reward/risk here is `max_profit / max_loss` — for a credit vertical, the credit
+against the width it does not cover. 0.92 is a near-the-money short strike, a big
+credit on close to a coin flip; 0.20 is the far wing. `min_reward_risk` /
+`max_reward_risk` band the ratio directly (`credit_balanced`, 0.40–0.70), which
+is the honest way to ask for "payoff near half the risk".
+
+**The band does what it says and still loses more.** `credit_balanced` hits a 0.62
+median ratio at width 7.5 — exactly the structure asked for — and returns −43.0 %
+against `credit_pop`'s −7.0 %. Selection by structure is not selection by edge.
+
+### The ladder is thin exactly where a balanced credit spread lives
+
+Worth knowing before reading any of that as a verdict on the *idea*. At
+2026-07-15 15:00, the strikes each symbol quotes in the 20–40 delta band — where a
+~0.5 reward/risk short strike sits — are: SPY 16, IWM 12, META 7, QQQ 5,
+AAPL/AMZN/NVDA/TSLA/COIN 4, **MSTR and PLTR 2**. Strike gaps are $1 on SPY and
+IWM, $5–$10 everywhere else — 3.7 % of spot on PLTR.
+
+So the band survives on only **7.4 %** of within-loss candidates, and on most
+symbols the ranker is choosing among a handful of structures rather than tuning
+one. A criterion this precise is partly a question the data cannot answer, and
+that is a capture-side limit (see the `DataSet` note in DESIGN.md), not a
+modelling one.
+
+### The adverse-forecast stop is the first give-up that helps
+
+`forecast_stop_quantile` closes a position when the underlying reaches the
+quantile of the entry forecast *against* it — the mirror of the profit-side
+target. Unlike `live_pop_floor` it reads a **price**, not a probability, so it
+fires when the move the trade was underwritten against has actually happened
+rather than when the position is merely behind and still has the time it needs.
+
+| run | trades | return | worst trade | stops |
+|---|---|---|---|---|
+| `credit_balanced` | 20 | −43.0 % | −$2 328 | 0 |
+| `credit_balanced_stop` | 27 | **−35.5 %** | **−$1 933** | 11 |
+| `credit_pop` | 28 | −7.0 % | −$2 538 | 0 |
+| `credit_pop_stop` | 35 | −9.7 % | **−$1 933** | 11 |
+
+It cuts the tail every time it is used — the worst trade is the same −$1 933 in
+both, the structural stop rather than a full-width loss. But it does not reliably
+improve the account, and the reason is the same one the POP floor ran into:
+**capital freed by a good exit is immediately redeployed at full size** (28 → 35
+trades on `credit_pop`), because the sizer takes the 5-lot cap on every entry. On
+this dataset no exit rule tested beats having none, and the pattern points at the
+**portfolio** axis rather than the exit axis — an exit that frees capital is only
+worth what the next trade does with it.
+
 
 ## Test fixtures generate their own options
 
@@ -664,6 +724,8 @@ isolates that axis:
 | `credit_pop_floor10/15.toml` | exit | The give-up loosened to 0.10 / 0.15 — the floor sweep. |
 | `credit_pop_high.toml` | ranker | Credit-only PoP entry *gated* at 70 % odds (`min_prob_profit`). Halves drawdown; makes the give-up redundant. |
 | `credit_pop_high_floor10.toml` | exit | The gate plus a loose give-up — identical to `credit_pop_high`, which is the finding. |
+| `credit_balanced.toml` | ranker | Reward/risk banded 0.40–0.70 with wider wings — payoff near half of max loss. |
+| `credit_balanced_stop.toml` / `credit_pop_stop.toml` | exit | The adverse-forecast stop on each credit entry. |
 
 All run as one shared $20k account (the default), so their P&L is comparable.
 

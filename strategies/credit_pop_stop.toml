@@ -1,0 +1,15 @@
+# Exit-axis on credit_pop: the same entry, with the adverse-forecast stop replacing nothing — credit_pop had no risk exit at all.
+name      = "credit-pop-stop"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "credit_pop"
+portfolio = "shared_20k"
+exit      = "forecast_stop"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+
+[costs]
+commission_per_contract = 0.65

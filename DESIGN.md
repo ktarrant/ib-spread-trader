@@ -119,6 +119,7 @@ this priority. Each is configurable and several are **scoped by structure**:
 | Past short strike | **debit spreads** | underlying crosses the short strike (take-profit) | `underlying_past_short_strike` |
 | Stop loss | **debit** (incl. naked) | gross P/L ≤ −pct of debit paid | `stop_loss_pct` |
 | Live-POP give-up | **verticals** (debit + credit) | re-scored probability of profit < floor | `live_pop_floor` |
+| Adverse-forecast stop | any | underlying reaches the forecast quantile *against* the position | `forecast_stop_quantile` |
 | Trailing stop | **naked longs** | gross P/L gives back pct of its peak | `naked_trailing_stop_pct` |
 | Momentum exit | **naked longs** | the trend flips against the position | `naked_momentum_exit` |
 | Forecast horizon | any | held as long as the forecast horizon | `close_after_forecast_horizon` |
