@@ -28,7 +28,7 @@ use crate::execution::{Costs, Reject, Selector};
 use crate::model::{
     Candidate, CandidateConfig, EarningsDistance, FeatureEngine, Features, ForecastRecord,
     PriceDistribution, PriceModel, RankingConfig, RankingFunnel, ScorerRecord, enumerate_verticals,
-    expected_pl_and_score, rank,
+    rank, ranking_key,
 };
 use crate::portfolio::{
     AllocationCandidate, ExitReason, OpenPosition, Portfolio, PortfolioModel, PortfolioModelKind,
@@ -1168,8 +1168,7 @@ fn ranked_choose(
         ctx.remaining_years,
         ctx.forward_scale,
         ctx.full_horizon_years,
-        ranked.ranking.forecast_target_quantile,
-        ranked.ranking.scorer_sample_per_bar,
+        &ranked.ranking,
         scorer_records,
     );
     let choice = rank(
@@ -1211,10 +1210,11 @@ fn scorer_sample(
     remaining_years: f64,
     forward_scale: f64,
     full_horizon_years: f64,
-    forecast_target_quantile: Option<f64>,
-    sample_per_bar: usize,
+    cfg: &RankingConfig,
     out: &mut Vec<ScorerRecord>,
 ) {
+    let (forecast_target_quantile, sample_per_bar) =
+        (cfg.forecast_target_quantile, cfg.scorer_sample_per_bar);
     if sample_per_bar == 0 || candidates.is_empty() {
         return;
     }
@@ -1237,13 +1237,10 @@ fn scorer_sample(
 
     let stride = (candidates.len() / sample_per_bar).max(1);
     for candidate in candidates.iter().step_by(stride).take(sample_per_bar) {
-        let (expected_pl, score) = expected_pl_and_score(
-            candidate,
-            dist,
-            remaining_years,
-            forward_scale,
-            forecast_target_quantile,
-        );
+        // Grade the number this ranker orders by, which is the metric's key —
+        // not always the expected-P/L ratio.
+        let (expected_pl, score) =
+            ranking_key(candidate, dist, remaining_years, forward_scale, cfg);
         // Realized: close the way the strategy would — at the forecast target on
         // the first bar the underlying reaches it, else on the horizon bar. The
         // entry cost is already in `cost_basis`; a leg that stopped quoting falls

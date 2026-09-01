@@ -425,6 +425,13 @@ coverage, direction, and per-symbol robustness). `rankers/<label>.json` records
 candidate Spearman and decile monotonicity paired with a model label. Regenerate
 them with `scripts/validate_model.py` and `scripts/validate_ranker.py`.
 
+**A ranker record grades the key that ranker actually orders by** — the
+expected-P/L ratio for `expected_value`, the model probability of profit for
+`prob_profit` (`ranker::ranking_key`). `RankedChoice::score` stays the EV ratio
+because the portfolio model sizes against it; those are different questions, and
+conflating them once made `rankers/prob_profit.json` a verbatim copy of `ev.json`
+— a validation record about a scorer that run never used.
+
 **Every field carries `#[serde(default)]`, and unknown keys are refused.** A
 partial config that fails to deserialize is a live papercut in `ib-option-calc`
 and not worth reproducing; a misspelled key silently taking its default would be

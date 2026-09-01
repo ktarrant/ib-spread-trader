@@ -148,6 +148,33 @@ pub fn prob_profit_of(
     })
 }
 
+/// The value the ranker actually **orders** by under `metric`, paired with the
+/// expected P/L. `RankedChoice::score` stays the expected-P/L ratio because the
+/// portfolio model sizes against it; the ordering key is a different question,
+/// and it is the one an evaluation of the *ranker* has to grade — grading the
+/// expected-value ratio in a `prob_profit` run would report a scorer that run
+/// never used.
+pub fn ranking_key(
+    candidate: &Candidate,
+    dist: &PriceDistribution,
+    remaining_years: f64,
+    forward_scale: f64,
+    cfg: &RankingConfig,
+) -> (f64, f64) {
+    let (expected_pl, score) = expected_pl_and_score(
+        candidate,
+        dist,
+        remaining_years,
+        forward_scale,
+        cfg.forecast_target_quantile,
+    );
+    let key = match cfg.metric {
+        RankMetric::ExpectedValue => score,
+        RankMetric::ProbProfit => prob_profit(candidate, dist, remaining_years, forward_scale),
+    };
+    (expected_pl, key)
+}
+
 pub fn rank(
     candidates: Vec<Candidate>,
     dist: &PriceDistribution,
@@ -309,6 +336,29 @@ mod tests {
         );
         assert!(choice.is_none());
         assert_eq!(funnel.positive_ev, 0);
+    }
+
+    /// The scorer evaluation grades `ranking_key`, so it has to follow the
+    /// configured metric. Before it did, a `prob_profit` run's scorer record was
+    /// the expected-value ratio — a validation record about a scorer that run
+    /// never used, and identical to the EV ranker's down to the last digit.
+    #[test]
+    fn the_ordering_key_follows_the_configured_metric() {
+        let candidate = bull_call();
+        let dist = bullish_distribution();
+
+        let ev = RankingConfig::default();
+        let (expected_pl, ev_key) = ranking_key(&candidate, &dist, 0.0, 1.0, &ev);
+        assert!((expected_pl - 207.4).abs() < 1e-9);
+        assert!((ev_key - 207.4 / 192.6).abs() < 1e-9, "EV orders by E[P/L]/risk");
+
+        let pop = RankingConfig {
+            metric: RankMetric::ProbProfit,
+            ..RankingConfig::default()
+        };
+        let (also_expected_pl, pop_key) = ranking_key(&candidate, &dist, 0.0, 1.0, &pop);
+        assert!((also_expected_pl - 207.4).abs() < 1e-9, "expected P/L is the metric-free half");
+        assert!((pop_key - 0.8).abs() < 1e-9, "prob_profit orders by the hit rate");
     }
 
     #[test]

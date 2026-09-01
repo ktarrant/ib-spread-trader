@@ -198,7 +198,10 @@ impl ModelEval {
 pub struct ScorerRecord {
     pub ts: DateTime<Utc>,
     pub symbol: String,
-    /// The rank score the model assigned (`E[P/L] / max_loss`).
+    /// The value the ranker ordered by: `E[P/L] / max_loss` for the
+    /// expected-value metric, the model probability of profit for `prob_profit`.
+    /// Grading the ordering key is what makes the Spearman a claim about *this*
+    /// ranker rather than about the default one.
     pub score: f64,
     /// The model's expected P/L, in dollars.
     pub expected_pl: f64,

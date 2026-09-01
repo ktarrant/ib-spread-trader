@@ -30,5 +30,6 @@ pub use features::{EarningsDistance, FeatureConfig, FeatureEngine, Features};
 pub use price_model::{LognormalDriftModel, LognormalModelConfig, PriceModel};
 pub use ranker::{
     RankMetric, RankedChoice, RankingConfig, expected_pl_and_score, prob_profit_of, rank,
+    ranking_key,
 };
 pub use validation::{RankerValidationRecord, ValidationRecord};
