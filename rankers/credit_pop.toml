@@ -1,0 +1,24 @@
+# Credit-only universe scored by probability of profit — the theta-harvest
+# ranker. No debits and no naked longs, so every position is short premium with
+# a defined-risk wing.
+#
+# `min_score` still floors expected P/L per unit of risk before the metric
+# orders: PoP alone would happily take a 95%-odds spread whose 5% loss wipes out
+# twenty wins. The metric picks *among* candidates that already clear a positive
+# expectancy, which is what keeps "pick up pennies" honest.
+[candidates]
+rights = ["call", "put"]
+allow_debit = false
+allow_credit = true
+allow_naked_long = false
+min_width = 0.0
+max_relative_spread = 0.35
+max_loss = 500.0
+quantity = 1
+
+[ranking]
+metric = "prob_profit"
+min_score = 0.02
+min_expected_pl = 0.0
+forecast_target_quantile = 0.85
+scorer_sample_per_bar = 20

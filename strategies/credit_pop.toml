@@ -1,0 +1,24 @@
+# Ranker-axis variant: credit spreads only, entered on probability of profit.
+#
+# One label away from mean_reversion. Against prob_profit.toml it is one step
+# finer — same metric, so the difference there is the *universe* alone (credit
+# only, no debits or naked longs).
+#
+# Read its result with the exit scoping in mind: every loss-triggered exit in
+# `exits/base.toml` is gated on `entry_debit > 0`, so a credit position here has
+# no downside rule at all — only the profit target, the forecast target, and the
+# calendar. See CLAUDE.md, "the credit side has no give-up".
+name      = "credit-pop"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "credit_pop"
+portfolio = "shared_20k"
+exit      = "base"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+
+[costs]
+commission_per_contract = 0.65

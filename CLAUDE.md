@@ -386,6 +386,29 @@ Exit is a framework axis: the `pop_trailing` and `momentum` labels under `exits/
 are selected by strategies that otherwise match the `mean_reversion` base, and
 `scripts/compare_strategies.py`'s exit-mix column shows *how* each variant closes.
 
+### The credit side has no give-up, and `credit_pop.toml` measures the cost
+
+Every loss-triggered exit is scoped to a structure that is **not** a credit
+spread: `stop_loss_pct` and `underlying_past_short_strike` require
+`entry_debit > 0`, `live_pop_floor` requires a debit spread, and the trailing and
+momentum stops require a naked long. So a credit position can only close on a
+profit target, a forecast target, or the calendar (forecast horizon, earnings,
+expiry). It has three ways to win and none to cut a loss.
+
+That is invisible while credits are a rounding error (the base takes 5), which is
+why `credit_pop.toml` — credit-only, PoP-ordered — is worth having. On the
+reference snapshot it takes 28 trades and closes **7 on the profit target, 17 on
+the forecast horizon, 2 on the forecast target, 2 before expiry: zero on risk**.
+It wins 16 of 28, and still loses 7.0 % — average win $804 against average loss
+$1 189, with a worst trade of −$2 538, which is a 5-lot position at its full
+structural max loss. Nothing in the config could have closed it sooner.
+
+The entry is not the problem: that ranker's score orders candidates better than
+either shipped ranker (Spearman 0.447 with monotone deciles, against 0.383 for
+`ev` and 0.395 for `prob_profit`). A credit-scoped give-up — a stop at a multiple
+of the credit received, or extending `live_pop_floor` past `is_debit_spread` — is
+the exit-axis experiment this result argues for.
+
 ## Test fixtures generate their own options
 
 `engine::testing::snapshot_with` builds a real on-disk snapshot whose ladder is
@@ -582,6 +605,7 @@ isolates that axis:
 | `prob_profit.toml` | scorer | `metric = "prob_profit"` — rewards hit-rate over magnitude. |
 | `exit_pop_trailing.toml` / `exit_momentum.toml` | exit | Structure-scoped give-ups: live-POP on debits, trailing vs momentum on nakeds. |
 | `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
+| `credit_pop.toml` | ranker | Credit spreads only, ordered by probability of profit. Its scorer discriminates best of the set (Spearman 0.45) and it still loses — see below. |
 
 All run as one shared $20k account (the default), so their P&L is comparable.
 
