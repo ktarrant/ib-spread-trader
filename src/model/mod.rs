@@ -23,10 +23,12 @@ pub mod validation;
 
 pub use candidates::{Candidate, CandidateConfig, RankingFunnel, enumerate_verticals};
 pub use distribution::PriceDistribution;
-pub use eval::{DecileStat, ForecastRecord, ModelEval, ScorerEval, ScorerRecord};
+pub use eval::{
+    DecileStat, ForecastRecord, ModelEval, ScorerEval, ScorerRecord, decile_monotonicity,
+};
 pub use features::{EarningsDistance, FeatureConfig, FeatureEngine, Features};
 pub use price_model::{LognormalDriftModel, LognormalModelConfig, PriceModel};
 pub use ranker::{
     RankMetric, RankedChoice, RankingConfig, expected_pl_and_score, prob_profit_of, rank,
 };
-pub use validation::ValidationRecord;
+pub use validation::{RankerValidationRecord, ValidationRecord};

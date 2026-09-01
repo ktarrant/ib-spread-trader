@@ -12,6 +12,9 @@ pub const MIN_DIRECTIONAL_HIT_RATE: f64 = 0.5;
 pub const MAX_PIT_CALIBRATION_ERROR: f64 = 0.15;
 /// At least two thirds of symbols must beat the directional null independently.
 pub const MIN_LOSO_PASS_FRACTION: f64 = 0.66;
+/// Decile means need a clearly positive overall slope while tolerating noisy
+/// adjacent reversals in this short dataset.
+pub const MIN_DECILE_MONOTONICITY: f64 = 0.5;
 
 /// The evidence attached to a labeled price model on one dataset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +47,30 @@ impl ValidationRecord {
             && self.pit_error < MAX_PIT_CALIBRATION_ERROR
             && self.loso_symbols_total > 0
             && self.loso_symbols_passing >= required_loso
+    }
+
+    pub fn refresh_passed(&mut self) {
+        self.passed = self.passes_gate();
+    }
+}
+
+/// Scorer discrimination is meaningful only for the model whose forecast it
+/// ranked, so every ranker record names that model explicitly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RankerValidationRecord {
+    pub label: String,
+    pub model_label: String,
+    pub dataset: String,
+    pub spearman: f64,
+    pub decile_monotonicity: f64,
+    pub passed: bool,
+    pub evaluated_at: DateTime<Utc>,
+}
+
+impl RankerValidationRecord {
+    pub fn passes_gate(&self) -> bool {
+        self.spearman > 0.0 && self.decile_monotonicity >= MIN_DECILE_MONOTONICITY
     }
 
     pub fn refresh_passed(&mut self) {
@@ -94,5 +121,27 @@ mod tests {
         let mut failed = record;
         failed.loso_symbols_passing = 7;
         assert!(!failed.passes_gate(), "7/12 does not clear the LOSO gate");
+    }
+
+    #[test]
+    fn the_ranker_gate_needs_positive_candidate_and_decile_ordering() {
+        let record = RankerValidationRecord {
+            label: "ev".into(),
+            model_label: "mean-reversion".into(),
+            dataset: "2026-08-21".into(),
+            spearman: 0.37,
+            decile_monotonicity: 0.75,
+            passed: false,
+            evaluated_at: Utc::now(),
+        };
+        assert!(record.passes_gate());
+
+        let mut failed = record.clone();
+        failed.spearman = 0.0;
+        assert!(!failed.passes_gate());
+
+        let mut failed = record;
+        failed.decile_monotonicity = 0.49;
+        assert!(!failed.passes_gate());
     }
 }

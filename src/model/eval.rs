@@ -230,6 +230,9 @@ pub struct ScorerEval {
     /// Mean realized P/L per dollar of risk across all sampled candidates — the
     /// null a decile has to beat to be "better than average".
     pub mean_realized_pl_per_risk: f64,
+    /// Spearman correlation of decile number vs mean realized P/L. Positive is
+    /// the scalar form of "higher score buckets generally realized more."
+    pub decile_monotonicity: f64,
     pub deciles: Vec<DecileStat>,
 }
 
@@ -252,7 +255,7 @@ impl ScorerEval {
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by(|&a, &b| records[a].score.total_cmp(&records[b].score));
 
-        let deciles = (0..10)
+        let deciles: Vec<DecileStat> = (0..10)
             .map(|d| {
                 let slice = &order[d * n / 10..(d + 1) * n / 10];
                 let count = slice.len().max(1);
@@ -268,14 +271,27 @@ impl ScorerEval {
                 }
             })
             .collect();
+        let decile_monotonicity = decile_monotonicity(&deciles);
 
         Some(Self {
             records: n,
             spearman,
             mean_realized_pl_per_risk,
+            decile_monotonicity,
             deciles,
         })
     }
+}
+
+/// Spearman correlation of score-decile index with that decile's mean realized
+/// P/L. Ties are handled exactly like the candidate-level scorer correlation.
+pub fn decile_monotonicity(deciles: &[DecileStat]) -> f64 {
+    if deciles.len() < 2 {
+        return 0.0;
+    }
+    let indices: Vec<f64> = deciles.iter().map(|d| d.decile as f64).collect();
+    let realized: Vec<f64> = deciles.iter().map(|d| d.mean_realized_pl).collect();
+    pearson(&average_ranks(&indices), &average_ranks(&realized))
 }
 
 /// Fractional ranks with ties averaged, so Spearman is exact under ties.
@@ -394,6 +410,7 @@ mod tests {
         // Realized P/L rises with score → Spearman 1 and increasing deciles.
         let eval = ScorerEval::from_records(&scorer_records(|i| i as f64 * 2.0)).unwrap();
         assert!((eval.spearman - 1.0).abs() < 1e-9, "{}", eval.spearman);
+        assert!((eval.decile_monotonicity - 1.0).abs() < 1e-9);
         assert_eq!(eval.deciles.len(), 10);
         assert!(
             eval.deciles.last().unwrap().mean_realized_pl
