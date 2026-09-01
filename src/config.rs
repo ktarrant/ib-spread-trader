@@ -649,6 +649,27 @@ impl StrategyConfig {
             }
             sizing.to_runtime()?;
         }
+        // The ranked engine caps the scoring horizon at expiry, so a new entry
+        // opened inside `horizon_days` of expiry would be scored on a silently
+        // truncated horizon. The entry blackout must therefore be at least as
+        // long as the horizon, so every bar that can open a trade gets the full
+        // horizon. (A missing blackout leaves no such guarantee at all.)
+        if self.mode == StrategyMode::Ranked {
+            match self.execution.min_entry_days_before_expiry {
+                Some(min_days) if (min_days as f64) < self.ranking.horizon_days => bail!(
+                    "execution.min_entry_days_before_expiry ({}) must be >= ranking.horizon_days ({}) \
+                     so a scored entry always gets the full horizon",
+                    min_days,
+                    self.ranking.horizon_days
+                ),
+                None => bail!(
+                    "ranked mode needs execution.min_entry_days_before_expiry set to at least \
+                     ranking.horizon_days ({}), or a late entry is scored on a truncated horizon",
+                    self.ranking.horizon_days
+                ),
+                _ => {}
+            }
+        }
         Ok(())
     }
 
@@ -885,6 +906,29 @@ min_score = 0.2
         // Unset ranked fields still fall back to their defaults.
         assert_eq!(config.candidates.max_relative_spread, 0.5);
         assert!(config.candidates.allow_credit);
+    }
+
+    /// The horizon must fit inside the entry blackout, or a late entry is scored
+    /// on a horizon the engine silently truncates at expiry.
+    #[test]
+    fn a_horizon_longer_than_the_entry_blackout_is_refused() {
+        // horizon 10 days > the default 8-day blackout: refused.
+        let src = "\
+symbols = [\"SPY\"]
+expiry = \"2026-08-21\"
+mode = \"ranked\"
+[ranking]
+horizon_days = 10.0
+";
+        let err = toml::from_str::<StrategyConfig>(src)
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(err.to_string().contains("min_entry_days_before_expiry"), "{err}");
+
+        // Widening the blackout to match makes it valid again.
+        let ok = format!("{src}[execution]\nmin_entry_days_before_expiry = 11\n");
+        toml::from_str::<StrategyConfig>(&ok).unwrap().validate().unwrap();
     }
 
     #[test]
