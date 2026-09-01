@@ -341,7 +341,7 @@ pub struct ExitConfig {
     #[serde(default)]
     pub naked_momentum_exit: bool,
     /// Close once the position has been open as long as the forecast horizon
-    /// (`ranking.horizon_days`). Ranked mode only — the forecast window is what it
+    /// (`model.horizon_days`). Ranked mode only — the forecast window is what it
     /// keys off. Holds a credit spread its full forecast duration, then closes it.
     #[serde(default)]
     pub close_after_forecast_horizon: bool,
@@ -491,6 +491,7 @@ impl FeaturesConfig {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
+    pub horizon_days: f64,
     pub bars_per_year: f64,
     pub realized_vol_weight: f64,
     pub fallback_vol: f64,
@@ -505,6 +506,7 @@ impl Default for ModelConfig {
     fn default() -> Self {
         let d = LognormalModelConfig::default();
         Self {
+            horizon_days: d.horizon_days,
             bars_per_year: d.bars_per_year,
             realized_vol_weight: d.realized_vol_weight,
             fallback_vol: d.fallback_vol,
@@ -518,8 +520,12 @@ impl Default for ModelConfig {
 }
 
 impl ModelConfig {
-    fn to_runtime(self) -> LognormalModelConfig {
-        LognormalModelConfig {
+    fn to_runtime(self) -> Result<LognormalModelConfig> {
+        if self.horizon_days.is_nan() || self.horizon_days <= 0.0 {
+            bail!("`model.horizon_days` must be positive");
+        }
+        Ok(LognormalModelConfig {
+            horizon_days: self.horizon_days,
             bars_per_year: self.bars_per_year,
             realized_vol_weight: self.realized_vol_weight,
             fallback_vol: self.fallback_vol,
@@ -528,7 +534,7 @@ impl ModelConfig {
             skew_weight: self.skew_weight,
             grid_sigma: self.grid_sigma,
             grid_points: self.grid_points,
-        }
+        })
     }
 }
 
@@ -595,11 +601,10 @@ impl CandidatesConfig {
     }
 }
 
-/// `[ranking]` — the scoring horizon and the thresholds a trade must clear.
+/// `[ranking]` — the scoring thresholds a trade must clear.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RankingSectionConfig {
-    pub horizon_days: f64,
     /// `expected_value` (default) or `prob_profit`.
     pub metric: RankMetric,
     pub min_score: f64,
@@ -616,7 +621,6 @@ impl Default for RankingSectionConfig {
     fn default() -> Self {
         let d = RankingConfig::default();
         Self {
-            horizon_days: d.horizon_days,
             metric: d.metric,
             min_score: d.min_score,
             min_expected_pl: d.min_expected_pl,
@@ -628,16 +632,12 @@ impl Default for RankingSectionConfig {
 
 impl RankingSectionConfig {
     fn to_runtime(self) -> Result<RankingConfig> {
-        if self.horizon_days.is_nan() || self.horizon_days <= 0.0 {
-            bail!("`ranking.horizon_days` must be positive");
-        }
         if let Some(q) = self.forecast_target_quantile
             && !(0.5..=1.0).contains(&q)
         {
             bail!("`ranking.forecast_target_quantile` must be in 0.5..=1.0");
         }
         Ok(RankingConfig {
-            horizon_days: self.horizon_days,
             metric: self.metric,
             min_score: self.min_score,
             min_expected_pl: self.min_expected_pl,
@@ -696,16 +696,16 @@ impl StrategyConfig {
         }
         if self.mode == StrategyMode::Ranked {
             match self.execution.min_entry_days_before_expiry {
-                Some(min_days) if (min_days as f64) < self.ranking.horizon_days => bail!(
-                    "execution.min_entry_days_before_expiry ({}) must be >= ranking.horizon_days ({}) \
+                Some(min_days) if (min_days as f64) < self.model.horizon_days => bail!(
+                    "execution.min_entry_days_before_expiry ({}) must be >= model.horizon_days ({}) \
                      so a scored entry always gets the full horizon",
                     min_days,
-                    self.ranking.horizon_days
+                    self.model.horizon_days
                 ),
                 None => bail!(
                     "ranked mode needs execution.min_entry_days_before_expiry set to at least \
-                     ranking.horizon_days ({}), or a late entry is scored on a truncated horizon",
-                    self.ranking.horizon_days
+                     model.horizon_days ({}), or a late entry is scored on a truncated horizon",
+                    self.model.horizon_days
                 ),
                 _ => {}
             }
@@ -792,7 +792,7 @@ impl StrategyConfig {
         Ok(RankedStrategy {
             name: self.name.clone(),
             features: FeatureEngine::new(self.features.to_runtime())?,
-            model: Box::new(LognormalDriftModel::new(self.model.to_runtime())),
+            model: Box::new(LognormalDriftModel::new(self.model.to_runtime()?)),
             candidates: self.candidates.to_runtime()?,
             ranking: self.ranking.to_runtime()?,
         })
@@ -812,12 +812,11 @@ impl StrategyConfig {
                 live_pop_floor: self.exit.live_pop_floor,
                 naked_trailing_stop_pct: self.exit.naked_trailing_stop_pct,
                 naked_momentum_exit: self.exit.naked_momentum_exit,
-                // The forecast-horizon exit keys off the scoring horizon itself,
-                // so it comes straight from the ranking config when enabled.
+                // The forecast-horizon exit keys off the model's own horizon.
                 forecast_horizon_days: self
                     .exit
                     .close_after_forecast_horizon
-                    .then_some(self.ranking.horizon_days),
+                    .then_some(self.model.horizon_days),
                 max_time_pct: self.exit.max_time_pct,
                 close_before_earnings: self.exit.close_before_earnings,
                 min_days_before_expiry: self.exit.min_days_before_expiry,
@@ -962,8 +961,9 @@ mode = \"ranked\"
 [candidates]
 rights = [\"call\", \"put\"]
 max_loss = 400.0
-[ranking]
+[model]
 horizon_days = 3.0
+[ranking]
 min_score = 0.2
 ";
         let config: StrategyConfig = toml::from_str(src).unwrap();
@@ -984,7 +984,7 @@ min_score = 0.2
 symbols = [\"SPY\"]
 expiry = \"2026-08-21\"
 mode = \"ranked\"
-[ranking]
+[model]
 horizon_days = 10.0
 ";
         let err = toml::from_str::<StrategyConfig>(src)
@@ -1002,14 +1002,14 @@ horizon_days = 10.0
     fn a_ranked_section_refuses_unknown_and_invalid_fields() {
         // An unknown key inside a section is refused, like the top level.
         let err = toml::from_str::<StrategyConfig>(
-            "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nmode=\"ranked\"\n[ranking]\nhorzon_days=3.0",
+            "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nmode=\"ranked\"\n[model]\nhorzon_days=3.0",
         )
         .unwrap_err();
         assert!(err.to_string().contains("horzon_days"), "{err}");
 
         // A non-positive horizon fails validation before any I/O.
         let bad: StrategyConfig = toml::from_str(
-            "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nmode=\"ranked\"\n[ranking]\nhorizon_days=0.0",
+            "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nmode=\"ranked\"\n[model]\nhorizon_days=0.0",
         )
         .unwrap();
         assert!(bad.validate().is_err());

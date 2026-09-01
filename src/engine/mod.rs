@@ -1157,7 +1157,7 @@ fn ranked_observe(
 
     // Horizon (capped at expiry), the distribution, and the basis map, computed
     // once per option bar because both logging and ranking need them.
-    let horizon_years = (ranked.ranking.horizon_days / 365.25)
+    let horizon_years = (ranked.model.horizon_days() / 365.25)
         .min(features.year_fraction)
         .max(0.0);
     let remaining_years = (features.year_fraction - horizon_years).max(0.0);
@@ -1171,7 +1171,7 @@ fn ranked_observe(
     // Score the forecast against what the underlying actually did a horizon
     // later. Eval-only — never on the decision path. Uses the *full* (uncapped)
     // horizon so the realized read lands on a fixed same-weekday bar.
-    let full_horizon_years = ranked.ranking.horizon_days / 365.25;
+    let full_horizon_years = ranked.model.horizon_days() / 365.25;
     if let Some(record) = score_forecast(
         series,
         bar,

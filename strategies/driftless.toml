@@ -34,6 +34,7 @@ skew_moneyness = 0.05
 
 # The only difference from mean_reversion.toml: trend_weight = 0 (no drift).
 [model]
+horizon_days = 7.0
 bars_per_year = 3276.0
 realized_vol_weight = 0.0
 fallback_vol = 0.30
@@ -53,7 +54,6 @@ max_loss = 500.0
 quantity = 1
 
 [ranking]
-horizon_days = 7.0
 min_score = 0.02
 min_expected_pl = 0.0
 forecast_target_quantile = 0.85

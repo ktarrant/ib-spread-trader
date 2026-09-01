@@ -26,12 +26,9 @@ pub enum RankMetric {
     ProbProfit,
 }
 
-/// The horizon and thresholds the ranker applies. Mapped from TOML in a later
-/// phase.
+/// The thresholds the ranker applies. Mapped from TOML in a later phase.
 #[derive(Debug, Clone, Copy)]
 pub struct RankingConfig {
-    /// Scoring horizon in calendar days, capped at expiry by the engine.
-    pub horizon_days: f64,
     /// What to maximise among candidates that clear the floors.
     pub metric: RankMetric,
     /// Minimum expected-P/L-per-max-loss to open a trade.
@@ -52,11 +49,6 @@ pub struct RankingConfig {
 impl Default for RankingConfig {
     fn default() -> Self {
         Self {
-            // One calendar week: a forecast made on a given weekday is scored
-            // against the same weekday next week, which is always a trading bar.
-            // Shorter horizons (e.g. 5 days) land Monday/Tuesday forecasts on the
-            // weekend, where the realized read collapses to the prior Friday.
-            horizon_days: 7.0,
             metric: RankMetric::ExpectedValue,
             min_score: 0.10,
             min_expected_pl: 0.0,

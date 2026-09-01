@@ -56,6 +56,7 @@ skew_moneyness = 0.05
 # the -0.4..-0.7 range is a flat calibration plateau, so the exact value is not a
 # knife-edge. Only the drift's *sign* sets direction; magnitude tunes calibration.
 [model]
+horizon_days = 7.0
 bars_per_year = 3276.0
 realized_vol_weight = 0.0
 fallback_vol = 0.30
@@ -78,7 +79,6 @@ quantity = 1
 # read). The directional edge peaks at ~1 week and decays to a coin-flip by two
 # weeks, so the horizon is deliberately short.
 [ranking]
-horizon_days = 7.0
 min_score = 0.02
 min_expected_pl = 0.0
 forecast_target_quantile = 0.85

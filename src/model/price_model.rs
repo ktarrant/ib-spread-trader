@@ -20,12 +20,17 @@ use super::features::Features;
 pub trait PriceModel {
     fn name(&self) -> &str;
 
+    /// The forecast horizon this model was configured and validated against.
+    fn horizon_days(&self) -> f64;
+
     fn forecast(&self, features: &Features, horizon_years: f64) -> PriceDistribution;
 }
 
 /// Tunable weights for [`LognormalDriftModel`]. Mapped from TOML in a later phase.
 #[derive(Debug, Clone, Copy)]
 pub struct LognormalModelConfig {
+    /// Forecast horizon in calendar days, capped at expiry by the engine.
+    pub horizon_days: f64,
     /// Bars per year, to annualise the per-bar realized vol (30-min bars ≈ 3276).
     pub bars_per_year: f64,
     /// Weight on annualised realized vol in the vol blend; `1 - w` on ATM IV.
@@ -50,6 +55,9 @@ pub struct LognormalModelConfig {
 impl Default for LognormalModelConfig {
     fn default() -> Self {
         Self {
+            // One calendar week: a forecast made on a given weekday is scored
+            // against the same weekday next week.
+            horizon_days: 7.0,
             bars_per_year: 3276.0,
             realized_vol_weight: 0.5,
             fallback_vol: 0.30,
@@ -103,6 +111,10 @@ impl LognormalDriftModel {
 impl PriceModel for LognormalDriftModel {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn horizon_days(&self) -> f64 {
+        self.config.horizon_days
     }
 
     fn forecast(&self, features: &Features, horizon_years: f64) -> PriceDistribution {
