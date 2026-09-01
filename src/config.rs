@@ -324,6 +324,18 @@ pub struct ExitConfig {
     /// Close before earnings announcements to avoid the vol event.
     #[serde(default)]
     pub close_before_earnings: bool,
+    /// Debit-spread give-up: close when the live probability of profit falls
+    /// below this (0..1). Ranked mode only. Applies to debit spreads, not nakeds.
+    #[serde(default)]
+    pub live_pop_floor: Option<f64>,
+    /// Naked-long trailing stop: close when gross P&L gives back this percentage
+    /// of its running peak. Applies to naked longs.
+    #[serde(default)]
+    pub naked_trailing_stop_pct: Option<f64>,
+    /// Naked-long momentum exit: close when the trend flips against it. Ranked
+    /// mode only.
+    #[serde(default)]
+    pub naked_momentum_exit: bool,
     /// Close once the position has been open as long as the forecast horizon
     /// (`ranking.horizon_days`). Ranked mode only — the forecast window is what it
     /// keys off. Holds a credit spread its full forecast duration, then closes it.
@@ -342,6 +354,9 @@ impl Default for ExitConfig {
             underlying_past_short_strike: false,
             max_time_pct: None,
             close_before_earnings: false,
+            live_pop_floor: None,
+            naked_trailing_stop_pct: None,
+            naked_momentum_exit: false,
             close_after_forecast_horizon: false,
             min_days_before_expiry: default_min_days_before_expiry(),
         }
@@ -660,6 +675,21 @@ impl StrategyConfig {
         // truncated horizon. The entry blackout must therefore be at least as
         // long as the horizon, so every bar that can open a trade gets the full
         // horizon. (A missing blackout leaves no such guarantee at all.)
+        // The live-POP and momentum exits read the forecast at exit time, so they
+        // only make sense in ranked mode.
+        if self.mode != StrategyMode::Ranked
+            && (self.exit.live_pop_floor.is_some() || self.exit.naked_momentum_exit)
+        {
+            bail!(
+                "exit.live_pop_floor and exit.naked_momentum_exit need the forecast \
+                 and apply only to ranked mode"
+            );
+        }
+        if let Some(floor) = self.exit.live_pop_floor
+            && !(0.0..=1.0).contains(&floor)
+        {
+            bail!("exit.live_pop_floor must be in 0..=1, got {floor}");
+        }
         if self.mode == StrategyMode::Ranked {
             match self.execution.min_entry_days_before_expiry {
                 Some(min_days) if (min_days as f64) < self.ranking.horizon_days => bail!(
@@ -775,6 +805,9 @@ impl StrategyConfig {
                 profit_target_pct: self.exit.profit_target_pct,
                 stop_loss_pct: self.exit.stop_loss_pct,
                 underlying_past_short_strike: self.exit.underlying_past_short_strike,
+                live_pop_floor: self.exit.live_pop_floor,
+                naked_trailing_stop_pct: self.exit.naked_trailing_stop_pct,
+                naked_momentum_exit: self.exit.naked_momentum_exit,
                 // The forecast-horizon exit keys off the scoring horizon itself,
                 // so it comes straight from the ranking config when enabled.
                 forecast_horizon_days: self

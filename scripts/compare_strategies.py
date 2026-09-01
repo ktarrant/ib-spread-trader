@@ -51,6 +51,9 @@ def run(config: str) -> dict | None:
     t = d["totals"]
     mix = Counter(structure(x) for x in d.get("trades", []))
     pooled = (d.get("model_eval") or {}).get("pooled") or {}
+    # Top exit reasons, so the comparison shows *how* a variant closes.
+    exits = Counter(t.get("exits_by_reason", {}))
+    top_exits = ", ".join(f"{r}:{n}" for r, n in exits.most_common(3))
     return {
         "name": Path(config).stem,
         "trades": t["trades"],
@@ -60,6 +63,7 @@ def run(config: str) -> dict | None:
         "crps_skill": pooled.get("crps_skill", float("nan")),
         "dir_hit": pooled.get("directional_hit_rate", float("nan")) * 100,
         "mix": "/".join(f"{n}{mix[k]}" for k, n in (("credit", "cr"), ("debit", "db"), ("naked", "nk")) if mix[k]),
+        "exits": top_exits,
     }
 
 
@@ -69,13 +73,13 @@ def main() -> None:
     if not rows:
         sys.exit("no strategy produced a result")
 
-    hdr = f"{'strategy':>16}{'trades':>8}{'return%':>9}{'maxDD%':>8}{'pf':>6}{'crps_skill':>12}{'dir%':>7}  structure"
+    hdr = f"{'strategy':>18}{'trades':>7}{'return%':>9}{'maxDD%':>8}{'pf':>6}{'crps':>9}{'dir%':>6}  {'structure':<12} exits"
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
         print(
-            f"{r['name']:>16}{r['trades']:>8}{r['return_pct']:>9.1f}{r['max_dd']:>8.0f}"
-            f"{r['pf']:>6.2f}{r['crps_skill']:>+12.4f}{r['dir_hit']:>7.1f}  {r['mix']}"
+            f"{r['name']:>18}{r['trades']:>7}{r['return_pct']:>9.1f}{r['max_dd']:>8.0f}"
+            f"{r['pf']:>6.2f}{r['crps_skill']:>+9.4f}{r['dir_hit']:>6.1f}  {r['mix']:<12} {r['exits']}"
         )
 
 

@@ -1,0 +1,62 @@
+# Exit variant: live-POP give-up on debit spreads + momentum exit on naked longs.
+#
+# The same model and scorer as mean_reversion.toml, differing only on the naked-
+# long exit: instead of a trailing stop (exit_pop_trailing.toml), a naked long is
+# closed when the fast/slow trend flips against it. Compare the two against each
+# other and against the mean_reversion base to see which "let it run" rule the
+# data prefers.
+
+name    = "exit-momentum"
+symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR"]
+expiry  = "2026-08-21"
+initial_cash = 100000.0
+mode    = "ranked"
+
+[execution]
+timing = "next_bar"
+max_open_positions = 1
+earnings_blackout_days = 3
+
+[exit]
+profit_target_pct = 50.0
+close_before_earnings = true
+underlying_past_short_strike = true
+close_after_forecast_horizon = true
+live_pop_floor = 0.25
+naked_momentum_exit = true
+
+[costs]
+commission_per_contract = 0.65
+
+[features]
+trend_fast = 10
+trend_slow = 30
+atr_period = 14
+realized_vol_period = 20
+skew_moneyness = 0.05
+
+[model]
+bars_per_year = 3276.0
+realized_vol_weight = 0.0
+fallback_vol = 0.30
+trend_weight = -0.5
+vwap_reversion = 0.0
+skew_weight = 0.0
+grid_sigma = 4.0
+grid_points = 101
+
+[candidates]
+rights = ["call", "put"]
+allow_debit = true
+allow_credit = true
+min_width = 0.0
+max_relative_spread = 0.35
+max_loss = 500.0
+quantity = 1
+
+[ranking]
+horizon_days = 7.0
+min_score = 0.02
+min_expected_pl = 0.0
+forecast_target_quantile = 0.85
+scorer_sample_per_bar = 20

@@ -129,14 +129,29 @@ fn prob_profit(
     remaining_years: f64,
     forward_scale: f64,
 ) -> f64 {
-    // Profit means clearing the cost basis *and* the exit crossing — the same
-    // net breakeven the expected P/L is measured against.
-    let breakeven = candidate.cost_basis + candidate.exit_spread_cost;
+    prob_profit_of(
+        &candidate.spread,
+        candidate.cost_basis + candidate.exit_spread_cost,
+        &candidate.leg_vols,
+        dist,
+        remaining_years,
+        forward_scale,
+    )
+}
+
+/// Model probability a spread is worth more than `breakeven` at the horizon —
+/// the general form behind a candidate's `prob_profit`, reused by the live-POP
+/// exit to re-score an open position against the *current* distribution.
+pub fn prob_profit_of(
+    spread: &crate::spread::Spread,
+    breakeven: f64,
+    leg_vols: &[f64],
+    dist: &PriceDistribution,
+    remaining_years: f64,
+    forward_scale: f64,
+) -> f64 {
     dist.expected(|s| {
-        let value =
-            candidate
-                .spread
-                .model_value(s * forward_scale, remaining_years, &candidate.leg_vols);
+        let value = spread.model_value(s * forward_scale, remaining_years, leg_vols);
         f64::from(value > breakeven)
     })
 }

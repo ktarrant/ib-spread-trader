@@ -355,6 +355,32 @@ never drift apart) and applies to any structure, capping how long anything drift
 past the model's view. It sits below the take-profit and stop in priority, so a
 winner or a real stop still fires first.
 
+### Structure-scoped give-ups read the live forecast
+
+The right *give-up* also depends on the structure, so three exits are scoped by
+structure and read the **current** forecast at exit time (not the entry one):
+
+- `live_pop_floor` — a **debit spread** gives up when its live probability of
+  profit — the spread re-scored (`ranker::prob_profit_of`) against the current
+  distribution with its sticky-strike entry vols — falls below the floor.
+- `naked_trailing_stop_pct` — a **naked long** closes when gross P&L gives back
+  that fraction of its running peak (`OpenPosition::peak_value`, updated each bar
+  in the mark step). Lets a winner run while capping the giveback.
+- `naked_momentum_exit` — a **naked long** closes when the fast/slow trend flips
+  against its direction.
+
+Making these read the current forecast required one reorder: `ranked_observe`
+(advance the feature engine, build the distribution) now runs **before** the exit
+check instead of in the decide step, and hands an `ExitModel` (dist, remaining
+years, forward scale, trend) to `compute_exits`; `ranked_choose` reuses the same
+context. The reorder is behavior-neutral — the feature engine still advances once
+per bar, in order — which the unchanged ranked goldens prove. `leg_vols` and
+`peak_value` ride on `OpenPosition` to feed live POP and the trailing stop.
+
+Exit is a framework axis: `exit_pop_trailing.toml` and `exit_momentum.toml` are
+the `mean_reversion` base with only the exit changed, and
+`scripts/compare_strategies.py`'s exit-mix column shows *how* each variant closes.
+
 ## Test fixtures generate their own options
 
 `engine::testing::snapshot_with` builds a real on-disk snapshot whose ladder is

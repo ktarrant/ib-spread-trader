@@ -411,6 +411,49 @@ fn the_shared_account_runs_all_symbols_against_one_pool() {
     assert!((shared.equity_curve.last().unwrap().equity - totals.final_equity).abs() < 1e-6);
 }
 
+/// The structure-scoped exit variant, pinned end to end: live-POP give-up on
+/// debit spreads, trailing stop on naked longs. Proves the model-driven exits
+/// fire on the real chain and that the exit is a clean framework axis (same
+/// model as mean_reversion, only the exit differs).
+#[test]
+fn the_pop_trailing_exit_variant_reproduces_its_recorded_run() {
+    let snapshot = snapshot_or_skip!();
+    let config = StrategyConfig::load("strategies/exit_pop_trailing.toml").unwrap();
+    let run_config = config.run_config();
+
+    let mut runs = Vec::new();
+    for symbol in &config.symbols {
+        let series = ChainSeries::load(&snapshot, symbol, config.expiry).unwrap();
+        let mut strategy = config.strategy().unwrap();
+        runs.push(engine::run_symbol(&series, &mut strategy, &run_config).unwrap());
+    }
+    let built = report::build(&config.name, config.expiry, &runs);
+    let totals = &built.totals;
+
+    assert_eq!(totals.trades, 74);
+    assert_eq!(totals.census.ranking.enumerated, 4_142_234);
+    assert_eq!(totals.census.ranking.chosen, 74);
+    assert!((totals.total_pnl - -1194.50).abs() < 0.01, "{}", totals.total_pnl);
+
+    // The two structure-scoped give-ups actually fire on the real chain.
+    assert_eq!(totals.exits_by_reason["pop_floor"], 25, "debit give-ups");
+    assert_eq!(totals.exits_by_reason["trailing_stop"], 21, "naked let-it-run");
+    // POP-floor never closes a naked long, trailing never closes a debit spread.
+    use ib_spread_trader::portfolio::ExitReason;
+    for t in &built.trades {
+        let naked = !t.description.contains('-');
+        match t.exit_reason {
+            ExitReason::PopFloor => {
+                assert!(!naked, "pop_floor fired on a naked long: {}", t.description)
+            }
+            ExitReason::TrailingStop => {
+                assert!(naked, "trailing_stop fired on a spread: {}", t.description)
+            }
+            _ => {}
+        }
+    }
+}
+
 /// A strategy that never fires must return exactly its capital — no drift, no
 /// stray commission — even over the full real chain.
 #[test]

@@ -33,6 +33,15 @@ pub enum ExitReason {
     /// it. Closes credit spreads at the end of their full forecast duration and
     /// stops anything else from drifting past the model's view.
     ForecastHorizon,
+    /// A debit spread's live probability of profit fell below the floor — the
+    /// give-up when the model no longer expects the trade to work out.
+    PopFloor,
+    /// A naked long gave back too much of its peak gain — the trailing stop that
+    /// lets a winner run while protecting the run.
+    TrailingStop,
+    /// Momentum turned against a naked long — the trend the entry leaned on has
+    /// flipped, so the reason to hold is gone.
+    MomentumExit,
     /// Too much of the time to expiry has elapsed.
     TimeDecay,
     /// Closed to avoid holding through an earnings announcement.
@@ -75,6 +84,13 @@ pub struct OpenPosition {
     /// position (a favorable quantile of the entry forecast). `None` unless the
     /// ranked config enabled it.
     pub forecast_target: Option<f64>,
+    /// Each leg's entry implied vol (sticky-strike), carried from the chosen
+    /// candidate. Empty for the staged path. Lets the live-POP exit re-score the
+    /// spread against the current distribution with the vols it was priced at.
+    pub leg_vols: Vec<f64>,
+    /// Running peak unrealized P&L since entry, updated each bar. Drives the
+    /// naked-long trailing stop. `None` until the first mark.
+    pub peak_value: Option<f64>,
 }
 
 impl OpenPosition {
@@ -160,6 +176,20 @@ impl Portfolio {
             .sum()
     }
 
+    /// Update each open position's running peak gross P&L against `bar` — the
+    /// state the naked-long trailing stop reads. A position whose legs are not
+    /// quoted on this bar (a different symbol, or a gap in the tape) keeps its
+    /// last peak, so calling this with one symbol's bar only touches that
+    /// symbol's positions.
+    pub fn update_peaks(&mut self, bar: &ChainSnapshot, _costs: &Costs) {
+        for p in &mut self.open {
+            if let Ok(credit) = exit_credit(&p.spread, bar) {
+                let gross = credit - p.entry_debit;
+                p.peak_value = Some(p.peak_value.map_or(gross, |peak| peak.max(gross)));
+            }
+        }
+    }
+
     /// Open a spread against `bar`, paying the conservative debit plus commission.
     pub fn open(
         &mut self,
@@ -186,6 +216,8 @@ impl Portfolio {
             entry_commission: commission,
             prediction: None,
             forecast_target: None,
+            leg_vols: Vec::new(),
+            peak_value: None,
         });
         Ok(id)
     }

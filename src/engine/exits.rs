@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use crate::data::EarningsEvent;
 use crate::domain::OptionRight;
+use crate::model::PriceDistribution;
 use crate::portfolio::{ExitReason, OpenPosition};
 use crate::spread::{Side, Spread};
 
@@ -36,6 +37,17 @@ pub struct ExitRules {
     /// time cap that closes a credit spread at the end of its forecast window and
     /// keeps any position from drifting past the model's view.
     pub forecast_horizon_days: Option<f64>,
+    /// Debit spread give-up: close when the live probability of profit — the
+    /// spread re-scored against the *current* forecast distribution — falls below
+    /// this. Ranked mode only (needs the model at exit time). Applies to debit
+    /// **spreads**, not naked longs.
+    pub live_pop_floor: Option<f64>,
+    /// Naked-long trailing stop: close when gross P&L gives back this percentage
+    /// of its running peak. Lets a winner run while capping the giveback.
+    pub naked_trailing_stop_pct: Option<f64>,
+    /// Naked-long momentum exit: close when the trend the entry leaned on flips
+    /// against it. Ranked mode only (reads the current trend feature).
+    pub naked_momentum_exit: bool,
     /// Close after this percentage of the time from entry to expiry has elapsed.
     pub max_time_pct: Option<f64>,
     /// Close at least this many calendar days before expiration.
@@ -43,6 +55,20 @@ pub struct ExitRules {
     /// Close before earnings announcements. The position is closed on the last
     /// session before the earnings event would affect prices.
     pub close_before_earnings: bool,
+}
+
+/// The current forecast, handed to the exit check so a model-driven exit (live
+/// POP, momentum) can read it. `None` on the staged path and when quotes are
+/// unavailable. Its lifetime is the exit call — it borrows the bar's `ctx`.
+pub struct ExitModel<'a> {
+    /// The distribution of the underlying at the horizon, from this bar.
+    pub dist: &'a PriceDistribution,
+    /// Years from the horizon to expiry (for marking a spread at the horizon).
+    pub remaining_years: f64,
+    /// Sampled-spot -> forward scale, preserving the parity basis.
+    pub forward_scale: f64,
+    /// The current trend feature (fast/slow gap), for the momentum exit.
+    pub trend: Option<f64>,
 }
 
 /// Everything the exit check needs beyond the position itself.
@@ -53,6 +79,8 @@ pub struct ExitContext<'a> {
     pub expiry_instant: DateTime<Utc>,
     /// The next earnings event for this symbol, if any.
     pub next_earnings: Option<&'a EarningsEvent>,
+    /// The current forecast, for model-driven exits. `None` on the staged path.
+    pub model: Option<ExitModel<'a>>,
 }
 
 impl ExitRules {
@@ -93,14 +121,44 @@ impl ExitRules {
             return Some(ExitReason::StopLoss);
         }
 
-        // 5. Forecast horizon elapsed — the forecast window has closed, so the
+        // 5. Structure-scoped give-ups. Debit spread: give up when the live
+        //    probability of profit falls below the floor.
+        if let Some(floor) = self.live_pop_floor
+            && is_debit_spread(position)
+            && let Some(model) = &ctx.model
+            && live_pop(position, model) < floor
+        {
+            return Some(ExitReason::PopFloor);
+        }
+
+        // Naked long: trailing stop — give back too much of the peak gain.
+        if let Some(pct) = self.naked_trailing_stop_pct
+            && is_naked_long(position)
+            && let Some(peak) = position.peak_value
+            && peak > 0.0
+            && ctx.gross_pnl <= peak * (1.0 - pct / 100.0)
+        {
+            return Some(ExitReason::TrailingStop);
+        }
+
+        // Naked long: momentum turned against the position.
+        if self.naked_momentum_exit
+            && is_naked_long(position)
+            && let Some(model) = &ctx.model
+            && let Some(trend) = model.trend
+            && momentum_against(&position.spread, trend)
+        {
+            return Some(ExitReason::MomentumExit);
+        }
+
+        // 6. Forecast horizon elapsed — the forecast window has closed, so the
         //    model no longer speaks to the position. Closes credit spreads at the
         //    end of their full forecast duration.
         if let Some(reason) = forecast_horizon_exit(self, position.opened_at, ctx.bar_ts) {
             return Some(reason);
         }
 
-        // 6. Time decay — too much of the life has been consumed.
+        // 7. Time decay — too much of the life has been consumed.
         if let Some(max_pct) = self.max_time_pct {
             let total = (ctx.expiry_instant - position.opened_at).num_seconds() as f64;
             let elapsed = (ctx.bar_ts - position.opened_at).num_seconds() as f64;
@@ -109,14 +167,14 @@ impl ExitRules {
             }
         }
 
-        // 7. Before-earnings — close before the announcement moves prices.
+        // 8. Before-earnings — close before the announcement moves prices.
         if self.close_before_earnings
             && let Some(reason) = earnings_exit(ctx.bar_ts, ctx.next_earnings)
         {
             return Some(reason);
         }
 
-        // 8. Before-expiry hard cutoff — avoid exercise/assignment risk.
+        // 9. Before-expiry hard cutoff — avoid exercise/assignment risk.
         if let Some(days) = self.min_days_before_expiry {
             let remaining = (ctx.expiry_instant - ctx.bar_ts).num_days();
             if remaining < days as i64 {
@@ -243,6 +301,40 @@ fn forecast_target_reached(spread: &Spread, spot: f64, target: f64) -> bool {
     }
 }
 
+/// A naked long — a single-leg long, no short leg to define a spread.
+fn is_naked_long(position: &OpenPosition) -> bool {
+    !position.spread.legs.iter().any(|l| l.side == Side::Short)
+}
+
+/// A debit vertical — a debit structure (paid to open) with a short leg.
+fn is_debit_spread(position: &OpenPosition) -> bool {
+    position.entry_debit > 0.0 && !is_naked_long(position)
+}
+
+/// The live probability the position clears its round-trip cost, re-scoring the
+/// spread against the current forecast with its entry (sticky-strike) vols.
+fn live_pop(position: &OpenPosition, model: &ExitModel<'_>) -> f64 {
+    let breakeven = position.entry_debit + 2.0 * position.entry_commission;
+    crate::model::prob_profit_of(
+        &position.spread,
+        breakeven,
+        &position.leg_vols,
+        model.dist,
+        model.remaining_years,
+        model.forward_scale,
+    )
+}
+
+/// True when the trend has flipped against the naked long's direction: a long
+/// that profits from a rise wants a positive trend, and vice versa.
+fn momentum_against(spread: &Spread, trend: f64) -> bool {
+    if spread.profits_from_a_rise() {
+        trend < 0.0
+    } else {
+        trend > 0.0
+    }
+}
+
 fn is_past_short_strike(spread: &crate::spread::Spread, spot: f64) -> bool {
     for leg in &spread.legs {
         if leg.side != Side::Short {
@@ -294,6 +386,8 @@ mod tests {
             spread,
             prediction: None,
             forecast_target: None,
+            leg_vols: Vec::new(),
+            peak_value: None,
         }
     }
 
@@ -308,6 +402,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 7, 15, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: None,
+            model: None,
         }
     }
 
@@ -496,6 +591,8 @@ mod tests {
             spread,
             prediction: None,
             forecast_target: None,
+            leg_vols: Vec::new(),
+            peak_value: None,
         };
         let rules = ExitRules {
             underlying_past_short_strike: true,
@@ -546,6 +643,8 @@ mod tests {
             spread,
             prediction: None,
             forecast_target: None,
+            leg_vols: Vec::new(),
+            peak_value: None,
         };
         let rules = ExitRules {
             underlying_past_short_strike: true,
@@ -555,6 +654,124 @@ mod tests {
         // spread is held, not closed, on the short strike.
         assert_eq!(rules.triggered(&credit, &ctx(0.0, 760.0)), None);
         assert_eq!(rules.underlying_price_triggered(&credit, 760.0), None);
+    }
+
+    /// A single-leg long call at 750 — a naked long that profits from a rise.
+    fn naked_call() -> OpenPosition {
+        let mut p = position();
+        p.spread = Spread::new(
+            "SPY",
+            vec![Leg {
+                contract_id: 1,
+                strike: 750.0,
+                right: OptionRight::Call,
+                side: Side::Long,
+                quantity: 1,
+            }],
+        );
+        p.max_profit = None; // unbounded
+        p.leg_vols = vec![0.2];
+        p
+    }
+
+    fn ctx_with_model<'a>(
+        gross: f64,
+        underlying: f64,
+        model: ExitModel<'a>,
+    ) -> ExitContext<'a> {
+        ExitContext {
+            model: Some(model),
+            ..ctx(gross, underlying)
+        }
+    }
+
+    #[test]
+    fn pop_floor_gives_up_a_debit_spread_but_never_a_naked() {
+        use crate::model::PriceDistribution;
+        // Mass well below the 750/755 bull call, so the spread prices near zero
+        // and its probability of clearing cost is ~0.
+        let dist =
+            PriceDistribution::from_weights(vec![700.0, 720.0, 740.0], vec![5.0, 3.0, 1.0]).unwrap();
+        let model = ExitModel {
+            dist: &dist,
+            remaining_years: 0.02,
+            forward_scale: 1.0,
+            trend: None,
+        };
+        let rules = ExitRules {
+            live_pop_floor: Some(0.5),
+            ..Default::default()
+        };
+        let mut spread = position(); // debit vertical
+        spread.leg_vols = vec![0.2, 0.2];
+        assert_eq!(
+            rules.triggered(&spread, &ctx_with_model(-50.0, 720.0, model)),
+            Some(ExitReason::PopFloor)
+        );
+        // Same rule, a naked long: the POP floor is scoped to debit spreads only.
+        let model2 = ExitModel {
+            dist: &dist,
+            remaining_years: 0.02,
+            forward_scale: 1.0,
+            trend: None,
+        };
+        assert_eq!(
+            rules.triggered(&naked_call(), &ctx_with_model(-50.0, 720.0, model2)),
+            None
+        );
+    }
+
+    #[test]
+    fn trailing_stop_fires_after_a_naked_long_gives_back_its_peak() {
+        let rules = ExitRules {
+            naked_trailing_stop_pct: Some(30.0),
+            ..Default::default()
+        };
+        let mut naked = naked_call();
+        naked.peak_value = Some(100.0); // peaked at a $100 gain
+        // Still holding most of the gain (above 70): no exit.
+        assert_eq!(rules.triggered(&naked, &ctx(80.0, 760.0)), None);
+        // Gave back past 30% of the peak: exit.
+        assert_eq!(
+            rules.triggered(&naked, &ctx(65.0, 760.0)),
+            Some(ExitReason::TrailingStop)
+        );
+        // A debit spread (has a short leg) is not subject to the naked trailing stop.
+        let mut spread = position();
+        spread.peak_value = Some(100.0);
+        assert_eq!(rules.triggered(&spread, &ctx(50.0, 760.0)), None);
+    }
+
+    #[test]
+    fn momentum_exit_fires_when_the_trend_turns_against_a_naked_long() {
+        use crate::model::PriceDistribution;
+        let dist = PriceDistribution::from_weights(vec![760.0], vec![1.0]).unwrap();
+        let rules = ExitRules {
+            naked_momentum_exit: true,
+            ..Default::default()
+        };
+        // Long call profits from a rise; a negative trend is against it -> exit.
+        let against = ExitModel {
+            dist: &dist,
+            remaining_years: 0.02,
+            forward_scale: 1.0,
+            trend: Some(-0.01),
+        };
+        assert_eq!(
+            rules.triggered(&naked_call(), &ctx_with_model(0.0, 760.0, against)),
+            Some(ExitReason::MomentumExit)
+        );
+        // A positive trend is with the long call -> hold.
+        let with = ExitModel {
+            dist: &dist,
+            remaining_years: 0.02,
+            forward_scale: 1.0,
+            trend: Some(0.01),
+        };
+        assert_eq!(
+            rules.triggered(&naked_call(), &ctx_with_model(0.0, 760.0, with)),
+            None
+        );
     }
 
     #[test]
@@ -571,6 +788,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 7, 7, 13, 30, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: None,
+            model: None,
         };
         assert_eq!(rules.triggered(&p, &inside), None);
         // Just past seven days: the forecast window has elapsed.
@@ -614,6 +832,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 7, 25, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: None,
+            model: None,
         };
         assert_eq!(rules.triggered(&p, &before), None);
 
@@ -640,6 +859,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 8, 13, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: None,
+            model: None,
         };
         assert_eq!(rules.triggered(&position(), &safe), None);
 
@@ -676,6 +896,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 8, 10, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: None,
+            model: None,
         };
         assert_eq!(
             rules.triggered(&position(), &late),
@@ -800,6 +1021,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 7, 29, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: Some(&event),
+            model: None,
         };
         assert_eq!(
             rules.triggered(&position(), &ctx_today),
@@ -832,6 +1054,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 7, 28, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: Some(&event),
+            model: None,
         };
         assert_eq!(
             rules.triggered(&position(), &ctx),
@@ -853,6 +1076,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 7, 29, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: Some(&event),
+            model: None,
         };
         assert_eq!(rules.triggered(&position(), &ctx), None);
     }

@@ -225,6 +225,9 @@ enum Intent {
         /// path): `spread` is one lot and `execute` scales it against the
         /// portfolio's capital then. `None` means `spread` is already sized.
         sizing: Option<SizingHint>,
+        /// The chosen candidate's per-leg entry vols, carried onto the position
+        /// for the live-POP exit. Empty for the staged path.
+        leg_vols: Vec<f64>,
     },
     Close {
         id: usize,
@@ -394,16 +397,30 @@ pub fn run_symbol(
                 }
             }
 
-            // 2. Mark.
+            // 2. Advance the ranked forecast first, so the exit check can read
+            //    it (live POP, momentum). The feature engine still advances once
+            //    per bar, in order.
+            let next_earnings = series.next_earnings_from(bar.ts.date_naive());
+            let ranked_ctx = match strategy {
+                Strategy::Ranked(ranked) => Some(ranked_observe(
+                    ranked,
+                    series,
+                    &bar,
+                    next_earnings,
+                    &mut forecasts,
+                )),
+                Strategy::Staged(_) => None,
+            };
+
+            // 3. Mark, updating each position's running peak for the trailing stop.
+            portfolio.update_peaks(&bar, &config.costs);
             equity_curve.push(EquityPoint {
                 ts: bar.ts,
                 equity: portfolio.equity(&bar, &config.costs),
                 invested: portfolio.capital_at_risk(),
             });
 
-            // 3. Exits.
-            let next_earnings =
-                series.next_earnings_from(bar.ts.date_naive());
+            // 4. Exits, with the forecast available to model-driven rules.
             let (exiting, synthetic_exiting) = compute_exits(
                 &portfolio,
                 &series.symbol,
@@ -411,6 +428,7 @@ pub fn run_symbol(
                 series.expiry_instant(),
                 next_earnings,
                 &config.exits,
+                ranked_ctx.as_ref(),
             );
 
             for (id, reason) in &synthetic_exiting {
@@ -466,6 +484,7 @@ pub fn run_symbol(
                                             prediction: None,
                                             forecast_target: None,
                                             sizing: None,
+                                            leg_vols: Vec::new(),
                                         })
                                     }
                                     Err(reject) => census.reject(&reject),
@@ -475,16 +494,8 @@ pub fn run_symbol(
                     }
                 }
                 Strategy::Ranked(ranked) => {
-                    // Advance the feature engine and forecast on every option bar,
-                    // gate or no gate — its indicators are stateful, so a skipped
-                    // bar would corrupt every later reading.
-                    let ctx = ranked_observe(
-                        ranked,
-                        series,
-                        &bar,
-                        next_earnings,
-                        &mut forecasts,
-                    );
+                    // The forecast was computed in step 2; reuse it.
+                    let ctx = ranked_ctx.as_ref().expect("ranked bar computed a ctx");
 
                     match entry_gate(
                         portfolio.open.len(),
@@ -503,7 +514,7 @@ pub fn run_symbol(
                                 series,
                                 &bar,
                                 config,
-                                &ctx,
+                                ctx,
                                 &mut census,
                                 &mut scorer_records,
                             ) {
@@ -530,6 +541,7 @@ pub fn run_symbol(
                                         score: choice.score,
                                         prob_profit: choice.prob_profit,
                                     };
+                                    let leg_vols = choice.candidate.leg_vols.clone();
                                     let spread = if lots == 1 {
                                         choice.candidate.spread
                                     } else {
@@ -540,6 +552,7 @@ pub fn run_symbol(
                                         prediction: Some(prediction),
                                         forecast_target,
                                         sizing: None,
+                                        leg_vols,
                                     });
                                 }
                             }
@@ -799,8 +812,12 @@ pub fn run_shared(
             }
         }
 
-        // 2. Mark every symbol's positions against its bar, then record one
+        // 2. Mark every symbol's positions against its bar (also updating each
+        //    position's running peak for the trailing stop), then record one
         //    account equity point for this timestamp.
+        for (_, bar) in &option_bars {
+            portfolio.update_peaks(bar, &config.costs);
+        }
         for (si, bar) in &option_bars {
             let symbol = &all_series[*si].symbol;
             let ids: Vec<usize> = portfolio
@@ -829,6 +846,13 @@ pub fn run_shared(
         for (si, bar) in &option_bars {
             let series = &all_series[*si];
             let next_earnings = series.next_earnings_from(bar.ts.date_naive());
+            // Advance the forecast first so exits can read it (live POP, momentum).
+            let ranked_ctx = match &mut strategies[*si] {
+                Strategy::Ranked(ranked) => {
+                    Some(ranked_observe(ranked, series, bar, next_earnings, &mut forecasts[*si]))
+                }
+                Strategy::Staged(_) => None,
+            };
             let (mut exiting, synthetic) = compute_exits(
                 &portfolio,
                 &series.symbol,
@@ -836,6 +860,7 @@ pub fn run_shared(
                 series.expiry_instant(),
                 next_earnings,
                 &config.exits,
+                ranked_ctx.as_ref(),
             );
             for (id, reason) in &synthetic {
                 if let Some(spot) = bar.underlying.price() {
@@ -850,7 +875,7 @@ pub fn run_shared(
             let mut entering: Option<Intent> = None;
             match &mut strategies[*si] {
                 Strategy::Ranked(ranked) => {
-                    let ctx = ranked_observe(ranked, series, bar, next_earnings, &mut forecasts[*si]);
+                    let ctx = ranked_ctx.as_ref().expect("ranked bar computed a ctx");
                     match entry_gate(
                         portfolio.open.len(),
                         exiting.len(),
@@ -868,7 +893,7 @@ pub fn run_shared(
                                 series,
                                 bar,
                                 config,
-                                &ctx,
+                                ctx,
                                 &mut census[*si],
                                 &mut scorer_records[*si],
                             ) {
@@ -885,6 +910,7 @@ pub fn run_shared(
                                     prob_profit: choice.prob_profit,
                                 };
                                 entering = Some(Intent::Open {
+                                    leg_vols: choice.candidate.leg_vols.clone(),
                                     spread: choice.candidate.spread,
                                     prediction: Some(prediction),
                                     forecast_target,
@@ -924,6 +950,7 @@ pub fn run_shared(
                                             prediction: None,
                                             forecast_target: None,
                                             sizing: None,
+                                            leg_vols: Vec::new(),
                                         })
                                     }
                                     Err(reject) => census[*si].reject(&reject),
@@ -1042,6 +1069,7 @@ fn compute_exits(
     expiry_instant: DateTime<Utc>,
     next_earnings: Option<&EarningsEvent>,
     exits: &ExitRules,
+    model: Option<&RankedContext>,
 ) -> (Vec<Intent>, Vec<(usize, ExitReason)>) {
     let mut exiting = Vec::new();
     let mut synthetic = Vec::new();
@@ -1055,6 +1083,7 @@ fn compute_exits(
                     bar_ts: bar.ts,
                     expiry_instant,
                     next_earnings,
+                    model: model.map(RankedContext::exit_model),
                 };
                 if let Some(reason) = exits.triggered(position, &ctx) {
                     exiting.push(Intent::Close {
@@ -1094,6 +1123,20 @@ struct RankedContext {
     remaining_years: f64,
     forward_scale: f64,
     full_horizon_years: f64,
+    /// The current trend feature, for the momentum exit.
+    trend: Option<f64>,
+}
+
+impl RankedContext {
+    /// The forecast, packaged for the exit check.
+    fn exit_model(&self) -> exits::ExitModel<'_> {
+        exits::ExitModel {
+            dist: &self.dist,
+            remaining_years: self.remaining_years,
+            forward_scale: self.forward_scale,
+            trend: self.trend,
+        }
+    }
 }
 
 fn ranked_observe(
@@ -1145,6 +1188,7 @@ fn ranked_observe(
         remaining_years,
         forward_scale,
         full_horizon_years,
+        trend: features.trend,
     }
 }
 
@@ -1341,6 +1385,7 @@ fn execute(
             prediction,
             forecast_target,
             sizing,
+            leg_vols,
         } => {
             // A deferred sizing hint means `spread` is one lot and the shared
             // account sizes it now, against the capital committed across every
@@ -1381,6 +1426,7 @@ fn execute(
                     if let Some(position) = portfolio.open.last_mut() {
                         position.prediction = prediction;
                         position.forecast_target = *forecast_target;
+                        position.leg_vols = leg_vols.clone();
                     }
                 }
                 Err(_) => census.unfillable_intents += 1,
