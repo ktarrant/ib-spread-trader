@@ -365,9 +365,11 @@ winner or a real stop still fires first.
 The right *give-up* also depends on the structure, so three exits are scoped by
 structure and read the **current** forecast at exit time (not the entry one):
 
-- `live_pop_floor` — a **debit spread** gives up when its live probability of
-  profit — the spread re-scored (`ranker::prob_profit_of`) against the current
-  distribution with its sticky-strike entry vols — falls below the floor.
+- `live_pop_floor` — a **vertical**, debit or credit, gives up when its live
+  probability of profit — the spread re-scored (`ranker::prob_profit_of`) against
+  the current distribution with its sticky-strike entry vols — falls below the
+  floor. The question is the same in both orientations (will this clear what it
+  cost?), and it is the credit side's *only* loss-triggered exit.
 - `naked_trailing_stop_pct` — a **naked long** closes when gross P&L gives back
   that fraction of its running peak (`OpenPosition::peak_value`, updated each bar
   in the mark step). Lets a winner run while capping the giveback.
@@ -386,28 +388,38 @@ Exit is a framework axis: the `pop_trailing` and `momentum` labels under `exits/
 are selected by strategies that otherwise match the `mean_reversion` base, and
 `scripts/compare_strategies.py`'s exit-mix column shows *how* each variant closes.
 
-### The credit side has no give-up, and `credit_pop.toml` measures the cost
+### The credit side had no give-up; the POP floor now covers it, and it did not help
 
-Every loss-triggered exit is scoped to a structure that is **not** a credit
-spread: `stop_loss_pct` and `underlying_past_short_strike` require
-`entry_debit > 0`, `live_pop_floor` requires a debit spread, and the trailing and
-momentum stops require a naked long. So a credit position can only close on a
-profit target, a forecast target, or the calendar (forecast horizon, earnings,
-expiry). It has three ways to win and none to cut a loss.
+`stop_loss_pct` and `underlying_past_short_strike` both require
+`entry_debit > 0`, and the trailing and momentum stops require a naked long. So
+until `live_pop_floor` was widened past `is_debit_spread`, a credit spread could
+only close on a profit target, a forecast target, or the calendar: three ways to
+win and none to cut a loss.
 
-That is invisible while credits are a rounding error (the base takes 5), which is
-why `credit_pop.toml` — credit-only, PoP-ordered — is worth having. On the
-reference snapshot it takes 28 trades and closes **7 on the profit target, 17 on
-the forecast horizon, 2 on the forecast target, 2 before expiry: zero on risk**.
-It wins 16 of 28, and still loses 7.0 % — average win $804 against average loss
-$1 189, with a worst trade of −$2 538, which is a 5-lot position at its full
-structural max loss. Nothing in the config could have closed it sooner.
+`credit_pop.toml` — credit-only, PoP-ordered — is what made that measurable, and
+it is worth keeping for that. With `exits/base.toml` it takes 28 trades and
+closes **7 on the profit target, 17 on the forecast horizon, 2 on the forecast
+target, 2 before expiry: zero on risk**. It wins 16 of 28 and still loses 7.0 % —
+average win $804 against average loss $1 189, worst trade −$2 538, a 5-lot
+position at its full structural max loss that nothing could have closed sooner.
 
-The entry is not the problem: that ranker's score orders candidates better than
-either shipped ranker (Spearman 0.447 with monotone deciles, against 0.383 for
-`ev` and 0.395 for `prob_profit`). A credit-scoped give-up — a stop at a multiple
-of the credit received, or extending `live_pop_floor` past `is_debit_spread` — is
-the exit-axis experiment this result argues for.
+**The floor fires, does what a stop should, and still loses more.** With
+`exits/pop_floor.toml` (`credit_pop_floor.toml`), 12 of 33 exits are the POP
+floor, and the tail shrinks exactly as intended: worst trade −$2 538 → −$1 758,
+average loss −$1 189 → −$973. The account nonetheless goes −7.0 % → **−22.6 %**
+(profit factor 0.90 → 0.73), because the wins stay at 16 while the losses go
+12 → 17: giving up frees capital that funds more entries, and a short-premium
+position is given up precisely when the forecast has turned — which is also when
+the time decay that pays it has the furthest left to run. The same widening cost
+`exit_pop_trailing` its re-pinned golden (−$6 139 → −$8 571).
+
+Read that as a guardrail, not a verdict: 28–76 trades on one expiry is noise, and
+unlike a forecast an exit rule has no dense per-bar evaluation to appeal to. What
+is *not* noise is that the entry was never the problem — the credit-only PoP
+ranker discriminates best of the set (Spearman 0.447, monotone deciles, against
+0.383 for `ev` and 0.395 for `prob_profit`). The floor value 0.25 is inherited
+from the debit bundle and untested for credit; sweeping it is config-only.
+
 
 ## Test fixtures generate their own options
 
@@ -606,6 +618,7 @@ isolates that axis:
 | `exit_pop_trailing.toml` / `exit_momentum.toml` | exit | Structure-scoped give-ups: live-POP on debits, trailing vs momentum on nakeds. |
 | `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
 | `credit_pop.toml` | ranker | Credit spreads only, ordered by probability of profit. Its scorer discriminates best of the set (Spearman 0.45) and it still loses — see below. |
+| `credit_pop_floor.toml` | exit | `credit_pop` plus the live-POP give-up, the credit side's only risk exit. Cuts the tail, loses more. |
 
 All run as one shared $20k account (the default), so their P&L is comparable.
 

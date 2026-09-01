@@ -40,10 +40,18 @@ pub struct ExitRules {
     /// time cap that closes a credit spread at the end of its forecast window and
     /// keeps any position from drifting past the model's view.
     pub forecast_horizon_days: Option<f64>,
-    /// Debit spread give-up: close when the live probability of profit — the
-    /// spread re-scored against the *current* forecast distribution — falls below
-    /// this. Ranked mode only (needs the model at exit time). Applies to debit
-    /// **spreads**, not naked longs.
+    /// Spread give-up: close when the live probability of profit — the spread
+    /// re-scored against the *current* forecast distribution — falls below this.
+    /// Ranked mode only (needs the model at exit time).
+    ///
+    /// Applies to **any vertical, debit or credit**, and to no naked long. The
+    /// question it asks — will this position clear what it cost? — is the same
+    /// one either way: a debit clears by rising to more than it was bought for, a
+    /// credit by staying cheaper to close than the premium taken in. It is the
+    /// only loss-triggered exit a credit spread has, since the stop and the
+    /// short-strike rule both require `entry_debit > 0`. Naked longs are excluded
+    /// because they have their own give-ups (trailing stop, momentum), which let
+    /// a winner run rather than reading a probability.
     pub live_pop_floor: Option<f64>,
     /// Naked-long trailing stop: close when gross P&L gives back this percentage
     /// of its running peak. Lets a winner run while capping the giveback.
@@ -124,10 +132,12 @@ impl ExitRules {
             return Some(ExitReason::StopLoss);
         }
 
-        // 5. Structure-scoped give-ups. Debit spread: give up when the live
-        //    probability of profit falls below the floor.
+        // 5. Structure-scoped give-ups. Any vertical: give up when the live
+        //    probability of profit falls below the floor. This is the credit
+        //    side's only loss-triggered exit — everything above it is gated on
+        //    `entry_debit > 0`.
         if let Some(floor) = self.live_pop_floor
-            && is_debit_spread(position)
+            && is_vertical(position)
             && let Some(model) = &ctx.model
             && live_pop(position, model) < floor
         {
@@ -309,13 +319,20 @@ fn is_naked_long(position: &OpenPosition) -> bool {
     !position.spread.legs.iter().any(|l| l.side == Side::Short)
 }
 
-/// A debit vertical — a debit structure (paid to open) with a short leg.
-fn is_debit_spread(position: &OpenPosition) -> bool {
-    position.entry_debit > 0.0 && !is_naked_long(position)
+/// A vertical — anything carrying a short leg, which is what bounds its risk and
+/// makes a probability of profit meaningful. Either orientation: the sign of
+/// `entry_debit` says debit or credit, and the live-POP give-up asks the same
+/// question of both.
+fn is_vertical(position: &OpenPosition) -> bool {
+    !is_naked_long(position)
 }
 
 /// The live probability the position clears its round-trip cost, re-scoring the
 /// spread against the current forecast with its entry (sticky-strike) vols.
+/// Works unchanged for a credit spread: `entry_debit` is negative there, so the
+/// breakeven is the (negative) value at which closing costs exactly the credit
+/// received, and `model_value` is likewise negative for a position that must be
+/// bought back. The comparison is `value > cost basis` in both orientations.
 fn live_pop(position: &OpenPosition, model: &ExitModel<'_>) -> f64 {
     let breakeven = position.entry_debit + 2.0 * position.entry_commission;
     crate::model::prob_profit_of(
@@ -711,7 +728,8 @@ mod tests {
             rules.triggered(&spread, &ctx_with_model(-50.0, 720.0, model)),
             Some(ExitReason::PopFloor)
         );
-        // Same rule, a naked long: the POP floor is scoped to debit spreads only.
+        // Same rule, a naked long: the POP floor is scoped to verticals only,
+        // because a naked long has its own give-ups.
         let model2 = ExitModel {
             dist: &dist,
             remaining_years: 0.02,
@@ -720,6 +738,85 @@ mod tests {
         };
         assert_eq!(
             rules.triggered(&naked_call(), &ctx_with_model(-50.0, 720.0, model2)),
+            None
+        );
+    }
+
+    /// The credit side's only loss-triggered exit. Everything above the POP floor
+    /// in the priority order is gated on `entry_debit > 0`, so before this rule
+    /// covered credit, a losing credit spread could only close on the calendar.
+    #[test]
+    fn pop_floor_gives_up_a_credit_spread_the_forecast_has_turned_against() {
+        use crate::model::PriceDistribution;
+        // A bear call credit spread, short 750 / long 755, taken for $1.30. Mass
+        // well *above* both strikes: it will be bought back at close to the full
+        // $5 width, so the probability of clearing the credit is ~0.
+        let mut credit = position();
+        credit.spread = Spread::new(
+            "SPY",
+            vec![
+                Leg {
+                    contract_id: 1,
+                    strike: 750.0,
+                    right: OptionRight::Call,
+                    side: Side::Short,
+                    quantity: 1,
+                },
+                Leg {
+                    contract_id: 2,
+                    strike: 755.0,
+                    right: OptionRight::Call,
+                    side: Side::Long,
+                    quantity: 1,
+                },
+            ],
+        );
+        credit.entry_debit = -130.0; // negative: a credit was received
+        credit.max_profit = Some(130.0);
+        credit.max_loss = Some(370.0);
+        credit.leg_vols = vec![0.2, 0.2];
+
+        let against =
+            PriceDistribution::from_weights(vec![780.0, 800.0, 820.0], vec![1.0, 3.0, 5.0]).unwrap();
+        let rules = ExitRules {
+            live_pop_floor: Some(0.5),
+            ..Default::default()
+        };
+        assert_eq!(
+            rules.triggered(
+                &credit,
+                &ctx_with_model(
+                    -200.0,
+                    800.0,
+                    ExitModel {
+                        dist: &against,
+                        remaining_years: 0.02,
+                        forward_scale: 1.0,
+                        trend: None,
+                    }
+                )
+            ),
+            Some(ExitReason::PopFloor)
+        );
+
+        // And it holds while the forecast still says the short strike expires
+        // worthless — the rule gives up on the forecast, not on a drawdown.
+        let favourable =
+            PriceDistribution::from_weights(vec![700.0, 710.0, 720.0], vec![5.0, 3.0, 1.0]).unwrap();
+        assert_eq!(
+            rules.triggered(
+                &credit,
+                &ctx_with_model(
+                    -200.0,
+                    710.0,
+                    ExitModel {
+                        dist: &favourable,
+                        remaining_years: 0.02,
+                        forward_scale: 1.0,
+                        trend: None,
+                    }
+                )
+            ),
             None
         );
     }

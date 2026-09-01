@@ -331,21 +331,34 @@ fn the_mean_reversion_model_reproduces_its_recorded_run() {
 }
 
 /// The structure-scoped exit variant as a shared account: live-POP give-up on
-/// debit spreads, trailing stop on naked longs. Proves the model-driven exits
-/// fire and that exit is a clean framework axis (same model, only the exit differs).
+/// verticals, trailing stop on naked longs. Proves the model-driven exits fire
+/// and that exit is a clean framework axis (same model, only the exit differs).
+///
+/// Re-pinned when `live_pop_floor` stopped being debit-only: 74 -> 76 trades and
+/// -6139.20 -> -8571.20. Deliberate, not a regression. The floor now also closes
+/// credit spreads (3 of the 30), and because the account is shared, closing them
+/// early frees capital that funds trades the old run never took — which is why
+/// the debit give-ups moved too (25 -> 27) and the trade count rose.
 #[test]
 fn the_pop_trailing_exit_variant_reproduces_its_recorded_run() {
+    use ib_spread_trader::portfolio::ExitReason;
     let snapshot = snapshot_or_skip!();
     let (built, _) = shared_run(&snapshot, "strategies/exit_pop_trailing.toml");
     let totals = &built.totals;
 
-    assert_eq!(totals.trades, 74);
-    assert!((totals.total_pnl - -6139.20).abs() < 0.01, "{}", totals.total_pnl);
+    assert_eq!(totals.trades, 76);
+    assert!((totals.total_pnl - -8571.20).abs() < 0.01, "{}", totals.total_pnl);
     // The two structure-scoped give-ups actually fire on the real chain.
-    assert_eq!(totals.exits_by_reason["pop_floor"], 25, "debit give-ups");
+    assert_eq!(totals.exits_by_reason["pop_floor"], 30, "vertical give-ups");
     assert_eq!(totals.exits_by_reason["trailing_stop"], 21, "naked let-it-run");
-    // POP-floor never closes a naked long, trailing never closes a debit spread.
-    use ib_spread_trader::portfolio::ExitReason;
+    // The floor reaches credit spreads now, which is the point of the change.
+    let credit_give_ups = built
+        .trades
+        .iter()
+        .filter(|t| t.exit_reason == ExitReason::PopFloor && t.entry_debit < 0.0)
+        .count();
+    assert_eq!(credit_give_ups, 3, "the floor closes credit spreads too");
+    // POP-floor never closes a naked long, trailing never closes a spread.
     for t in &built.trades {
         let naked = !t.description.contains('-');
         match t.exit_reason {
