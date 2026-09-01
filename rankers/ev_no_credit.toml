@@ -1,0 +1,28 @@
+# The EV ranker with credit verticals excluded from the universe.
+#
+# Same metric and floors as `ev`; the only change is `allow_credit = false`, so
+# the ladder supplies debit verticals and naked longs only. Pairs with the
+# directional mean-reversion model, whose whole claim is a side — a credit spread
+# monetises time rather than direction, so it is the structure that agrees least
+# with the forecast the model actually makes.
+#
+# Note this is not "the same run minus its credit trades": on a bar where a credit
+# spread would have won the ranking, the engine now takes the best remaining
+# candidate instead, and on a shared account that shifts the capital available to
+# every trade after it.
+[candidates]
+rights = ["call", "put"]
+allow_debit = true
+allow_credit = false
+allow_naked_long = true
+min_width = 0.0
+max_relative_spread = 0.35
+max_loss = 500.0
+quantity = 1
+
+[ranking]
+metric = "expected_value"
+min_score = 0.02
+min_expected_pl = 0.0
+forecast_target_quantile = 0.85
+scorer_sample_per_bar = 20

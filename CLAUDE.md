@@ -445,6 +445,38 @@ Do not read the returns: 8 trades is not a sample. The drawdown and the
 identical-runs fact are structural rather than P&L noise, and those are the parts
 worth carrying forward.
 
+### Banning credit spreads changes the wrapper, not the bet
+
+`mean_reversion` takes 5 credit spreads and 4 of them lose, together −$6 827 —
+*more than the account's entire* −$5 510. The obvious inference is that the credit
+sleeve is the problem. It is not, and `mean_reversion_no_credit` (the `ev`
+ranker with `allow_credit = false`) is what shows it: −27.6 % → **−26.9 %**,
+recovering **$135** of a $5 510 loss.
+
+43 of the 51 trades are byte-identical across the two runs and together make
+**+$1 504**. The whole loss sits in the 8 that differ, and the substitutions are
+the finding:
+
+| dropped | | taken instead | |
+|---|---|---|---|
+| QQQ +5C 685 −5C 673 | −$2 758 | QQQ +5P 681 −5P 668 | −$1 848 |
+| SPY +5C 751 −5C 742 | −$2 193 | SPY +4P 745 −4P 731 | −$1 634 |
+| SPY +5C 779 −5C 770 | −$803 | SPY +5P 774 −5P 763 | −$2 068 |
+| IWM +4C 299 −4C 290 | −$1 346 | IWM +5P 297 −5P 285 | −$848 |
+
+Every bear-**call credit** spread comes back as a bear-**put debit** spread on
+nearly the same strikes, because they are the same directional bet in two
+wrappers — the symmetry `Vertical` is built on, arriving through the ranker
+instead of the structure. Total: −$7 014 → −$6 879.
+
+**So the structure was never the problem; the direction was.** All five credit
+spreads were bearish, and they lost because the tape rose — which the forecast
+eval had already said in a form nobody had connected to it: `pit_mean` 0.53 means
+realized prices land above the forecast more often than they should, so the model
+sits too low against a rising sample. A mean-reversion drift fades rallies, and
+fading a rally that continues is a losing bet however it is expressed. Banning a
+structure cannot fix a directional error; only the model can.
+
 ### A probability floor selects *against* payoff — measure reward/risk instead
 
 The reason `credit_pop_high` disappoints is visible in what it picks. High odds
@@ -834,6 +866,7 @@ isolates that axis:
 | `prob_profit.toml` | scorer | `metric = "prob_profit"` — rewards hit-rate over magnitude. |
 | `exit_pop_trailing.toml` / `exit_momentum.toml` | exit | Structure-scoped give-ups: live-POP on debits, trailing vs momentum on nakeds. |
 | `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
+| `mean_reversion_no_credit.toml` | ranker | The base with `allow_credit = false`. Recovers $135 of a $5,510 loss — the bets return as bear put debits. |
 | `credit_pop.toml` | ranker | Credit spreads only, ordered by probability of profit. Its scorer discriminates best of the set (Spearman 0.45) and it still loses — see below. |
 | `credit_pop_stop.toml` / `_conviction.toml` / `_flat.toml` | exit, portfolio | The adverse-forecast stop, then the same 35 trades sized three ways — the arms that showed the score does not size. |
 
