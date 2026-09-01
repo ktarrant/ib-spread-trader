@@ -1,0 +1,28 @@
+# Mean-reversion at two weeks, fading a *slower* trend: 20/50 SMAs rather than
+# the 10/30 the one-week model uses.
+#
+# Found by sweeping the SMA pair at 14d (scripts/sweep_model.py). It is a
+# gradient rather than one lucky cell — slow=50 beat slow=30 at every fast value
+# tried, and within slow=50 a slower fast leg was better still, which is what you
+# would expect if the horizon and the trend lookback want to match.
+#
+# Read the record in mean-reversion-14d-slow.json before trusting it: the CRPS
+# skill is the best of the grid, but the directional hit-rate is barely over a
+# coin flip and PIT calibration is slightly *worse* than the 10/30 pair.
+[features]
+trend_fast = 20
+trend_slow = 50
+atr_period = 14
+realized_vol_period = 20
+skew_moneyness = 0.05
+
+[model]
+horizon_days = 14.0
+bars_per_year = 3276.0
+realized_vol_weight = 0.0
+fallback_vol = 0.30
+trend_weight = -0.5
+vwap_reversion = 0.0
+skew_weight = 0.0
+grid_sigma = 4.0
+grid_points = 101

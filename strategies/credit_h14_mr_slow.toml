@@ -1,0 +1,16 @@
+# The 14d candidate from the SMA sweep: fade a 20/50 trend rather than 10/30.
+name      = "credit-h14-mr-slow"
+mode      = "ranked"
+model     = "mean-reversion-14d-slow"
+ranker    = "credit_pop"
+portfolio = "equal_weight_1"
+exit      = "forecast_stop"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+min_entry_days_before_expiry = 14
+
+[costs]
+commission_per_contract = 0.65

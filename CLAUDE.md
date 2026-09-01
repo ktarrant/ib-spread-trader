@@ -580,9 +580,45 @@ neutral: it over-rates bear-call spreads and under-rates bull-put spreads, and t
 error grows with the horizon.
 
 Trade P&L separates none of this (−4.2 % to −5.2 % across all four, 2–28 trades).
-`models/driftless-14d.json` and `mean-reversion-14d.json` do not exist: neither
-label has been through `scripts/validate_model.py`, so neither is a *labeled*
-model in the sense the registry means.
+
+### Hunting a 14d model: momentum is still wrong, the SMA lookback is the knob
+
+`scripts/sweep_model.py` sweeps model parameters and ranks them by forecast
+quality alone. It needs no ranker, exit or portfolio — the eval does not depend on
+them — and turns `scorer_sample_per_bar` off, which takes a run from ~5 minutes to
+~35 seconds and makes a search affordable. Nineteen cells at 14d:
+
+- **Momentum loses at two weeks too, monotonically.** `trend_weight` +0.25 →
+  −0.0068, +0.5 → −0.0169, +1.0 → −0.0459, +2.0 → −0.1348, with the directional
+  hit-rate pinned at 45 %. "Momentum needs weeks-to-months" was the standing
+  explanation for v1's failure; at two weeks it is still wrong, and the best cell
+  is still the mean-reversion **−0.5** the one-week model already uses.
+- **VWAP adds nothing.** The best `vwap_reversion` beats zero by 0.0003 — noise.
+- **The trend *lookback* is what matters.** `trend_slow = 50` beat `trend_slow =
+  30` at every `trend_fast` tried (best 20/50 at **+0.0096**, against +0.0051 for
+  the shipped 10/30). A gradient across the grid rather than one cell, and it fits
+  the intuition that the horizon and the trend lookback should match.
+
+**`mean-reversion-14d-slow` clears the gate, and the margin is one symbol.**
+
+| | crps skill | dir % | PIT err | LOSO | verdict |
+|---|---|---|---|---|---|
+| `mean-reversion` (7d, shipped) | +0.0133 | 56.9 | 0.102 | 9/12 | passes |
+| `mean-reversion-14d-slow` (20/50) | +0.0096 | **50.8** | 0.131 | **8/12** | **passes** |
+| `mean-reversion-14d` (10/30) | +0.0051 | 51.6 | 0.120 | **7/12** | **fails** |
+
+Every gate is cleared at its minimum: 8/12 is exactly `ceil(0.66 × 12)`, and the
+directional hit-rate clears 0.5 by 0.008. The untuned 14d control fails on
+**one symbol fewer**, so the entire difference between "labeled" and "not
+labeled" is a single held-out symbol.
+
+Two things that record does *not* say. It is **not better than the 7-day model** —
+it is worse on skill, direction, calibration and robustness alike; it is the best
+*14-day* model, not a better model. And it was found by a search over 19 cells on
+the same snapshot that then validated it: LOSO guards against one or two symbols
+carrying a result, not against a search fitting the period. With one snapshot and
+one expiry there is no out-of-period test to appeal to, so treat the label as
+provisional until the capture side supplies another expiry.
 
 
 ## Test fixtures generate their own options
