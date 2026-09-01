@@ -30,7 +30,10 @@ use crate::model::{
     PriceDistribution, PriceModel, RankingConfig, RankingFunnel, ScorerRecord, enumerate_verticals,
     expected_pl_and_score, rank,
 };
-use crate::portfolio::{ExitReason, OpenPosition, Portfolio, TradePrediction};
+use crate::portfolio::{
+    AllocationCandidate, ExitReason, OpenPosition, Portfolio, PortfolioModel, PortfolioModelKind,
+    PortfolioState, TradePrediction,
+};
 use crate::signal::{MarketView, Signal};
 use crate::spread::Spread;
 use crate::structure::Structure;
@@ -74,36 +77,9 @@ pub struct RunConfig {
     /// Refuse new entries within this many calendar days of an earnings
     /// announcement. Prevents the same open-close churn as the expiry gate.
     pub earnings_blackout_days: Option<u32>,
-    /// Score-weighted position sizing. `None` keeps the fixed one-lot behaviour;
-    /// `Some` sizes each ranked entry by conviction and the capital left, so a
-    /// limited account fills across opportunities. Ranked path only — the staged
-    /// path has no score to size against.
-    pub sizing: Option<Sizing>,
-}
-
-/// How the ranked path turns a score and the capital left into a contract count.
-///
-/// A position risks a baseline fraction of total capital at the minimum score,
-/// scaled up linearly with the score (conviction buys size) and capped per
-/// position. The contract count is that risk budget divided by one lot's max
-/// loss, so a wide/expensive structure gets fewer lots than a cheap one for the
-/// same budget — capital at risk is what is held constant, not lot count.
-#[derive(Debug, Clone, Copy, Serialize)]
-pub struct Sizing {
-    /// Fraction of total capital to risk on a position scoring exactly at the
-    /// minimum. Higher scores scale above this, up to `max_risk_per_position`.
-    pub risk_per_position: f64,
-    /// Ceiling on any single position's risk, as a fraction of total capital, so
-    /// one high-scoring idea cannot commit the whole account.
-    pub max_risk_per_position: f64,
-    /// The score that earns exactly `risk_per_position` — the sizing baseline.
-    /// A position scoring `2 * baseline` risks twice as much (before the cap).
-    pub baseline_score: f64,
-    /// A hard ceiling on contracts per position, independent of capital. The
-    /// risk cap bounds dollars at risk; this bounds *fill size*, so a cheap
-    /// structure cannot be sized into a lot count the ladder cannot absorb
-    /// without slippage. `None` leaves the risk cap the only limit.
-    pub max_lots: Option<u32>,
+    /// Ranked allocation policy. `None` preserves fixed one-lot entries; shared
+    /// ranked configs resolve to the score-weighted model by default.
+    pub portfolio_model: Option<PortfolioModelKind>,
 }
 
 impl Default for RunConfig {
@@ -117,7 +93,7 @@ impl Default for RunConfig {
             max_positions_per_symbol: None,
             min_entry_days_before_expiry: None,
             earnings_blackout_days: None,
-            sizing: None,
+            portfolio_model: None,
         }
     }
 }
@@ -221,10 +197,10 @@ enum Intent {
         spread: Spread,
         prediction: Option<TradePrediction>,
         forecast_target: Option<f64>,
-        /// Present when sizing is deferred to fill time (the shared-account
+        /// Present when allocation is deferred to fill time (the shared-account
         /// path): `spread` is one lot and `execute` scales it against the
         /// portfolio's capital then. `None` means `spread` is already sized.
-        sizing: Option<SizingHint>,
+        allocation: Option<AllocationHint>,
         /// The chosen candidate's per-leg entry vols, carried onto the position
         /// for the live-POP exit. Empty for the staged path.
         leg_vols: Vec<f64>,
@@ -238,40 +214,12 @@ enum Intent {
 /// What `execute` needs to size a one-lot spread at fill time: the ranker's
 /// score (drives the budget) and one lot's max loss (divides it into lots).
 #[derive(Debug, Clone, Copy)]
-struct SizingHint {
+struct AllocationHint {
     score: f64,
     one_lot_max_loss: f64,
     /// The one-lot expected P/L, scaled by the filled lot count for the trade
     /// prediction so it stays consistent with the position's realised size.
     expected_pl: f64,
-}
-
-/// Turn a score and the capital already at risk into a lot count, holding the
-/// dollar risk (not the lot count) roughly constant across candidates. A
-/// baseline-scoring idea risks `risk_per_position` of capital; a higher score
-/// scales up linearly, capped per position and by the capital still free.
-/// Returns 0 when even one lot cannot be funded.
-fn size_lots(
-    sizing: &Sizing,
-    score: f64,
-    one_lot_max_loss: f64,
-    initial_cash: f64,
-    capital_at_risk: f64,
-) -> u32 {
-    if one_lot_max_loss <= 0.0 {
-        return 1;
-    }
-    let available = initial_cash - capital_at_risk;
-    let score_mult = (score / sizing.baseline_score).max(1.0);
-    let budget = (initial_cash * sizing.risk_per_position * score_mult)
-        .min(initial_cash * sizing.max_risk_per_position)
-        .min(available.max(0.0));
-    let lots = (budget / one_lot_max_loss).floor() as u32;
-    // The lot cap bounds fill size regardless of how much risk budget is free.
-    match sizing.max_lots {
-        Some(cap) => lots.min(cap),
-        None => lots,
-    }
 }
 
 /// Why a bar produced no trade despite a trigger.
@@ -483,7 +431,7 @@ pub fn run_symbol(
                                             spread,
                                             prediction: None,
                                             forecast_target: None,
-                                            sizing: None,
+                                            allocation: None,
                                             leg_vols: Vec::new(),
                                         })
                                     }
@@ -520,14 +468,18 @@ pub fn run_symbol(
                             ) {
                                 // Per-symbol path: size at decision time against
                                 // this symbol's own portfolio.
-                                let lots = match &config.sizing {
+                                let lots = match &config.portfolio_model {
                                     None => 1,
-                                    Some(sizing) => size_lots(
-                                        sizing,
-                                        choice.score,
-                                        choice.candidate.max_loss,
-                                        config.initial_cash,
-                                        portfolio.capital_at_risk(),
+                                    Some(model) => model.lots(
+                                        AllocationCandidate {
+                                            score: choice.score,
+                                            one_lot_max_loss: choice.candidate.max_loss,
+                                        },
+                                        PortfolioState::new(
+                                            config.initial_cash,
+                                            portfolio.capital_at_risk(),
+                                            portfolio.open.len(),
+                                        ),
                                     ),
                                 };
                                 if lots == 0 {
@@ -551,7 +503,7 @@ pub fn run_symbol(
                                         spread,
                                         prediction: Some(prediction),
                                         forecast_target,
-                                        sizing: None,
+                                        allocation: None,
                                         leg_vols,
                                     });
                                 }
@@ -676,11 +628,11 @@ pub struct SharedRun {
 }
 
 /// The score a queued open sorts by when the shared account funds best-first.
-/// Opens with no sizing hint (the staged path) sort last.
+/// Opens with no allocation hint (the staged path) sort last.
 fn open_score(intent: &Intent) -> f64 {
     match intent {
         Intent::Open {
-            sizing: Some(hint), ..
+            allocation: Some(hint), ..
         } => hint.score,
         _ => f64::MIN,
     }
@@ -897,9 +849,9 @@ pub fn run_shared(
                                 &mut census[*si],
                                 &mut scorer_records[*si],
                             ) {
-                                // Defer sizing to fill (a `SizingHint`) only when
-                                // sizing is configured; otherwise one lot.
-                                let sizing = config.sizing.map(|_| SizingHint {
+                                // Defer allocation to fill only when a portfolio
+                                // model is configured; otherwise use one lot.
+                                let allocation = config.portfolio_model.map(|_| AllocationHint {
                                     score: choice.score,
                                     one_lot_max_loss: choice.candidate.max_loss,
                                     expected_pl: choice.expected_pl,
@@ -914,7 +866,7 @@ pub fn run_shared(
                                     spread: choice.candidate.spread,
                                     prediction: Some(prediction),
                                     forecast_target,
-                                    sizing,
+                                    allocation,
                                 });
                             }
                         }
@@ -949,7 +901,7 @@ pub fn run_shared(
                                             spread,
                                             prediction: None,
                                             forecast_target: None,
-                                            sizing: None,
+                                            allocation: None,
                                             leg_vols: Vec::new(),
                                         })
                                     }
@@ -1194,7 +1146,7 @@ fn ranked_observe(
 
 /// Candidate enumeration, scorer sampling, and ranking for one option bar, once
 /// the entry gate has said Open. Returns the best **one-lot** choice and its
-/// forecast target; sizing is the caller's, so it can differ per account model.
+/// forecast target; allocation is the caller's, so it can differ by portfolio model.
 fn ranked_choose(
     ranked: &RankedStrategy,
     series: &ChainSeries,
@@ -1384,24 +1336,35 @@ fn execute(
             spread,
             prediction,
             forecast_target,
-            sizing,
+            allocation,
             leg_vols,
         } => {
-            // A deferred sizing hint means `spread` is one lot and the shared
-            // account sizes it now, against the capital committed across every
-            // symbol. Zero lots means the account is full — a real outcome.
-            let (sized_spread, prediction) = match sizing {
+            // A deferred allocation hint means `spread` is one lot and the
+            // shared account funds it now against capital committed across all
+            // symbols. Zero lots means the policy declines the fill.
+            let (sized_spread, prediction) = match allocation {
                 None => (spread.clone(), *prediction),
                 Some(hint) => {
-                    let lots = match &config.sizing {
+                    let lots = match &config.portfolio_model {
                         None => 1,
-                        Some(sizing) => size_lots(
-                            sizing,
-                            hint.score,
-                            hint.one_lot_max_loss,
-                            config.initial_cash,
-                            portfolio.capital_at_risk(),
-                        ),
+                        Some(model) => {
+                            let symbol_open_positions = portfolio
+                                .open
+                                .iter()
+                                .filter(|p| p.spread.symbol == spread.symbol)
+                                .count();
+                            model.lots(
+                                AllocationCandidate {
+                                    score: hint.score,
+                                    one_lot_max_loss: hint.one_lot_max_loss,
+                                },
+                                PortfolioState::new(
+                                    config.initial_cash,
+                                    portfolio.capital_at_risk(),
+                                    symbol_open_positions,
+                                ),
+                            )
+                        }
                     };
                     if lots == 0 {
                         census.capital_limited += 1;
@@ -1709,43 +1672,6 @@ mod tests {
             },
             ..Default::default()
         }
-    }
-
-    /// The sizing math the shared account funds each entry with: a baseline
-    /// score buys `risk_per_position` of capital, a higher score scales up
-    /// linearly to the per-position cap, and once capital is committed even a
-    /// good score gets nothing — the "only high-value trades when low on
-    /// capital" behaviour the account relies on.
-    #[test]
-    fn size_lots_scales_with_score_and_stops_when_capital_is_committed() {
-        let sizing = Sizing {
-            risk_per_position: 0.20,
-            max_risk_per_position: 0.50,
-            baseline_score: 0.02,
-            max_lots: None,
-        };
-        let cash = 20_000.0;
-        let one_lot = 400.0; // $400 max loss per lot
-
-        // Baseline score, empty account: 20% of $20k = $4k budget -> 10 lots.
-        assert_eq!(size_lots(&sizing, 0.02, one_lot, cash, 0.0), 10);
-        // Twice the baseline score doubles the budget to $8k -> 20 lots.
-        assert_eq!(size_lots(&sizing, 0.04, one_lot, cash, 0.0), 20);
-        // A very high score is capped at 50% of capital ($10k -> 25 lots), not
-        // scaled without bound.
-        assert_eq!(size_lots(&sizing, 1.0, one_lot, cash, 0.0), 25);
-        // With $19.8k already at risk, only $200 is free — not even one lot.
-        assert_eq!(size_lots(&sizing, 1.0, one_lot, cash, 19_800.0), 0);
-        // With $19.6k at risk, exactly one lot fits.
-        assert_eq!(size_lots(&sizing, 1.0, one_lot, cash, 19_600.0), 1);
-
-        // The lot cap bounds fill size even when the risk budget allows more:
-        // the same 25-lot budget above is clipped to 8.
-        let capped = Sizing {
-            max_lots: Some(8),
-            ..sizing
-        };
-        assert_eq!(size_lots(&capped, 1.0, one_lot, cash, 0.0), 8);
     }
 
     /// The fixture has to be trustworthy before anything is concluded from it:

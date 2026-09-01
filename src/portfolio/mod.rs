@@ -14,6 +14,13 @@ use crate::data::ChainSnapshot;
 use crate::execution::{Costs, FillError, entry_debit, exit_credit};
 use crate::spread::{CONTRACT_MULTIPLIER, Side, Spread};
 
+pub mod model;
+
+pub use model::{
+    AllocationCandidate, EqualWeightSizer, PortfolioModel, PortfolioModelKind, PortfolioState,
+    ScoreWeightedSizer,
+};
+
 /// Why a position left the book.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

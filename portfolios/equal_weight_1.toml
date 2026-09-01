@@ -1,0 +1,8 @@
+# One shared $20k pool, one lot per funded ranked candidate.
+account = "shared"
+initial_cash = 20000.0
+max_positions_per_symbol = 1
+
+[model]
+kind = "equal_weight"
+lots = 1

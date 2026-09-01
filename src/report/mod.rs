@@ -81,6 +81,9 @@ pub struct Totals {
     pub exits_by_reason: BTreeMap<String, usize>,
     /// On the combined curve, equal capital per symbol.
     pub max_drawdown: f64,
+    /// Total return divided by maximum fractional drawdown. `None` when the
+    /// curve never drew down, where the ratio would be undefined.
+    pub return_over_drawdown: Option<f64>,
     pub census: Census,
 }
 
@@ -220,6 +223,12 @@ fn assemble(
     let avg_pnl_per_risk =
         (!risk_ratios.is_empty()).then(|| risk_ratios.iter().sum::<f64>() / risk_ratios.len() as f64);
 
+    let account_drawdown = max_drawdown(drawdown_curve);
+    let return_fraction = if capital_deployed > 0.0 {
+        total_pnl / capital_deployed
+    } else {
+        0.0
+    };
     let totals = Totals {
         symbols: runs.len(),
         bars: runs.iter().map(|run| run.bars).sum(),
@@ -243,7 +252,9 @@ fn assemble(
         best_trade: pnls.iter().copied().reduce(f64::max),
         worst_trade: pnls.iter().copied().reduce(f64::min),
         exits_by_reason,
-        max_drawdown: max_drawdown(drawdown_curve),
+        max_drawdown: account_drawdown,
+        return_over_drawdown: (account_drawdown > 0.0)
+            .then(|| return_fraction / account_drawdown),
         census,
     };
 

@@ -141,7 +141,7 @@ fn main() -> Result<()> {
             // merged timeline; the per-symbol account runs each independently.
             // Both yield: the report, per-symbol runs (for the CSV logs), and the
             // equity curve to write.
-            let (mut built, runs, curve) = if strategy_config.account == AccountMode::Shared {
+            let (mut built, runs, curve) = if strategy_config.account_mode()? == AccountMode::Shared {
                 let mut strategies: Vec<engine::Strategy> = all_series
                     .iter()
                     .map(|_| strategy_config.strategy())

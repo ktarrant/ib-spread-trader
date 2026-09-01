@@ -1,0 +1,11 @@
+# One shared $20k pool with the original score-weighted allocation policy.
+account = "shared"
+initial_cash = 20000.0
+max_positions_per_symbol = 1
+
+[model]
+kind = "score_weighted"
+risk_per_position = 0.10
+max_risk_per_position = 0.25
+baseline_score = 0.02
+max_lots = 5

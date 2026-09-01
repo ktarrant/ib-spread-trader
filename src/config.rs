@@ -16,13 +16,14 @@ use std::path::Path;
 
 use crate::domain::OptionRight;
 use crate::engine::{
-    ExitRules, RankedStrategy, RunConfig, Sizing, StagedStrategy, Strategy, Timing,
+    ExitRules, RankedStrategy, RunConfig, StagedStrategy, Strategy, Timing,
 };
 use crate::execution::{Costs, DeltaSelector};
 use crate::model::{
     CandidateConfig, FeatureConfig, FeatureEngine, LognormalDriftModel, LognormalModelConfig,
     RankMetric, RankingConfig,
 };
+use crate::portfolio::{EqualWeightSizer, PortfolioModelKind, ScoreWeightedSizer};
 use crate::signal::{
     ContractionMeasure, RsiCross, RsiTrendFiltered, SmaCross, VolatilityContractionBreakout,
     VolatilityContractionParams,
@@ -73,6 +74,10 @@ pub struct StrategyConfig {
     /// Ranked mode only — the staged path has no score to size against.
     #[serde(default)]
     pub sizing: Option<SizingConfig>,
+    /// A named portfolio bundle under `portfolios/`, or an inline `[portfolio]`
+    /// block. When absent, the legacy account/sizing fields preserve behavior.
+    #[serde(default)]
+    pub portfolio: Option<PortfolioBlock>,
 }
 
 /// Which decision engine a config selects.
@@ -445,7 +450,7 @@ impl Default for SizingConfig {
 }
 
 impl SizingConfig {
-    fn to_runtime(&self) -> Result<Sizing> {
+    fn to_runtime(&self) -> Result<ScoreWeightedSizer> {
         if !(0.0..=1.0).contains(&self.risk_per_position) || self.risk_per_position == 0.0 {
             bail!(
                 "sizing.risk_per_position must be in (0, 1], got {}",
@@ -467,13 +472,139 @@ impl SizingConfig {
         if self.max_lots == Some(0) {
             bail!("sizing.max_lots must be at least 1 when set");
         }
-        Ok(Sizing {
+        Ok(ScoreWeightedSizer {
             risk_per_position: self.risk_per_position,
             max_risk_per_position: self.max_risk_per_position,
             baseline_score: self.baseline_score,
             max_lots: self.max_lots,
         })
     }
+}
+
+fn default_equal_lots() -> u32 {
+    1
+}
+
+/// The allocation policy inside a portfolio bundle.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PortfolioModelConfig {
+    ScoreWeighted {
+        #[serde(default = "default_risk_per_position")]
+        risk_per_position: f64,
+        #[serde(default = "default_max_risk_per_position")]
+        max_risk_per_position: f64,
+        #[serde(default = "default_baseline_score")]
+        baseline_score: f64,
+        #[serde(default = "default_max_lots")]
+        max_lots: Option<u32>,
+    },
+    EqualWeight {
+        #[serde(default = "default_equal_lots")]
+        lots: u32,
+    },
+}
+
+fn default_risk_per_position() -> f64 {
+    SizingConfig::default().risk_per_position
+}
+fn default_max_risk_per_position() -> f64 {
+    SizingConfig::default().max_risk_per_position
+}
+fn default_baseline_score() -> f64 {
+    SizingConfig::default().baseline_score
+}
+fn default_max_lots() -> Option<u32> {
+    SizingConfig::default().max_lots
+}
+
+impl Default for PortfolioModelConfig {
+    fn default() -> Self {
+        let sizing = SizingConfig::default();
+        Self::ScoreWeighted {
+            risk_per_position: sizing.risk_per_position,
+            max_risk_per_position: sizing.max_risk_per_position,
+            baseline_score: sizing.baseline_score,
+            max_lots: sizing.max_lots,
+        }
+    }
+}
+
+impl PortfolioModelConfig {
+    fn to_runtime(&self) -> Result<PortfolioModelKind> {
+        match self {
+            Self::ScoreWeighted {
+                risk_per_position,
+                max_risk_per_position,
+                baseline_score,
+                max_lots,
+            } => Ok(PortfolioModelKind::ScoreWeighted(
+                SizingConfig {
+                    risk_per_position: *risk_per_position,
+                    max_risk_per_position: *max_risk_per_position,
+                    baseline_score: *baseline_score,
+                    max_lots: *max_lots,
+                }
+                .to_runtime()?,
+            )),
+            Self::EqualWeight { lots } => {
+                if *lots == 0 {
+                    bail!("portfolio.model.lots must be at least 1");
+                }
+                Ok(PortfolioModelKind::EqualWeight(EqualWeightSizer {
+                    lots: *lots,
+                }))
+            }
+        }
+    }
+}
+
+/// Account policy and allocation model as one reusable portfolio block.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PortfolioConfig {
+    pub account: AccountMode,
+    pub initial_cash: f64,
+    pub max_open_positions: Option<usize>,
+    pub max_positions_per_symbol: Option<usize>,
+    pub model: PortfolioModelConfig,
+}
+
+impl Default for PortfolioConfig {
+    fn default() -> Self {
+        Self {
+            account: AccountMode::Shared,
+            initial_cash: default_cash(),
+            max_open_positions: None,
+            max_positions_per_symbol: None,
+            model: PortfolioModelConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum PortfolioBlock {
+    Label(String),
+    Inline(PortfolioConfig),
+}
+
+impl PortfolioBlock {
+    fn resolve(&self) -> Result<PortfolioConfig> {
+        match self {
+            Self::Label(label) => load_labeled("portfolios", label),
+            Self::Inline(config) => Ok(config.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedPortfolio {
+    account: AccountMode,
+    initial_cash: f64,
+    max_open_positions: usize,
+    max_positions_per_symbol: Option<usize>,
+    model: Option<PortfolioModelKind>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -710,8 +841,15 @@ impl StrategyConfig {
         if self.symbols.is_empty() {
             bail!("`symbols` is empty; nothing to backtest");
         }
-        if self.initial_cash <= 0.0 {
-            bail!("`initial_cash` must be positive, got {}", self.initial_cash);
+        if self.portfolio.is_some() && self.sizing.is_some() {
+            bail!("use either `portfolio` or legacy `[sizing]`, not both");
+        }
+        let portfolio = self.resolved_portfolio()?;
+        if portfolio.initial_cash <= 0.0 {
+            bail!(
+                "portfolio initial_cash must be positive, got {}",
+                portfolio.initial_cash
+            );
         }
         // Build the stages once up front so a typo fails before any I/O rather
         // than after the first symbol has already run.
@@ -765,6 +903,59 @@ impl StrategyConfig {
             }
         }
         Ok(())
+    }
+
+    fn resolved_portfolio(&self) -> Result<ResolvedPortfolio> {
+        if let Some(block) = &self.portfolio {
+            let config = block.resolve()?;
+            let max_open_positions = config.max_open_positions.unwrap_or(match config.account {
+                AccountMode::Shared => 1_000,
+                AccountMode::PerSymbol => 1,
+            });
+            let max_positions_per_symbol = config.max_positions_per_symbol.or(match config.account {
+                AccountMode::Shared => Some(1),
+                AccountMode::PerSymbol => None,
+            });
+            return Ok(ResolvedPortfolio {
+                account: config.account,
+                initial_cash: config.initial_cash,
+                max_open_positions,
+                max_positions_per_symbol,
+                model: Some(config.model.to_runtime()?),
+            });
+        }
+
+        let model = self
+            .sizing
+            .as_ref()
+            .map(|s| s.to_runtime().map(PortfolioModelKind::ScoreWeighted))
+            .transpose()?
+            .or_else(|| {
+                (self.account == AccountMode::Shared && self.mode == StrategyMode::Ranked).then(|| {
+                    PortfolioModelKind::ScoreWeighted(
+                        SizingConfig::default()
+                            .to_runtime()
+                            .expect("valid default sizing"),
+                    )
+                })
+            });
+        Ok(ResolvedPortfolio {
+            account: self.account,
+            initial_cash: self.initial_cash,
+            max_open_positions: self.execution.max_open_positions.unwrap_or(match self.account {
+                AccountMode::Shared => 1_000,
+                AccountMode::PerSymbol => 1,
+            }),
+            max_positions_per_symbol: self.execution.max_positions_per_symbol.or(match self.account {
+                AccountMode::Shared => Some(1),
+                AccountMode::PerSymbol => None,
+            }),
+            model,
+        })
+    }
+
+    pub fn account_mode(&self) -> Result<AccountMode> {
+        Ok(self.resolved_portfolio()?.account)
     }
 
     /// A **fresh** strategy for the selected mode. Both modes carry indicator
@@ -854,8 +1045,9 @@ impl StrategyConfig {
 
     pub fn run_config(&self) -> Result<RunConfig> {
         let exit = self.exit.resolve()?;
+        let portfolio = self.resolved_portfolio()?;
         Ok(RunConfig {
-            initial_cash: self.initial_cash,
+            initial_cash: portfolio.initial_cash,
             costs: Costs {
                 commission_per_contract: self.costs.commission_per_contract,
             },
@@ -878,36 +1070,11 @@ impl StrategyConfig {
                 close_before_earnings: exit.close_before_earnings,
                 min_days_before_expiry: exit.min_days_before_expiry,
             },
-            // Absent resolves by account: a shared account lets capital bind, a
-            // per-symbol account is in-or-out.
-            max_open_positions: self.execution.max_open_positions.unwrap_or(
-                match self.account {
-                    AccountMode::Shared => 1_000,
-                    AccountMode::PerSymbol => 1,
-                },
-            ),
-            // A shared account defaults to one position per symbol so capital
-            // spreads across names; an explicit config value still wins.
-            max_positions_per_symbol: self.execution.max_positions_per_symbol.or(
-                match self.account {
-                    AccountMode::Shared => Some(1),
-                    AccountMode::PerSymbol => None,
-                },
-            ),
+            max_open_positions: portfolio.max_open_positions,
+            max_positions_per_symbol: portfolio.max_positions_per_symbol,
             min_entry_days_before_expiry: self.execution.min_entry_days_before_expiry,
             earnings_blackout_days: self.execution.earnings_blackout_days,
-            // A shared ranked account is sized by default (the "$20k pool"
-            // approach); an explicit [sizing] block still wins, and the
-            // per-symbol path stays unsized unless a block is given. Validated in
-            // `validate()`, so `ok()` only drops a hand-built unvalidated block.
-            sizing: self
-                .sizing
-                .as_ref()
-                .and_then(|s| s.to_runtime().ok())
-                .or_else(|| {
-                    (self.account == AccountMode::Shared && self.mode == StrategyMode::Ranked)
-                        .then(|| SizingConfig::default().to_runtime().expect("valid default"))
-                }),
+            portfolio_model: portfolio.model,
         })
     }
 }
@@ -1112,6 +1279,37 @@ horizon_days = 10.0
         .unwrap();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("does-not-exist"), "{err}");
+    }
+
+    #[test]
+    fn a_named_equal_weight_portfolio_selects_the_alternative_model() {
+        let config: StrategyConfig = toml::from_str(
+            "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nmode=\"ranked\"\nportfolio=\"equal_weight_1\"",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        let run = config.run_config().unwrap();
+        assert_eq!(run.initial_cash, 20_000.0);
+        assert_eq!(run.max_positions_per_symbol, Some(1));
+        assert!(matches!(
+            run.portfolio_model,
+            Some(PortfolioModelKind::EqualWeight(EqualWeightSizer { lots: 1 }))
+        ));
+    }
+
+    #[test]
+    fn an_inline_portfolio_is_strict_and_validated() {
+        let invalid: StrategyConfig = toml::from_str(
+            "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nmode=\"ranked\"\n[portfolio]\n[portfolio.model]\nkind=\"equal_weight\"\nlots=0",
+        )
+        .unwrap();
+        assert!(invalid.validate().is_err());
+
+        let typo = toml::from_str::<StrategyConfig>(
+            "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\n[portfolio]\ninitial_cahs=20000",
+        )
+        .unwrap_err();
+        assert!(typo.to_string().contains("PortfolioBlock"), "{typo}");
     }
 
     #[test]

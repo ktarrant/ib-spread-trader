@@ -59,6 +59,7 @@ def run(config: str) -> dict | None:
         "trades": t["trades"],
         "return_pct": t["return_pct"],
         "max_dd": t["max_drawdown"] * 100,
+        "return_dd": t.get("return_over_drawdown") or 0.0,
         "pf": t.get("profit_factor") or 0.0,
         "crps_skill": pooled.get("crps_skill", float("nan")),
         "dir_hit": pooled.get("directional_hit_rate", float("nan")) * 100,
@@ -73,13 +74,13 @@ def main() -> None:
     if not rows:
         sys.exit("no strategy produced a result")
 
-    hdr = f"{'strategy':>18}{'trades':>7}{'return%':>9}{'maxDD%':>8}{'pf':>6}{'crps':>9}{'dir%':>6}  {'structure':<12} exits"
+    hdr = f"{'strategy':>18}{'trades':>7}{'return%':>9}{'maxDD%':>8}{'ret/dd':>8}{'pf':>6}{'crps':>9}{'dir%':>6}  {'structure':<12} exits"
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
         print(
             f"{r['name']:>18}{r['trades']:>7}{r['return_pct']:>9.1f}{r['max_dd']:>8.0f}"
-            f"{r['pf']:>6.2f}{r['crps_skill']:>+9.4f}{r['dir_hit']:>6.1f}  {r['mix']:<12} {r['exits']}"
+            f"{r['return_dd']:>8.2f}{r['pf']:>6.2f}{r['crps_skill']:>+9.4f}{r['dir_hit']:>6.1f}  {r['mix']:<12} {r['exits']}"
         )
 
 
