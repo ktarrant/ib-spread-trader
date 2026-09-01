@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::domain::OptionRight;
@@ -960,6 +961,9 @@ pub struct RankingSectionConfig {
     pub metric: RankMetric,
     pub min_score: f64,
     pub min_expected_pl: f64,
+    /// Refuse to open a candidate whose model probability of profit is below
+    /// this. `None`/absent means no probability gate.
+    pub min_prob_profit: Option<f64>,
     /// Close when the underlying reaches this quantile of the entry forecast in
     /// the trade's favour (0.5–1.0). `None`/absent disables the forecast exit.
     pub forecast_target_quantile: Option<f64>,
@@ -975,6 +979,7 @@ impl Default for RankingSectionConfig {
             metric: d.metric,
             min_score: d.min_score,
             min_expected_pl: d.min_expected_pl,
+            min_prob_profit: d.min_prob_profit,
             forecast_target_quantile: d.forecast_target_quantile,
             scorer_sample_per_bar: d.scorer_sample_per_bar,
         }
@@ -988,10 +993,16 @@ impl RankingSectionConfig {
         {
             bail!("`ranking.forecast_target_quantile` must be in 0.5..=1.0");
         }
+        if let Some(floor) = self.min_prob_profit
+            && !(0.0..=1.0).contains(&floor)
+        {
+            bail!("`ranking.min_prob_profit` must be in 0..=1, got {floor}");
+        }
         Ok(RankingConfig {
             metric: self.metric,
             min_score: self.min_score,
             min_expected_pl: self.min_expected_pl,
+            min_prob_profit: self.min_prob_profit,
             forecast_target_quantile: self.forecast_target_quantile,
             scorer_sample_per_bar: self.scorer_sample_per_bar,
         })
@@ -1113,6 +1124,57 @@ impl StrategyConfig {
             }
         }
         Ok(())
+    }
+
+    /// The config with every label replaced by the block it names.
+    ///
+    /// A report has to describe the run that **happened**, not the shorthand
+    /// that produced it. Serializing the config as written would emit
+    /// `model = "mean-reversion"` where a reader expects the model's fields, and
+    /// — worse — would emit the *default* `[candidates]`/`[ranking]` tables
+    /// beside a `ranker` label, so a credit-only run would report itself as
+    /// allowing debits. The labels are reported separately by `labels`.
+    pub fn resolved(&self) -> Result<Self> {
+        let dataset = self.resolved_dataset()?;
+        let model = self.resolved_model()?;
+        let ranker = self.resolved_ranker()?;
+        let portfolio = self.resolved_portfolio()?;
+        Ok(Self {
+            symbols: dataset.symbols,
+            expiry: dataset.expiry,
+            dataset: None,
+            features: model.features,
+            model: ModelBlock::Inline(model.model),
+            candidates: ranker.candidates,
+            ranking: ranker.ranking,
+            ranker: None,
+            exit: ExitBlock::Inline(self.exit.resolve()?),
+            account: portfolio.account,
+            initial_cash: portfolio.initial_cash,
+            ..self.clone()
+        })
+    }
+
+    /// The labels a run composed, for the report to carry beside the resolved
+    /// blocks — the one thing resolving throws away.
+    pub fn labels(&self) -> BTreeMap<&'static str, String> {
+        let mut labels = BTreeMap::new();
+        if let ModelBlock::Label(label) = &self.model {
+            labels.insert("model", label.clone());
+        }
+        if let Some(RankerBlock::Label(label)) = &self.ranker {
+            labels.insert("ranker", label.clone());
+        }
+        if let Some(PortfolioBlock::Label(label)) = &self.portfolio {
+            labels.insert("portfolio", label.clone());
+        }
+        if let ExitBlock::Label(label) = &self.exit {
+            labels.insert("exit", label.clone());
+        }
+        if let Some(DatasetBlock::Label(label)) = &self.dataset {
+            labels.insert("dataset", label.clone());
+        }
+        labels
     }
 
     fn resolved_dataset(&self) -> Result<DatasetConfig> {
@@ -1644,6 +1706,41 @@ horizon_days = 10.0
             count += 1;
         }
         assert!(count >= 6, "expected the shipped variant set, found {count}");
+    }
+
+    /// The report's config is a contract with `ib-option-viz`, which reads
+    /// `config.model` and `config.exit` as tables and describes the candidate
+    /// universe from `config.candidates`. Labels broke both: a string where a
+    /// table was expected, and — quieter, so worse — the *default* candidate and
+    /// ranking tables sitting beside a `ranker` label, which would have reported
+    /// a credit-only run as allowing debits and naked longs.
+    #[test]
+    fn the_reported_config_describes_the_run_not_the_labels() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("strategies/credit_pop.toml");
+        let config = StrategyConfig::load(path).unwrap();
+        let resolved = config.resolved().unwrap();
+
+        // Every block is a table a reader can inspect, not a name to look up.
+        assert!(matches!(resolved.model, ModelBlock::Inline(_)));
+        assert!(matches!(resolved.exit, ExitBlock::Inline(_)));
+        assert!(resolved.ranker.is_none() && resolved.dataset.is_none());
+
+        // And it reports the universe that actually ran.
+        assert!(!resolved.candidates.allow_debit, "this run is credit-only");
+        assert!(!resolved.candidates.allow_naked_long);
+        assert!(resolved.candidates.allow_credit);
+        assert_eq!(resolved.ranking.metric, RankMetric::ProbProfit);
+        assert_eq!(resolved.ranking.min_score, 0.02);
+        let ExitBlock::Inline(exit) = &resolved.exit else {
+            panic!("resolved to an inline exit");
+        };
+        assert_eq!(exit.profit_target_pct, Some(50.0));
+
+        // The labels are not lost, just reported separately.
+        let labels = config.labels();
+        assert_eq!(labels["ranker"], "credit_pop");
+        assert_eq!(labels["model"], "mean-reversion");
+        assert_eq!(labels["exit"], "base");
     }
 
     #[test]

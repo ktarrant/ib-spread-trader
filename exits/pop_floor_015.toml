@@ -1,0 +1,13 @@
+# The base exits with the live-POP give-up at 0.15 rather than base's 0.25.
+#
+# 0.25 was inherited from the debit bundle, where giving up early is cheap. A
+# short-premium position is the opposite case: its edge is decay, so a floor
+# should fire only when the position is genuinely lost, not when it is merely
+# behind. This is the loose end of that sweep.
+forecast_target_quantile = 0.85
+profit_target_pct = 50.0
+stop_loss_pct = 100.0
+close_before_earnings = true
+underlying_past_short_strike = true
+close_after_forecast_horizon = true
+live_pop_floor = 0.15

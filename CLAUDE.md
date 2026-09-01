@@ -417,8 +417,33 @@ Read that as a guardrail, not a verdict: 28–76 trades on one expiry is noise, 
 unlike a forecast an exit rule has no dense per-bar evaluation to appeal to. What
 is *not* noise is that the entry was never the problem — the credit-only PoP
 ranker discriminates best of the set (Spearman 0.447, monotone deciles, against
-0.383 for `ev` and 0.395 for `prob_profit`). The floor value 0.25 is inherited
-from the debit bundle and untested for credit; sweeping it is config-only.
+0.383 for `ev` and 0.395 for `prob_profit`).
+
+**Sweeping the floor points the same way, and the entry gate is what worked.**
+
+| run | trades | return | max DD | worst | POP exits |
+|---|---|---|---|---|---|
+| `credit_pop` (no floor) | 28 | −7.0 % | 42.0 % | −$2 538 | 0 |
+| `credit_pop_floor10` (0.10) | 29 | −14.3 % | 46.8 % | −$3 123 | 6 |
+| `credit_pop_floor15` (0.15) | 30 | −23.4 % | 45.1 % | −$2 083 | 8 |
+| `credit_pop_floor` (0.25) | 33 | −22.6 % | 46.7 % | −$1 758 | 12 |
+| `credit_pop_high` (70 % odds at entry) | 8 | −8.3 % | **17.9 %** | −$1 068 | 0 |
+
+Loosening the floor recovers most of what 0.25 cost, but **no floor still beats
+every floor tested** — on this dataset, giving up on a short-premium position is
+a losing move at any threshold, because the decay that pays it needs the time
+that giving up forfeits.
+
+`min_prob_profit = 0.70` is the one that changes the risk. It is severe — 418 of
+18 527 score-clearing candidates carry 70 % odds, 2.3 % — and it cuts max
+drawdown from 42 % to **17.9 %** at a comparable return. It also makes the give-up
+**redundant**: `credit_pop_high_floor10` is trade-for-trade *identical* to
+`credit_pop_high`, because a position entered at 70 % odds never falls to 0.10
+inside its horizon. Selecting better dominated exiting better.
+
+Do not read the returns: 8 trades is not a sample. The drawdown and the
+identical-runs fact are structural rather than P&L noise, and those are the parts
+worth carrying forward.
 
 
 ## Test fixtures generate their own options
@@ -441,6 +466,15 @@ runs. Genuinely new logic is still a trait impl (`PriceModel`, `PortfolioModel`,
 or a staged `Signal`/`Structure`/`Selector`).
 `StrategyConfig::validate` builds every stage up front, so a typo fails before any
 I/O rather than after the first symbol has already run.
+
+**The report's `config` is the *resolved* composition, not the labels**
+(`StrategyConfig::resolved`, with the labels themselves under a separate
+`labels` key). A report has to describe the run that happened: serializing the
+config as written emits `model = "mean-reversion"` where `ib-option-viz` reads a
+table — and, worse, emits the *default* `[candidates]`/`[ranking]` tables beside
+a `ranker` label, so a credit-only run would report itself as allowing debits.
+Both were true for one commit; `the_reported_config_describes_the_run_not_the_labels`
+pins them shut.
 
 A label **supersedes** the legacy inline fields it replaces — `model` supersedes
 `[features]`, `ranker` supersedes `[candidates]`/`[ranking]`, `dataset` supersedes
@@ -548,6 +582,14 @@ volume):
    `E[P/L] / max_loss`, with a positive-expectancy floor and a minimum score. The
    best survivor is opened through the same next-bar timing and gates as staged.
 
+   `min_prob_profit` is a further, *optional* floor on the odds themselves —
+   refuse to open below this model probability of clearing the round-trip cost.
+   It is not the same as `metric = "prob_profit"`, which takes the best odds on
+   offer however poor they are, nor the same as `min_score`, which floors edge per
+   unit of risk and will happily take a fat payoff that rarely pays. A
+   short-premium thesis is "this expires worthless", and the gate is how that
+   thesis is stated at entry rather than repaired at exit.
+
 **Scoring is interim mark-to-model, not intrinsic-at-expiry.** `Spread::model_value`
 (beside `payoff_at`) sums the legs' Black-76 values with time value at a
 hypothesised forward, so a candidate is scored at a configurable pre-expiry horizon
@@ -560,7 +602,7 @@ interim worst case.
 
 **The funnel is the census here.** `RankingFunnel` counts the cascade —
 enumerated -> priceable -> liquid -> within-loss -> positive-EV -> above-min-score
--> chosen — and the report surfaces it beside the trade log, the way
+-> above-min-pop -> chosen — and the report surfaces it beside the trade log, the way
 `signal_diagnostics` surfaces the staged gates. On the reference snapshot,
 `mean_reversion.toml` prices 8 732 187 candidate verticals down to 51 taken. The
 model decides how many bars hold a position and so are *not* enumerating, which
@@ -619,6 +661,9 @@ isolates that axis:
 | `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
 | `credit_pop.toml` | ranker | Credit spreads only, ordered by probability of profit. Its scorer discriminates best of the set (Spearman 0.45) and it still loses — see below. |
 | `credit_pop_floor.toml` | exit | `credit_pop` plus the live-POP give-up, the credit side's only risk exit. Cuts the tail, loses more. |
+| `credit_pop_floor10/15.toml` | exit | The give-up loosened to 0.10 / 0.15 — the floor sweep. |
+| `credit_pop_high.toml` | ranker | Credit-only PoP entry *gated* at 70 % odds (`min_prob_profit`). Halves drawdown; makes the give-up redundant. |
+| `credit_pop_high_floor10.toml` | exit | The gate plus a loose give-up — identical to `credit_pop_high`, which is the finding. |
 
 All run as one shared $20k account (the default), so their P&L is comparable.
 

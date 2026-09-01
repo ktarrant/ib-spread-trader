@@ -1,0 +1,25 @@
+# Credit-only, PoP-ordered, and PoP-*gated*: refuse to open below a 70% model
+# probability of profit.
+#
+# credit_pop takes the best odds on the ladder however poor they are — its
+# floors are on expected value, not on odds. A short-premium thesis is "this
+# expires worthless", and a 55% chance of that is not that thesis. This is the
+# entry-side counterpart to the exit sweep: rather than cutting a bad position
+# sooner, do not open it.
+[candidates]
+rights = ["call", "put"]
+allow_debit = false
+allow_credit = true
+allow_naked_long = false
+min_width = 0.0
+max_relative_spread = 0.35
+max_loss = 500.0
+quantity = 1
+
+[ranking]
+metric = "prob_profit"
+min_score = 0.02
+min_expected_pl = 0.0
+min_prob_profit = 0.70
+forecast_target_quantile = 0.85
+scorer_sample_per_bar = 20

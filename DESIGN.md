@@ -58,9 +58,11 @@ validation — the forecast is judged as a forecaster.
 and naked long the ladder supplies, marks each to model against the forecast
 distribution, and returns the **single best** candidate by its metric. Two metrics
 exist: `expected_value` (E[P/L] ÷ max-loss, the default) and `prob_profit`. It
-applies floors (`min_score`, `min_expected_pl`) and liquidity/loss caps
+applies floors (`min_score`, `min_expected_pl`, and optionally `min_prob_profit`
+— an entry gate on the odds themselves) and liquidity/loss caps
 (`[candidates]`). The whole cascade — enumerated → priceable → liquid →
-within-loss → positive-EV → above-min-score → chosen — is reported as a funnel.
+within-loss → positive-EV → above-min-score → above-min-pop → chosen — is
+reported as a funnel.
 
 The ranker returns **one** best candidate per symbol-bar, not a slate the
 portfolio manager sifts. The score already

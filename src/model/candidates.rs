@@ -94,6 +94,9 @@ pub struct RankingFunnel {
     pub positive_ev: usize,
     /// …of which cleared the minimum score.
     pub above_min_score: usize,
+    /// …of which cleared the minimum probability of profit. Equal to
+    /// `above_min_score` unless `min_prob_profit` is configured.
+    pub above_min_pop: usize,
     /// Bars on which a candidate was actually taken.
     pub chosen: usize,
 }
@@ -106,6 +109,7 @@ impl RankingFunnel {
         self.within_loss += other.within_loss;
         self.positive_ev += other.positive_ev;
         self.above_min_score += other.above_min_score;
+        self.above_min_pop += other.above_min_pop;
         self.chosen += other.chosen;
     }
 }

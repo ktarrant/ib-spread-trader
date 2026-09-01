@@ -35,6 +35,17 @@ pub struct RankingConfig {
     pub min_score: f64,
     /// Positive-expectancy floor, in dollars: expected P/L must exceed this.
     pub min_expected_pl: f64,
+    /// Entry gate on the model probability of profit: refuse a candidate whose
+    /// chance of clearing its round-trip cost is below this. `None` disables it.
+    ///
+    /// Distinct from ranking *by* probability. `metric = "prob_profit"` takes the
+    /// best odds on offer however poor they are; this refuses to open at all
+    /// below a floor, which is how a short-premium book is actually run — the
+    /// thesis is "this expires worthless", and a 55 % chance of that is not that
+    /// thesis. It is also independent of `min_score`, which floors expected value
+    /// per unit of risk: a candidate can clear the edge floor on a fat payoff it
+    /// rarely collects, and this refuses it.
+    pub min_prob_profit: Option<f64>,
     /// If set, close a position when the underlying reaches this quantile of the
     /// entry forecast in the trade's favour (e.g. 0.85 = the 85th percentile of
     /// the up-move for a bullish trade). Grounds the exit on the same forecast the
@@ -52,6 +63,7 @@ impl Default for RankingConfig {
             metric: RankMetric::ExpectedValue,
             min_score: 0.10,
             min_expected_pl: 0.0,
+            min_prob_profit: None,
             forecast_target_quantile: None,
             scorer_sample_per_bar: 0,
         }
@@ -204,6 +216,10 @@ pub fn rank(
         funnel.above_min_score += 1;
 
         let prob_profit = prob_profit(&candidate, dist, remaining_years, forward_scale);
+        if cfg.min_prob_profit.is_some_and(|floor| prob_profit < floor) {
+            continue;
+        }
+        funnel.above_min_pop += 1;
 
         let choice = RankedChoice {
             candidate,
@@ -359,6 +375,48 @@ mod tests {
         let (also_expected_pl, pop_key) = ranking_key(&candidate, &dist, 0.0, 1.0, &pop);
         assert!((also_expected_pl - 207.4).abs() < 1e-9, "expected P/L is the metric-free half");
         assert!((pop_key - 0.8).abs() < 1e-9, "prob_profit orders by the hit rate");
+    }
+
+    /// The entry gate a short-premium book wants: not "take the best odds
+    /// available" but "do not open at all below these odds". Independent of
+    /// `min_score`, which floors expected value per unit of risk.
+    #[test]
+    fn a_probability_floor_refuses_a_candidate_the_score_would_have_taken() {
+        // The bull call clears the EV floor comfortably at a 0.8 probability.
+        let dist = bullish_distribution();
+        let mut funnel = RankingFunnel::default();
+        let taken = rank(
+            vec![bull_call()],
+            &dist,
+            0.0,
+            1.0,
+            &RankingConfig {
+                min_prob_profit: Some(0.8),
+                ..RankingConfig::default()
+            },
+            &mut funnel,
+        );
+        assert!(taken.is_some(), "0.8 clears a floor of 0.8");
+        assert_eq!(funnel.above_min_pop, 1);
+
+        // Nudge the floor above it and the same candidate is refused, even
+        // though its expected P/L and score are unchanged.
+        let mut funnel = RankingFunnel::default();
+        let refused = rank(
+            vec![bull_call()],
+            &dist,
+            0.0,
+            1.0,
+            &RankingConfig {
+                min_prob_profit: Some(0.85),
+                ..RankingConfig::default()
+            },
+            &mut funnel,
+        );
+        assert!(refused.is_none(), "0.8 does not clear a floor of 0.85");
+        assert_eq!(funnel.above_min_score, 1, "it cleared the edge floor");
+        assert_eq!(funnel.above_min_pop, 0, "and fell out at the odds floor");
+        assert_eq!(funnel.chosen, 0);
     }
 
     #[test]

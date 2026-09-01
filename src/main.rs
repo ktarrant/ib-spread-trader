@@ -173,12 +173,19 @@ fn main() -> Result<()> {
                     skipped.join(", ")
                 ));
             }
+            // The resolved blocks, not the labels: a report describes the run
+            // that happened. `ib-option-viz` reads `config.model` / `config.exit`
+            // as tables, and a label there both breaks it and hides which
+            // candidate universe actually ran.
+            let reported_config = serde_json::to_value(strategy_config.resolved()?)?;
+            let labels = serde_json::to_value(strategy_config.labels())?;
             if let Some(dir) = &out {
                 report::write_csvs(dir, &built, &runs, &curve)?;
                 // Always write the full JSON (with trades) for downstream tools.
                 let mut full = serde_json::to_value(&built)?;
                 if let Some(obj) = full.as_object_mut() {
-                    obj.insert("config".into(), serde_json::to_value(&strategy_config)?);
+                    obj.insert("config".into(), reported_config.clone());
+                    obj.insert("labels".into(), labels.clone());
                 }
                 std::fs::write(
                     dir.join("backtest.json"),
@@ -195,7 +202,8 @@ fn main() -> Result<()> {
                 );
             }
             if let Some(object) = value.as_object_mut() {
-                object.insert("config".into(), serde_json::to_value(&strategy_config)?);
+                object.insert("config".into(), reported_config);
+                object.insert("labels".into(), labels);
                 if let Some(dir) = &out {
                     object.insert(
                         "csv_dir".into(),
