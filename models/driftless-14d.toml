@@ -1,0 +1,25 @@
+# driftless at a two-week horizon: no drift — a pure lognormal random walk at two weeks.
+#
+# The horizon belongs to the model, so this is a different forecaster from
+# driftless.toml and is validated at its own distance — see the CRPS skill in any
+# run's model_eval, which is the dense read and the one that matters here.
+#
+# A 14-day horizon forces execution.min_entry_days_before_expiry >= 14
+# (validate() enforces it, so a scored entry always gets its full horizon).
+[features]
+trend_fast = 10
+trend_slow = 30
+atr_period = 14
+realized_vol_period = 20
+skew_moneyness = 0.05
+
+[model]
+horizon_days = 14.0
+bars_per_year = 3276.0
+realized_vol_weight = 0.0
+fallback_vol = 0.30
+trend_weight = 0.0
+vwap_reversion = 0.0
+skew_weight = 0.0
+grid_sigma = 4.0
+grid_points = 101

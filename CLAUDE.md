@@ -540,6 +540,50 @@ Read the returns as a guardrail (35 trades, one expiry), but note the mechanism 
 supported twice over and independently — by P&L per lot across three sizing
 policies on identical trades, and by the within-sample score/outcome split.
 
+### Two weeks: the vol scales, the direction does not, and driftless starts trading
+
+The horizon belongs to the model, so `driftless-14d` and `mean-reversion-14d` are
+different forecasters and are evaluated at their own distance. A 2×2 over
+{7d, 14d} × {mean-reversion, driftless}, holding the `credit_pop` ranker, the
+adverse-forecast stop and flat sizing fixed — and holding
+`min_entry_days_before_expiry = 14` on **all four**, including the 7-day arms,
+because the 14-day horizon requires it and a shorter entry window would otherwise
+masquerade as a horizon effect:
+
+| arm | CRPS skill | dir % | coverage 50/80/90 | PIT mean | trades |
+|---|---|---|---|---|---|
+| 7d mean-reversion | **+0.0133** | 56.9 | 53/81/88 | 0.530 | 28 |
+| 7d driftless | −0.0007 | 49.1 | 53/81/88 | 0.527 | **2** |
+| 14d mean-reversion | +0.0051 | **51.6** | 54/82/90 | 0.562 | 23 |
+| 14d driftless | +0.0003 | 46.1 | 54/82/91 | 0.560 | 11 |
+
+Three findings, on 5 593–6 217 forecasts rather than on the trades:
+
+- **The vol scaling holds to two weeks.** Coverage at 14d (54/82/90) is as good as
+  at 7d and closer to nominal at the 90 % band. Nothing about extending the
+  horizon breaks the distribution, which is the precondition for the idea.
+- **The directional edge is gone, the distributional one is not quite.** 56.9 % →
+  **51.6 %** is a coin flip, which is what "decays by two weeks" meant. But CRPS
+  skill stays positive at +0.0051 — about 38 % of the 7-day value, and *not*
+  validated under leave-one-symbol-out, so treat it as a hint that the drift still
+  narrows the distribution usefully even where it cannot call direction.
+- **A longer horizon is what makes a driftless model trade at all.** 2 trades at
+  7d against 11 at 14d: with no directional view, almost nothing clears
+  `min_score` until the distribution is wide enough to price a credit into. If a
+  driftless credit book is the goal, the horizon is the knob that opens it.
+
+**A caution the PIT surfaces.** `pit_mean` runs 0.53 at 7d and **0.56** at 14d, on
+both models — realized prices land in the upper part of the forecast more often
+than they should, so the forecast is centred slightly *low* and more so the
+further out it reaches. The sample drifted up. For a credit book that is not
+neutral: it over-rates bear-call spreads and under-rates bull-put spreads, and the
+error grows with the horizon.
+
+Trade P&L separates none of this (−4.2 % to −5.2 % across all four, 2–28 trades).
+`models/driftless-14d.json` and `mean-reversion-14d.json` do not exist: neither
+label has been through `scripts/validate_model.py`, so neither is a *labeled*
+model in the sense the registry means.
+
 
 ## Test fixtures generate their own options
 
@@ -762,6 +806,7 @@ isolates that axis:
 | `credit_balanced.toml` | ranker | Reward/risk banded 0.40–0.70 with wider wings — payoff near half of max loss. |
 | `credit_balanced_stop.toml` / `credit_pop_stop.toml` | exit | The adverse-forecast stop on each credit entry. |
 | `credit_pop_stop_conviction.toml` / `_flat.toml` | portfolio | Score-weighted from one lot vs one lot flat — the arms that showed the score does not size. |
+| `credit_h7_mr` / `h7_drift` / `h14_mr` / `h14_drift` | model | The horizon × drift 2×2 on a common entry window. |
 
 All run as one shared $20k account (the default), so their P&L is comparable.
 
