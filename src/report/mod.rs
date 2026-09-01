@@ -491,6 +491,7 @@ fn reason_key(reason: ExitReason) -> &'static str {
         ExitReason::StopLoss => "stop_loss",
         ExitReason::ForecastTarget => "forecast_target",
         ExitReason::UnderlyingPastShortStrike => "underlying_past_short",
+        ExitReason::ForecastHorizon => "forecast_horizon",
         ExitReason::TimeDecay => "time_decay",
         ExitReason::BeforeEarnings => "before_earnings",
         ExitReason::BeforeExpiry => "before_expiry",

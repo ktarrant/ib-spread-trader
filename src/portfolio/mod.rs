@@ -25,7 +25,14 @@ pub enum ExitReason {
     /// entry used, and works for a naked long as well as a vertical.
     ForecastTarget,
     /// The underlying crossed the short strike — near max profit, close it.
+    /// Only for debit structures; a credit spread's short strike is a loss, not a
+    /// take-profit, so it is not closed on this.
     UnderlyingPastShortStrike,
+    /// The forecast window has elapsed — the position has been open at least as
+    /// long as the horizon it was scored to, so the forecast no longer speaks to
+    /// it. Closes credit spreads at the end of their full forecast duration and
+    /// stops anything else from drifting past the model's view.
+    ForecastHorizon,
     /// Too much of the time to expiry has elapsed.
     TimeDecay,
     /// Closed to avoid holding through an earnings announcement.

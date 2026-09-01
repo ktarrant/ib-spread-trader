@@ -336,6 +336,25 @@ limit order at a spread *price*, and no order can be placed that accounts for it
 own commission. Commissions are charged in full and shown in the net P&L; they
 are simply not what the trigger reads.
 
+### The short-strike exit is a debit take-profit, not a credit stop
+
+`underlying_past_short_strike` closes a position when the underlying reaches the
+short strike. For a **debit** vertical that is near max profit — take it. For a
+**credit** spread the short strike is the *loss* boundary, and a directional
+credit bet can be past it **at entry** (a bear-call with the short call already
+below spot), which would open and instantly close the trade for nothing but two
+crossings of the book. So the rule fires for **debit structures only**
+(`entry_debit > 0`); a naked long has no short leg and is unaffected either way.
+`a_credit_spread_never_closes_on_the_short_strike` pins this.
+
+Credit spreads instead run to the end of their **forecast window**:
+`close_after_forecast_horizon` closes a position once it has been open as long as
+`ranking.horizon_days` — the horizon it was scored to, after which the forecast no
+longer speaks to it. It keys off the scoring horizon directly (so the two can
+never drift apart) and applies to any structure, capping how long anything drifts
+past the model's view. It sits below the take-profit and stop in priority, so a
+winner or a real stop still fires first.
+
 ## Test fixtures generate their own options
 
 `engine::testing::snapshot_with` builds a real on-disk snapshot whose ladder is

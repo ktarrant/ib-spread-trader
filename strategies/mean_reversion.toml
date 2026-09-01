@@ -34,6 +34,7 @@ profit_target_pct = 50.0
 stop_loss_pct = 100.0
 close_before_earnings = true
 underlying_past_short_strike = true
+close_after_forecast_horizon = true
 
 [costs]
 commission_per_contract = 0.65

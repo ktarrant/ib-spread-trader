@@ -1,9 +1,10 @@
 //! When to close.
 //!
 //! All active rules are checked on every bar, OR'd — first to fire wins. The
-//! priority within a single bar is: profit target, underlying past short strike,
-//! stop loss, time decay, before-expiry hard cutoff. On a bar that satisfies
-//! more than one, a winner should not be logged as a stop-out.
+//! priority within a single bar is: profit target, forecast target, underlying
+//! past short strike (debit only), stop loss, forecast horizon, time decay,
+//! before-earnings, before-expiry. On a bar that satisfies more than one, a
+//! winner should not be logged as a stop-out.
 //!
 //! P&L rules read **gross** — exit credit minus entry debit, before commission.
 //! A profit target is a resting limit order at a spread *price*, and no order
@@ -24,7 +25,17 @@ pub struct ExitRules {
     /// Close once gross P&L falls to minus this percentage of the debit paid.
     pub stop_loss_pct: Option<f64>,
     /// Close when the underlying crosses the short strike — near max profit.
+    /// Applies to **debit** structures only: for a credit spread the short strike
+    /// is a loss boundary, not a take-profit, and the underlying can already be
+    /// past it at entry (a directional credit bet), which would open and instantly
+    /// close the trade. Credit spreads keep the position for the full forecast
+    /// window instead.
     pub underlying_past_short_strike: bool,
+    /// Close once the position has been open at least this many days — the length
+    /// of the forecast horizon it was scored to. `None` disables it. This is the
+    /// time cap that closes a credit spread at the end of its forecast window and
+    /// keeps any position from drifting past the model's view.
+    pub forecast_horizon_days: Option<f64>,
     /// Close after this percentage of the time from entry to expiry has elapsed.
     pub max_time_pct: Option<f64>,
     /// Close at least this many calendar days before expiration.
@@ -63,15 +74,18 @@ impl ExitRules {
             return Some(ExitReason::ForecastTarget);
         }
 
-        // 3. Underlying past short strike — near max profit, take it.
+        // 3. Underlying past short strike — near max profit, take it. Debit
+        //    structures only: for a credit spread this is a loss, not a profit,
+        //    and can already be true at entry.
         if self.underlying_past_short_strike
+            && position.entry_debit > 0.0
             && let Some(spot) = ctx.underlying_price
             && is_past_short_strike(&position.spread, spot)
         {
             return Some(ExitReason::UnderlyingPastShortStrike);
         }
 
-        // 3. Stop loss.
+        // 4. Stop loss.
         if let Some(pct) = self.stop_loss_pct
             && position.entry_debit > 0.0
             && ctx.gross_pnl <= -position.entry_debit * pct / 100.0
@@ -79,7 +93,14 @@ impl ExitRules {
             return Some(ExitReason::StopLoss);
         }
 
-        // 4. Time decay — too much of the life has been consumed.
+        // 5. Forecast horizon elapsed — the forecast window has closed, so the
+        //    model no longer speaks to the position. Closes credit spreads at the
+        //    end of their full forecast duration.
+        if let Some(reason) = forecast_horizon_exit(self, position.opened_at, ctx.bar_ts) {
+            return Some(reason);
+        }
+
+        // 6. Time decay — too much of the life has been consumed.
         if let Some(max_pct) = self.max_time_pct {
             let total = (ctx.expiry_instant - position.opened_at).num_seconds() as f64;
             let elapsed = (ctx.bar_ts - position.opened_at).num_seconds() as f64;
@@ -88,14 +109,14 @@ impl ExitRules {
             }
         }
 
-        // 5. Before-earnings — close before the announcement moves prices.
+        // 7. Before-earnings — close before the announcement moves prices.
         if self.close_before_earnings
             && let Some(reason) = earnings_exit(ctx.bar_ts, ctx.next_earnings)
         {
             return Some(reason);
         }
 
-        // 6. Before-expiry hard cutoff — avoid exercise/assignment risk.
+        // 8. Before-expiry hard cutoff — avoid exercise/assignment risk.
         if let Some(days) = self.min_days_before_expiry {
             let remaining = (ctx.expiry_instant - ctx.bar_ts).num_days();
             if remaining < days as i64 {
@@ -112,10 +133,14 @@ impl ExitRules {
     /// consistent with `triggered()`.
     pub fn underlying_price_triggered(
         &self,
-        spread: &crate::spread::Spread,
+        position: &OpenPosition,
         spot: f64,
     ) -> Option<ExitReason> {
-        if self.underlying_past_short_strike && is_past_short_strike(spread, spot) {
+        // Debit structures only — same rule as `triggered`.
+        if self.underlying_past_short_strike
+            && position.entry_debit > 0.0
+            && is_past_short_strike(&position.spread, spot)
+        {
             return Some(ExitReason::UnderlyingPastShortStrike);
         }
         None
@@ -133,6 +158,10 @@ impl ExitRules {
         expiry_instant: DateTime<Utc>,
         next_earnings: Option<&EarningsEvent>,
     ) -> Option<ExitReason> {
+        if let Some(reason) = forecast_horizon_exit(self, opened_at, bar_ts) {
+            return Some(reason);
+        }
+
         if let Some(max_pct) = self.max_time_pct {
             let total = (expiry_instant - opened_at).num_seconds() as f64;
             let elapsed = (bar_ts - opened_at).num_seconds() as f64;
@@ -156,6 +185,18 @@ impl ExitRules {
 
         None
     }
+}
+
+/// Close once `bar_ts` is at least `forecast_horizon_days` after `opened_at` —
+/// the forecast window the position was scored to has elapsed.
+fn forecast_horizon_exit(
+    rules: &ExitRules,
+    opened_at: DateTime<Utc>,
+    bar_ts: DateTime<Utc>,
+) -> Option<ExitReason> {
+    let days = rules.forecast_horizon_days?;
+    let elapsed_days = (bar_ts - opened_at).num_seconds() as f64 / 86_400.0;
+    (elapsed_days >= days).then_some(ExitReason::ForecastHorizon)
 }
 
 /// Close if earnings are tonight (`after_close` on today) or tomorrow morning
@@ -469,6 +510,82 @@ mod tests {
         );
     }
 
+    /// The bug this fixes: a credit spread whose short strike the underlying is
+    /// already past (a directional credit bet) must NOT close on the short-strike
+    /// exit — for a credit that strike is a loss, not a take-profit.
+    #[test]
+    fn a_credit_spread_never_closes_on_the_short_strike() {
+        // A bear call credit spread: short 750 call, long 755 call, taken for a
+        // $1.30 credit. The short strike (750) is below spot from the start.
+        let spread = Spread::new(
+            "SPY",
+            vec![
+                Leg {
+                    contract_id: 1,
+                    strike: 750.0,
+                    right: OptionRight::Call,
+                    side: Side::Short,
+                    quantity: 1,
+                },
+                Leg {
+                    contract_id: 2,
+                    strike: 755.0,
+                    right: OptionRight::Call,
+                    side: Side::Long,
+                    quantity: 1,
+                },
+            ],
+        );
+        let credit = OpenPosition {
+            id: 1,
+            opened_at: Utc.with_ymd_and_hms(2026, 7, 1, 13, 30, 0).unwrap(),
+            entry_debit: -130.0, // negative: a credit was received
+            entry_commission: 1.30,
+            max_profit: Some(130.0),
+            max_loss: Some(370.0),
+            spread,
+            prediction: None,
+            forecast_target: None,
+        };
+        let rules = ExitRules {
+            underlying_past_short_strike: true,
+            ..Default::default()
+        };
+        // Spot 760 is well past the short strike, yet nothing fires — a credit
+        // spread is held, not closed, on the short strike.
+        assert_eq!(rules.triggered(&credit, &ctx(0.0, 760.0)), None);
+        assert_eq!(rules.underlying_price_triggered(&credit, 760.0), None);
+    }
+
+    #[test]
+    fn the_forecast_horizon_closes_a_position_after_its_window() {
+        let rules = ExitRules {
+            forecast_horizon_days: Some(7.0),
+            ..Default::default()
+        };
+        let p = position(); // opened Jul 1 13:30
+        // Six days in: still inside the forecast window.
+        let inside = ExitContext {
+            gross_pnl: 0.0,
+            underlying_price: Some(751.0),
+            bar_ts: Utc.with_ymd_and_hms(2026, 7, 7, 13, 30, 0).unwrap(),
+            expiry_instant: expiry_instant(),
+            next_earnings: None,
+        };
+        assert_eq!(rules.triggered(&p, &inside), None);
+        // Just past seven days: the forecast window has elapsed.
+        let elapsed = ExitContext {
+            bar_ts: Utc.with_ymd_and_hms(2026, 7, 8, 14, 0, 0).unwrap(),
+            ..inside
+        };
+        assert_eq!(rules.triggered(&p, &elapsed), Some(ExitReason::ForecastHorizon));
+        // It also fires on the quote-unavailable path.
+        assert_eq!(
+            rules.time_triggered(p.opened_at, elapsed.bar_ts, expiry_instant(), None),
+            Some(ExitReason::ForecastHorizon)
+        );
+    }
+
     #[test]
     fn profit_target_beats_underlying_past_short_strike() {
         let rules = ExitRules {
@@ -644,11 +761,11 @@ mod tests {
         };
         let p = position(); // short call at 755
         assert_eq!(
-            rules.underlying_price_triggered(&p.spread, 754.99),
+            rules.underlying_price_triggered(&p, 754.99),
             None,
         );
         assert_eq!(
-            rules.underlying_price_triggered(&p.spread, 755.01),
+            rules.underlying_price_triggered(&p, 755.01),
             Some(ExitReason::UnderlyingPastShortStrike),
         );
     }
@@ -658,7 +775,7 @@ mod tests {
         let rules = ExitRules::default();
         let p = position();
         assert_eq!(
-            rules.underlying_price_triggered(&p.spread, 800.0),
+            rules.underlying_price_triggered(&p, 800.0),
             None,
         );
     }

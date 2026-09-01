@@ -1067,7 +1067,7 @@ fn compute_exits(
                 let reason = bar
                     .underlying
                     .price()
-                    .and_then(|spot| exits.underlying_price_triggered(&position.spread, spot))
+                    .and_then(|spot| exits.underlying_price_triggered(position, spot))
                     .or_else(|| {
                         exits.time_triggered(
                             position.opened_at,

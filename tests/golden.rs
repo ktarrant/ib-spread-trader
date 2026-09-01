@@ -231,37 +231,35 @@ fn the_driftless_model_reproduces_its_recorded_run() {
     let totals = &built.totals;
 
     assert_eq!(totals.symbols, 12);
-    assert_eq!(totals.trades, 32);
+    // Credit spreads are held the full forecast window now (the short-strike exit
+    // no longer closes them early), so the single position slot turns over slowly:
+    // 4 trades, all credit, all closing on the forecast horizon — and holding them
+    // full is what makes them a profitable theta harvest.
+    assert_eq!(totals.trades, 4);
 
-    // The candidate funnel: enumerated -> priceable -> liquid -> within-loss ->
-    // positive-EV -> above-min-score -> chosen. Every vertical is bounded, so
-    // priceable equals enumerated.
     let funnel = &totals.census.ranking;
-    assert_eq!(funnel.enumerated, 8_202_635);
-    assert_eq!(funnel.priceable, 8_202_635);
-    assert_eq!(funnel.liquid, 8_011_782);
-    assert_eq!(funnel.within_loss, 2_266_894);
-    assert_eq!(funnel.positive_ev, 4_285);
-    assert_eq!(funnel.above_min_score, 384);
-    assert_eq!(funnel.chosen, 32, "chosen must equal the trade count");
+    assert_eq!(funnel.enumerated, 7_892_475);
+    assert_eq!(funnel.priceable, 7_892_475);
+    assert_eq!(funnel.liquid, 7_701_882);
+    assert_eq!(funnel.within_loss, 2_158_733);
+    assert_eq!(funnel.positive_ev, 1_292);
+    assert_eq!(funnel.above_min_score, 20);
+    assert_eq!(funnel.chosen, 4, "chosen must equal the trade count");
 
     // A random walk has no directional edge (~49% hit-rate), so it neither beats
-    // nor clearly loses to the null on CRPS — a break-even-ish theta harvester.
+    // nor clearly loses to the null on CRPS.
     let pooled = &built.model_eval.as_ref().unwrap().pooled;
     assert!(pooled.crps_skill.abs() < 0.01, "skill {}", pooled.crps_skill);
 
-    // Everything exits on a quote; settlement is zero.
-    assert!((totals.total_pnl - -149.20).abs() < 0.01, "{}", totals.total_pnl);
-    assert!((totals.traded_pnl - -149.20).abs() < 0.01, "{}", totals.traded_pnl);
+    assert!((totals.total_pnl - 385.60).abs() < 0.01, "{}", totals.total_pnl);
     assert!(totals.settled_pnl.abs() < 0.01, "{}", totals.settled_pnl);
-    // The credit spreads close when the underlying reaches the short strike.
-    assert_eq!(totals.exits_by_reason["underlying_past_short"], 31);
-    // The forecast target rides on every ranked position for the chart.
+    // Every credit spread runs to the end of its forecast window.
+    assert_eq!(totals.exits_by_reason["forecast_horizon"], 4);
     assert!(built.trades.iter().all(|t| t.forecast_target.is_some()));
 
-    // Driftless is credit-heavy but both orientations trade (30 credit, 2 debit).
+    // All four picks are credit spreads (the driftless model's theta harvest).
     let credits = built.trades.iter().filter(|t| t.entry_debit < 0.0).count();
-    assert!(credits >= 1 && credits < built.trades.len(), "credits {credits}");
+    assert_eq!(credits, 4);
 
     // Cash, the trade log and the curve must agree.
     let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
@@ -290,11 +288,11 @@ fn the_mean_reversion_model_reproduces_its_recorded_run() {
     let totals = &built.totals;
 
     assert_eq!(totals.symbols, 12);
-    assert_eq!(totals.trades, 26);
+    assert_eq!(totals.trades, 51);
 
     let funnel = &totals.census.ranking;
-    assert_eq!(funnel.enumerated, 1_934_541);
-    assert_eq!(funnel.chosen, 26);
+    assert_eq!(funnel.enumerated, 3_283_433);
+    assert_eq!(funnel.chosen, 51);
 
     // The forecast beats the null: positive CRPS skill and a >50% directional
     // hit-rate. This is the whole reason the mean-reversion model exists.
@@ -306,24 +304,23 @@ fn the_mean_reversion_model_reproduces_its_recorded_run() {
         pooled.directional_hit_rate
     );
 
-    // The directional forecast routes selection into debit spreads and naked
-    // longs — no credit spreads — the diversified mix the driftless model cannot
-    // produce. (P&L on ~26 trades is noise; the forecast is the validated part.)
-    // A naked long is a single leg (no short strike, so no '-' in the label).
+    // The directional forecast routes selection into a diversified mix — debit
+    // spreads (34) and naked longs (12) that the driftless credit harvester never
+    // picks, plus some credit spreads (5) held their full window. All three
+    // structures trade. (P&L on ~51 trades is noise; the forecast is the validated
+    // part.) A naked long is a single leg — no short strike, so no '-' in the label.
     let naked = built.trades.iter().filter(|t| !t.description.contains('-')).count();
     let debit = built
         .trades
         .iter()
         .filter(|t| t.entry_debit > 0.0 && t.description.contains('-'))
         .count();
-    assert!(naked > 0, "naked longs are chosen");
-    assert!(debit > 0, "debit spreads are chosen");
-    assert_eq!(
-        built.trades.iter().filter(|t| t.entry_debit < 0.0).count(),
-        0,
-        "no credit spreads under the directional forecast"
-    );
-    assert!((totals.total_pnl - -630.90).abs() < 0.01, "{}", totals.total_pnl);
+    let credit = built.trades.iter().filter(|t| t.entry_debit < 0.0).count();
+    assert!(naked > 0 && debit > 0, "naked {naked} debit {debit}");
+    assert!(debit > naked && debit > credit, "debit spreads dominate");
+    // Most positions run to the end of their forecast window.
+    assert!(totals.exits_by_reason["forecast_horizon"] > totals.trades / 2);
+    assert!((totals.total_pnl - -1141.00).abs() < 0.01, "{}", totals.total_pnl);
     assert!(totals.settled_pnl.abs() < 0.01, "{}", totals.settled_pnl);
 
     let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
@@ -364,8 +361,8 @@ fn the_shared_account_runs_all_symbols_against_one_pool() {
     // directional model carries naked longs, so the curve is more volatile than
     // the driftless credit harvester — the sizing caps bound it, not smooth it.
     assert!((totals.capital_deployed - 20_000.0).abs() < 1e-6);
-    assert_eq!(totals.trades, 26);
-    assert!((totals.total_pnl - -2734.70).abs() < 0.01, "{}", totals.total_pnl);
+    assert_eq!(totals.trades, 51);
+    assert!((totals.total_pnl - -5510.10).abs() < 0.01, "{}", totals.total_pnl);
     assert!(totals.settled_pnl.abs() < 0.01, "{}", totals.settled_pnl);
     // The lot cap binds before capital, so the account never fills and no
     // opportunity is turned away for lack of capital.

@@ -324,6 +324,11 @@ pub struct ExitConfig {
     /// Close before earnings announcements to avoid the vol event.
     #[serde(default)]
     pub close_before_earnings: bool,
+    /// Close once the position has been open as long as the forecast horizon
+    /// (`ranking.horizon_days`). Ranked mode only — the forecast window is what it
+    /// keys off. Holds a credit spread its full forecast duration, then closes it.
+    #[serde(default)]
+    pub close_after_forecast_horizon: bool,
     /// Close at least this many calendar days before expiration.
     #[serde(default = "default_min_days_before_expiry")]
     pub min_days_before_expiry: Option<u32>,
@@ -337,6 +342,7 @@ impl Default for ExitConfig {
             underlying_past_short_strike: false,
             max_time_pct: None,
             close_before_earnings: false,
+            close_after_forecast_horizon: false,
             min_days_before_expiry: default_min_days_before_expiry(),
         }
     }
@@ -769,6 +775,12 @@ impl StrategyConfig {
                 profit_target_pct: self.exit.profit_target_pct,
                 stop_loss_pct: self.exit.stop_loss_pct,
                 underlying_past_short_strike: self.exit.underlying_past_short_strike,
+                // The forecast-horizon exit keys off the scoring horizon itself,
+                // so it comes straight from the ranking config when enabled.
+                forecast_horizon_days: self
+                    .exit
+                    .close_after_forecast_horizon
+                    .then_some(self.ranking.horizon_days),
                 max_time_pct: self.exit.max_time_pct,
                 close_before_earnings: self.exit.close_before_earnings,
                 min_days_before_expiry: self.exit.min_days_before_expiry,
