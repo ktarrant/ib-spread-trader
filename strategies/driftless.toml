@@ -9,12 +9,10 @@
 name    = "driftless"
 symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR"]
 expiry  = "2026-08-21"
-initial_cash = 100000.0
 mode    = "ranked"
 
 [execution]
 timing = "next_bar"
-max_open_positions = 1
 earnings_blackout_days = 3
 
 [exit]

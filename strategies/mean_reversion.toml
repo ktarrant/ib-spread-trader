@@ -12,13 +12,17 @@
 # leave-one-symbol-out. v1's momentum drift did the opposite and lost. Short
 # horizons are the reversion regime; momentum needs weeks-to-months.
 #
-# This is the base config; driftless.toml, prob_profit.toml and shared_20k.toml
-# are single-axis variations of it (model, scorer, and account respectively).
+# This is the base config; driftless.toml (model), prob_profit.toml (scorer), and
+# exit_pop_trailing.toml / exit_momentum.toml (exit) are single-axis variations.
+#
+# Account: every backtest runs as one shared $20k pool by default (account =
+# "shared", initial_cash = 20000, with score-weighted sizing at 10%/25%/5-lot) —
+# a realistic limited-capital account, not the sum of per-symbol sleeves. All of
+# that is inherited from the code defaults; a config need only override to differ.
 
 name    = "mean-reversion"
 symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR"]
 expiry  = "2026-08-21"
-initial_cash = 100000.0
 mode    = "ranked"
 
 # Close well before the tape stops so a position exits on a real quote. The
@@ -26,7 +30,6 @@ mode    = "ranked"
 # always gets the full horizon (validate() enforces blackout >= horizon).
 [execution]
 timing = "next_bar"
-max_open_positions = 1
 earnings_blackout_days = 3
 
 [exit]

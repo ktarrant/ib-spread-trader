@@ -540,7 +540,9 @@ isolates that axis:
 | `mean_reversion.toml` | — | The main model (IV vol, `trend_weight -0.5`, 1-week horizon, EV scorer). Debit + naked mix. |
 | `driftless.toml` | model | The honest random-walk null (`trend_weight 0`). Credit-heavy theta harvest, ~0 skill. |
 | `prob_profit.toml` | scorer | `metric = "prob_profit"` — rewards hit-rate over magnitude. |
-| `shared_20k.toml` | account | The main model as one shared $20k account with risk+lot sizing. |
+| `exit_pop_trailing.toml` / `exit_momentum.toml` | exit | Structure-scoped give-ups: live-POP on debits, trailing vs momentum on nakeds. |
+
+All run as one shared $20k account (the default), so their P&L is comparable.
 
 `scripts/compare_strategies.py` runs them all and tabulates the forecast headline
 (CRPS skill, directional hit-rate) beside the trade guardrail (return, drawdown,
@@ -550,19 +552,24 @@ code stays dormant behind `Strategy::Staged` and keeps its inline unit tests. A
 future **RSI-oversold** model would reuse `indicators::Rsi` (independent of the
 staged pipeline) as a new drift term, validated on the same null-beating gate.
 
-## Two account models: per-symbol (default) and one shared pool
+## The account model: one shared pool is the default
 
-`account = "shared"` in a strategy TOML runs **every symbol against one
-`initial_cash`**, instead of the default where each symbol gets its own. The
-default (`per_symbol`) is byte-identical to before — `run_symbol` per symbol,
-`report::build` summing them — so every golden test is untouched.
+A backtest runs **every symbol against one `initial_cash`** — the default is
+`account = "shared"`, `initial_cash = 20000`, with score-weighted sizing
+(`10%/25%/5-lot`), all from the code defaults so a config need only override to
+differ. `account = "per_symbol"` opts back into an account per symbol (`run_symbol`
+each, `report::build` summing them); it still exists, but is no longer the default.
 
-The shared account exists because per-symbol sizing was quietly running *N*
-independent accounts: a `$20k` run was `$20k × 9 symbols ≈ $180k`, and the
+The shared account is the default because per-symbol sizing was quietly running
+*N* independent accounts: a `$20k` run was `$20k × 9 symbols ≈ $180k`, and the
 headline was their sum. Only a shared pool answers "what does one limited-capital
-account do". `run_shared` iterates a **single global timeline merged across all
-symbols** — sequential-per-symbol cannot model two names competing for the same
-dollars *at the same time* (it either double-counts or serializes them).
+account do", so it is the honest basis for comparing strategies. `run_shared`
+iterates a **single global timeline merged across all symbols** —
+sequential-per-symbol cannot model two names competing for the same dollars *at
+the same time* (it either double-counts or serializes them). The defaults live in
+`config.rs`: `AccountMode::Shared`, `default_cash = 20000`, `max_open_positions`
+resolved high for shared, and a default `SizingConfig` applied for a shared ranked
+account.
 
 Per timestamp, in order: execute due closes (frees capital) → fund the due opens
 **best-score-first** across symbols, each sized at fill against the capital still
@@ -595,11 +602,10 @@ name (`risk_per_position`, scaled by score up to `max_risk_per_position`) and a
 **lot cap** (`max_lots`) bounds fill size — the risk cap binds on expensive
 spreads, the lot cap on cheap ones, so neither a single name nor a single fill
 runs away. There is no market-impact model, so the lot cap is the stand-in that
-keeps a large fill from clearing at the one-lot quote. `shared_20k.toml` runs the
-main (mean-reversion) model as one shared $20k account at 10%/25%/5-lot. The caps
-*bound* the account, they do not smooth it: the directional model carries naked
-longs, so its curve is more volatile than the driftless credit harvester's (~13%
-drawdown) that the sizing was first tuned against.
+keeps a large fill from clearing at the one-lot quote. Every backtest is this
+shared $20k account at 10%/25%/5-lot by default. The caps *bound* the account,
+they do not smooth it: the directional model carries naked longs, so its curve is
+more volatile than a pure credit harvester's.
 
 ## Conventions from the capture side that this repo must not re-learn
 
@@ -630,7 +636,7 @@ drawdown) that the sizing was first tuned against.
 
 `tests/golden.rs` pins values confirmed by hand: SPY's parity forward at a known
 bar, the quality account, and the full runs of the ranked variants
-(`driftless`, `mean_reversion`, `shared_20k`) down to the cent — funnel counts,
+(`driftless`, `mean_reversion`, `exit_pop_trailing`) down to the cent — funnel counts,
 P&L, structure mix, and the forecast-eval sign (driftless ~0 skill,
 mean-reversion > 0). They are deterministic.
 

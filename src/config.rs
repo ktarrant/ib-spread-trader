@@ -88,10 +88,12 @@ pub enum StrategyMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountMode {
-    /// Each symbol runs against its own `initial_cash`. The historical default.
-    #[default]
+    /// Each symbol runs against its own `initial_cash`.
     PerSymbol,
     /// All symbols share one `initial_cash`, competing for it concurrently.
+    /// The default: one realistic limited-capital account is the honest basis
+    /// for comparing strategies, not the sum of N independent per-symbol runs.
+    #[default]
     Shared,
 }
 
@@ -99,7 +101,9 @@ fn default_name() -> String {
     "unnamed".to_string()
 }
 fn default_cash() -> f64 {
-    100_000.0
+    // A single shared account, so a realistic limited-capital figure rather than
+    // a per-symbol sleeve.
+    20_000.0
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -255,8 +259,11 @@ pub struct ExecutionConfig {
     pub max_debit: Option<f64>,
     #[serde(default)]
     pub timing: Timing,
-    #[serde(default = "default_max_open")]
-    pub max_open_positions: usize,
+    /// Account-wide cap on open positions. Absent resolves by account mode: a
+    /// per-symbol account caps at 1 (in-or-out), a shared account lifts it so
+    /// capital — not a position count — is the binding limit.
+    #[serde(default)]
+    pub max_open_positions: Option<usize>,
     /// Cap on positions open in a single symbol at once. Absent leaves the
     /// account-wide cap the only limit; a shared account defaults it to 1 (so
     /// capital spreads across names) unless set here.
@@ -277,9 +284,6 @@ pub struct ExecutionConfig {
 fn default_tolerance() -> f64 {
     0.07
 }
-fn default_max_open() -> usize {
-    1
-}
 // Default expiry rules for every strategy: close well before the option tape
 // stops so a position exits on a real quote rather than settling at intrinsic,
 // and refuse entries too close to expiry to open one that the before-expiry exit
@@ -298,7 +302,7 @@ impl Default for ExecutionConfig {
             delta_tolerance: default_tolerance(),
             max_debit: None,
             timing: Timing::default(),
-            max_open_positions: default_max_open(),
+            max_open_positions: None,
             max_positions_per_symbol: None,
             min_entry_days_before_expiry: default_min_entry_days_before_expiry(),
             earnings_blackout_days: None,
@@ -381,13 +385,13 @@ pub struct SizingConfig {
 
 impl Default for SizingConfig {
     fn default() -> Self {
-        // A ten-position baseline at the floor score, scaling toward a
-        // quarter-account cap for the strongest ideas.
+        // The shared-account default: a ~ten-position baseline at the floor
+        // score scaling toward a quarter-account cap, with a 5-lot fill cap.
         Self {
             risk_per_position: 0.10,
             max_risk_per_position: 0.25,
             baseline_score: 0.02,
-            max_lots: None,
+            max_lots: Some(5),
         }
     }
 }
@@ -818,7 +822,14 @@ impl StrategyConfig {
                 close_before_earnings: self.exit.close_before_earnings,
                 min_days_before_expiry: self.exit.min_days_before_expiry,
             },
-            max_open_positions: self.execution.max_open_positions,
+            // Absent resolves by account: a shared account lets capital bind, a
+            // per-symbol account is in-or-out.
+            max_open_positions: self.execution.max_open_positions.unwrap_or(
+                match self.account {
+                    AccountMode::Shared => 1_000,
+                    AccountMode::PerSymbol => 1,
+                },
+            ),
             // A shared account defaults to one position per symbol so capital
             // spreads across names; an explicit config value still wins.
             max_positions_per_symbol: self.execution.max_positions_per_symbol.or(
@@ -829,9 +840,18 @@ impl StrategyConfig {
             ),
             min_entry_days_before_expiry: self.execution.min_entry_days_before_expiry,
             earnings_blackout_days: self.execution.earnings_blackout_days,
-            // Validated in `validate()` (called by `load`), so `ok()` here only
-            // ever drops a sizing block a hand-built config never validated.
-            sizing: self.sizing.as_ref().and_then(|s| s.to_runtime().ok()),
+            // A shared ranked account is sized by default (the "$20k pool"
+            // approach); an explicit [sizing] block still wins, and the
+            // per-symbol path stays unsized unless a block is given. Validated in
+            // `validate()`, so `ok()` only drops a hand-built unvalidated block.
+            sizing: self
+                .sizing
+                .as_ref()
+                .and_then(|s| s.to_runtime().ok())
+                .or_else(|| {
+                    (self.account == AccountMode::Shared && self.mode == StrategyMode::Ranked)
+                        .then(|| SizingConfig::default().to_runtime().expect("valid default"))
+                }),
         }
     }
 }
@@ -896,7 +916,9 @@ commission_per_contract = 0.65
             toml::from_str("symbols = [\"SPY\"]\nexpiry = \"2026-08-21\"").unwrap();
         config.validate().unwrap();
 
-        assert_eq!(config.initial_cash, 100_000.0);
+        // The default is one shared $20k account.
+        assert_eq!(config.initial_cash, 20_000.0);
+        assert_eq!(config.account, AccountMode::Shared);
         assert!(matches!(
             config.signal,
             SignalConfig::RsiCross { period: 14, level } if level == 30.0

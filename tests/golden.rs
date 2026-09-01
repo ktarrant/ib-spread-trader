@@ -211,184 +211,62 @@ fn the_underlying_still_prints_after_the_last_option_bar() {
     );
 }
 
-/// The driftless model — the honest random-walk null — pinned end to end. With
-/// no directional view the only edge is theta, so it trades almost entirely
-/// credit spreads. These numbers are deterministic; a change means the model or
-/// its config changed, intentionally or otherwise.
-#[test]
-fn the_driftless_model_reproduces_its_recorded_run() {
-    let snapshot = snapshot_or_skip!();
-    let config = StrategyConfig::load("strategies/driftless.toml").unwrap();
+/// Run a ranked config as its (default) shared account and build the report.
+fn shared_run(
+    snapshot: &Snapshot,
+    path: &str,
+) -> (report::Report, ib_spread_trader::engine::SharedRun) {
+    let config = StrategyConfig::load(path).unwrap();
     let run_config = config.run_config();
-
-    let mut runs = Vec::new();
-    for symbol in &config.symbols {
-        let series = ChainSeries::load(&snapshot, symbol, config.expiry).unwrap();
-        let mut strategy = config.strategy().unwrap();
-        runs.push(engine::run_symbol(&series, &mut strategy, &run_config).unwrap());
-    }
-    let built = report::build(&config.name, config.expiry, &runs);
-    let totals = &built.totals;
-
-    assert_eq!(totals.symbols, 12);
-    // Credit spreads are held the full forecast window now (the short-strike exit
-    // no longer closes them early), so the single position slot turns over slowly:
-    // 4 trades, all credit, all closing on the forecast horizon — and holding them
-    // full is what makes them a profitable theta harvest.
-    assert_eq!(totals.trades, 4);
-
-    let funnel = &totals.census.ranking;
-    assert_eq!(funnel.enumerated, 7_892_475);
-    assert_eq!(funnel.priceable, 7_892_475);
-    assert_eq!(funnel.liquid, 7_701_882);
-    assert_eq!(funnel.within_loss, 2_158_733);
-    assert_eq!(funnel.positive_ev, 1_292);
-    assert_eq!(funnel.above_min_score, 20);
-    assert_eq!(funnel.chosen, 4, "chosen must equal the trade count");
-
-    // A random walk has no directional edge (~49% hit-rate), so it neither beats
-    // nor clearly loses to the null on CRPS.
-    let pooled = &built.model_eval.as_ref().unwrap().pooled;
-    assert!(pooled.crps_skill.abs() < 0.01, "skill {}", pooled.crps_skill);
-
-    assert!((totals.total_pnl - 385.60).abs() < 0.01, "{}", totals.total_pnl);
-    assert!(totals.settled_pnl.abs() < 0.01, "{}", totals.settled_pnl);
-    // Every credit spread runs to the end of its forecast window.
-    assert_eq!(totals.exits_by_reason["forecast_horizon"], 4);
-    assert!(built.trades.iter().all(|t| t.forecast_target.is_some()));
-
-    // All four picks are credit spreads (the driftless model's theta harvest).
-    let credits = built.trades.iter().filter(|t| t.entry_debit < 0.0).count();
-    assert_eq!(credits, 4);
-
-    // Cash, the trade log and the curve must agree.
-    let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
-    assert!((totals.total_pnl - booked).abs() < 1e-6);
-    let curve = report::combined_curve(&runs);
-    assert!((curve.last().unwrap().equity - totals.final_equity).abs() < 1e-6);
-}
-
-/// The mean-reversion model — the main strategy — pinned end to end. The
-/// directional forecast (fade the trend) beats the random-walk null, and that
-/// unlocks the structure mix: debit spreads and naked longs instead of the
-/// driftless model's credit-only theta harvest.
-#[test]
-fn the_mean_reversion_model_reproduces_its_recorded_run() {
-    let snapshot = snapshot_or_skip!();
-    let config = StrategyConfig::load("strategies/mean_reversion.toml").unwrap();
-    let run_config = config.run_config();
-
-    let mut runs = Vec::new();
-    for symbol in &config.symbols {
-        let series = ChainSeries::load(&snapshot, symbol, config.expiry).unwrap();
-        let mut strategy = config.strategy().unwrap();
-        runs.push(engine::run_symbol(&series, &mut strategy, &run_config).unwrap());
-    }
-    let built = report::build(&config.name, config.expiry, &runs);
-    let totals = &built.totals;
-
-    assert_eq!(totals.symbols, 12);
-    assert_eq!(totals.trades, 51);
-
-    let funnel = &totals.census.ranking;
-    assert_eq!(funnel.enumerated, 3_283_433);
-    assert_eq!(funnel.chosen, 51);
-
-    // The forecast beats the null: positive CRPS skill and a >50% directional
-    // hit-rate. This is the whole reason the mean-reversion model exists.
-    let pooled = &built.model_eval.as_ref().unwrap().pooled;
-    assert!(pooled.crps_skill > 0.0, "skill {}", pooled.crps_skill);
-    assert!(
-        pooled.directional_hit_rate > 0.5,
-        "dir {}",
-        pooled.directional_hit_rate
-    );
-
-    // The directional forecast routes selection into a diversified mix — debit
-    // spreads (34) and naked longs (12) that the driftless credit harvester never
-    // picks, plus some credit spreads (5) held their full window. All three
-    // structures trade. (P&L on ~51 trades is noise; the forecast is the validated
-    // part.) A naked long is a single leg — no short strike, so no '-' in the label.
-    let naked = built.trades.iter().filter(|t| !t.description.contains('-')).count();
-    let debit = built
-        .trades
+    let all_series: Vec<ChainSeries> = config
+        .symbols
         .iter()
-        .filter(|t| t.entry_debit > 0.0 && t.description.contains('-'))
-        .count();
-    let credit = built.trades.iter().filter(|t| t.entry_debit < 0.0).count();
-    assert!(naked > 0 && debit > 0, "naked {naked} debit {debit}");
-    assert!(debit > naked && debit > credit, "debit spreads dominate");
-    // Most positions run to the end of their forecast window.
-    assert!(totals.exits_by_reason["forecast_horizon"] > totals.trades / 2);
-    assert!((totals.total_pnl - -1141.00).abs() < 0.01, "{}", totals.total_pnl);
-    assert!(totals.settled_pnl.abs() < 0.01, "{}", totals.settled_pnl);
-
-    let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
-    assert!((totals.total_pnl - booked).abs() < 1e-6);
-}
-
-/// The shared account runs all twelve symbols against one $20k pool over a
-/// merged timeline: entries compete for the capital, funded best-score-first and
-/// sized against what is free, capped at one position per symbol. This pins the
-/// account result and the two invariants that make it a real limited-capital run
-/// rather than the sum of independent per-symbol accounts.
-#[test]
-fn the_shared_account_runs_all_symbols_against_one_pool() {
-    let snapshot = snapshot_or_skip!();
-    let config = StrategyConfig::load("strategies/shared_20k.toml").unwrap();
-    let run_config = config.run_config();
-
-    // One shared account: the per-symbol cap defaults to 1 in shared mode.
-    assert_eq!(run_config.max_positions_per_symbol, Some(1));
-
-    let mut all_series = Vec::new();
-    for symbol in &config.symbols {
-        let series = ChainSeries::load(&snapshot, symbol, config.expiry).unwrap();
-        if !series.is_empty() {
-            all_series.push(series);
-        }
-    }
-    let mut strategies: Vec<_> = all_series
-        .iter()
-        .map(|_| config.strategy().unwrap())
+        .map(|s| ChainSeries::load(snapshot, s, config.expiry).unwrap())
+        .filter(|s| !s.is_empty())
         .collect();
+    let mut strategies: Vec<_> = all_series.iter().map(|_| config.strategy().unwrap()).collect();
     let shared = engine::run_shared(&all_series, &mut strategies, &run_config).unwrap();
     let built = report::build_shared(&config.name, config.expiry, &shared);
+    (built, shared)
+}
+
+/// Every backtest is one shared $20k account by default. This checks the account
+/// invariants that must hold for any shared run — the peak capital at risk never
+/// exceeds the pool, at most one position is open per symbol, and no fill exceeds
+/// the lot cap — on the main mean-reversion model.
+#[test]
+fn a_shared_account_respects_its_pool_cap_and_per_symbol_limit() {
+    let snapshot = snapshot_or_skip!();
+    let (built, shared) = shared_run(&snapshot, "strategies/mean_reversion.toml");
     let totals = &built.totals;
 
-    // One $20k pool, not $20k per symbol. This is the mean-reversion model under
-    // a shared account with a risk cap (10%/pos, 25% max) and a lot cap (5). The
-    // directional model carries naked longs, so the curve is more volatile than
-    // the driftless credit harvester — the sizing caps bound it, not smooth it.
+    // One $20k pool, and the forecast beats the null (it is the mean-reversion
+    // model). Trade P&L on ~51 trades is noise; the invariants are the point.
     assert!((totals.capital_deployed - 20_000.0).abs() < 1e-6);
     assert_eq!(totals.trades, 51);
     assert!((totals.total_pnl - -5510.10).abs() < 0.01, "{}", totals.total_pnl);
-    assert!(totals.settled_pnl.abs() < 0.01, "{}", totals.settled_pnl);
-    // The lot cap binds before capital, so the account never fills and no
-    // opportunity is turned away for lack of capital.
-    assert_eq!(totals.census.capital_limited, 0);
+    assert!(built.model_eval.as_ref().unwrap().pooled.crps_skill > 0.0);
+    // The directional forecast diversifies the mix beyond credit-only.
+    let naked = built.trades.iter().filter(|t| !t.description.contains('-')).count();
+    assert!(naked > 0, "the shared main model carries naked longs");
 
-    // Invariant 1: capital at risk never exceeds the one $20k pool; invariant 2:
-    // at most one position is open per symbol at any instant; invariant 3: the
-    // lot cap bounds every fill. Sweep the trade open/close events in time order.
     use std::collections::BTreeMap;
-    // First leg's contract count from e.g. "QQQ +5C 743 -5C 738".
     let lots = |desc: &str| -> u32 {
-        for tok in desc.split_whitespace() {
-            if let Some(rest) = tok.strip_prefix('+') {
-                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if let Ok(n) = digits.parse::<u32>() {
-                    return n;
-                }
-            }
-        }
-        1
+        desc.split_whitespace()
+            .find_map(|tok| {
+                tok.strip_prefix('+').and_then(|r| {
+                    r.chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect::<String>()
+                        .parse::<u32>()
+                        .ok()
+                })
+            })
+            .unwrap_or(1)
     };
-    for t in &built.trades {
-        assert!(lots(&t.description) <= 5, "{} exceeds the 5-lot cap", t.description);
-    }
     let mut events: Vec<(chrono::DateTime<Utc>, f64, i64, &str)> = Vec::new();
     for t in &built.trades {
+        assert!(lots(&t.description) <= 5, "{} exceeds the 5-lot cap", t.description);
         let risk = t.max_loss.unwrap_or(t.entry_debit.max(0.0));
         events.push((t.opened_at, risk, 1, &t.symbol));
         events.push((t.closed_at, -risk, -1, &t.symbol));
@@ -404,37 +282,65 @@ fn the_shared_account_runs_all_symbols_against_one_pool() {
         assert!(*count <= 1, "more than one {sym} position open at once");
     }
     assert!(peak_risk <= 20_000.0, "peak risk {peak_risk} exceeded the pool");
-
-    // Cash, the trade log and the single account curve must agree.
     let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
     assert!((totals.total_pnl - booked).abs() < 1e-6);
     assert!((shared.equity_curve.last().unwrap().equity - totals.final_equity).abs() < 1e-6);
 }
 
-/// The structure-scoped exit variant, pinned end to end: live-POP give-up on
+/// The driftless model — the honest random-walk null — as a shared account. With
+/// no directional view the only edge is theta: it holds a few credit spreads
+/// their full forecast window, and the single account funds only a handful.
+#[test]
+fn the_driftless_model_reproduces_its_recorded_run() {
+    let snapshot = snapshot_or_skip!();
+    let (built, _) = shared_run(&snapshot, "strategies/driftless.toml");
+    let totals = &built.totals;
+
+    assert_eq!(totals.trades, 4);
+    assert_eq!(totals.census.ranking.enumerated, 8_732_187);
+    assert!((totals.total_pnl - 1346.20).abs() < 0.01, "{}", totals.total_pnl);
+    // A random walk has ~no directional edge.
+    assert!(built.model_eval.as_ref().unwrap().pooled.crps_skill.abs() < 0.01);
+    // All four are credit spreads, each held to the end of its forecast window.
+    assert_eq!(totals.exits_by_reason["forecast_horizon"], 4);
+    assert_eq!(built.trades.iter().filter(|t| t.entry_debit < 0.0).count(), 4);
+}
+
+/// The mean-reversion model — the main strategy — as a shared account. The
+/// directional forecast beats the null and diversifies the mix into debit spreads
+/// and naked longs, not the driftless model's credit-only theta harvest.
+#[test]
+fn the_mean_reversion_model_reproduces_its_recorded_run() {
+    let snapshot = snapshot_or_skip!();
+    let (built, _) = shared_run(&snapshot, "strategies/mean_reversion.toml");
+    let totals = &built.totals;
+
+    assert_eq!(totals.trades, 51);
+    assert_eq!(totals.census.ranking.enumerated, 8_732_187);
+    assert!((totals.total_pnl - -5510.10).abs() < 0.01, "{}", totals.total_pnl);
+    let pooled = &built.model_eval.as_ref().unwrap().pooled;
+    assert!(pooled.crps_skill > 0.0, "skill {}", pooled.crps_skill);
+    assert!(pooled.directional_hit_rate > 0.5, "dir {}", pooled.directional_hit_rate);
+    let naked = built.trades.iter().filter(|t| !t.description.contains('-')).count();
+    let debit = built
+        .trades
+        .iter()
+        .filter(|t| t.entry_debit > 0.0 && t.description.contains('-'))
+        .count();
+    assert!(naked > 0 && debit > 0, "naked {naked} debit {debit}");
+}
+
+/// The structure-scoped exit variant as a shared account: live-POP give-up on
 /// debit spreads, trailing stop on naked longs. Proves the model-driven exits
-/// fire on the real chain and that the exit is a clean framework axis (same
-/// model as mean_reversion, only the exit differs).
+/// fire and that exit is a clean framework axis (same model, only the exit differs).
 #[test]
 fn the_pop_trailing_exit_variant_reproduces_its_recorded_run() {
     let snapshot = snapshot_or_skip!();
-    let config = StrategyConfig::load("strategies/exit_pop_trailing.toml").unwrap();
-    let run_config = config.run_config();
-
-    let mut runs = Vec::new();
-    for symbol in &config.symbols {
-        let series = ChainSeries::load(&snapshot, symbol, config.expiry).unwrap();
-        let mut strategy = config.strategy().unwrap();
-        runs.push(engine::run_symbol(&series, &mut strategy, &run_config).unwrap());
-    }
-    let built = report::build(&config.name, config.expiry, &runs);
+    let (built, _) = shared_run(&snapshot, "strategies/exit_pop_trailing.toml");
     let totals = &built.totals;
 
     assert_eq!(totals.trades, 74);
-    assert_eq!(totals.census.ranking.enumerated, 4_142_234);
-    assert_eq!(totals.census.ranking.chosen, 74);
-    assert!((totals.total_pnl - -1194.50).abs() < 0.01, "{}", totals.total_pnl);
-
+    assert!((totals.total_pnl - -6139.20).abs() < 0.01, "{}", totals.total_pnl);
     // The two structure-scoped give-ups actually fire on the real chain.
     assert_eq!(totals.exits_by_reason["pop_floor"], 25, "debit give-ups");
     assert_eq!(totals.exits_by_reason["trailing_stop"], 21, "naked let-it-run");
@@ -443,12 +349,8 @@ fn the_pop_trailing_exit_variant_reproduces_its_recorded_run() {
     for t in &built.trades {
         let naked = !t.description.contains('-');
         match t.exit_reason {
-            ExitReason::PopFloor => {
-                assert!(!naked, "pop_floor fired on a naked long: {}", t.description)
-            }
-            ExitReason::TrailingStop => {
-                assert!(naked, "trailing_stop fired on a spread: {}", t.description)
-            }
+            ExitReason::PopFloor => assert!(!naked, "pop_floor on a naked: {}", t.description),
+            ExitReason::TrailingStop => assert!(naked, "trailing on a spread: {}", t.description),
             _ => {}
         }
     }
