@@ -1,0 +1,8 @@
+# Live-POP give-up on debit spreads; trailing stop on naked longs.
+forecast_target_quantile = 0.85
+profit_target_pct = 50.0
+close_before_earnings = true
+underlying_past_short_strike = true
+close_after_forecast_horizon = true
+live_pop_floor = 0.25
+naked_trailing_stop_pct = 30.0

@@ -10,6 +10,7 @@
 
 use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -54,8 +55,9 @@ pub struct StrategyConfig {
     pub structure: StructureConfig,
     #[serde(default)]
     pub execution: ExecutionConfig,
+    /// A named bundle under `exits/`, or an inline `[exit]` table.
     #[serde(default)]
-    pub exit: ExitConfig,
+    pub exit: ExitBlock,
     #[serde(default)]
     pub costs: CostsConfig,
     /// Ranked-mode sections. Ignored in staged mode.
@@ -313,6 +315,10 @@ impl Default for ExecutionConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExitConfig {
+    /// Exit-owned favorable forecast quantile. When absent, ranked configs
+    /// inherit `ranking.forecast_target_quantile` for backward compatibility.
+    #[serde(default)]
+    pub forecast_target_quantile: Option<f64>,
     /// Percentage of max profit at which to close.
     #[serde(default)]
     pub profit_target_pct: Option<f64>,
@@ -353,6 +359,7 @@ pub struct ExitConfig {
 impl Default for ExitConfig {
     fn default() -> Self {
         Self {
+            forecast_target_quantile: None,
             profit_target_pct: None,
             stop_loss_pct: None,
             underlying_past_short_strike: false,
@@ -363,6 +370,47 @@ impl Default for ExitConfig {
             naked_momentum_exit: false,
             close_after_forecast_horizon: false,
             min_days_before_expiry: default_min_days_before_expiry(),
+        }
+    }
+}
+
+/// A strategy can reuse a named exit bundle or define one inline. TOML itself
+/// rejects trying to provide both `exit = "..."` and `[exit]` as a duplicate key.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ExitBlock {
+    Label(String),
+    Inline(ExitConfig),
+}
+
+impl Default for ExitBlock {
+    fn default() -> Self {
+        Self::Inline(ExitConfig::default())
+    }
+}
+
+fn load_labeled<T: DeserializeOwned>(directory: &str, label: &str) -> Result<T> {
+    if label.is_empty()
+        || !label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("invalid {directory} label `{label}`; use letters, digits, '-' or '_'");
+    }
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(directory)
+        .join(format!("{label}.toml"));
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("loading {directory} label `{label}` from {}", path.display()))?;
+    toml::from_str(&text)
+        .with_context(|| format!("parsing {directory} label `{label}` from {}", path.display()))
+}
+
+impl ExitBlock {
+    fn resolve(&self) -> Result<ExitConfig> {
+        match self {
+            Self::Label(label) => load_labeled("exits", label),
+            Self::Inline(config) => Ok(config.clone()),
         }
     }
 }
@@ -674,6 +722,12 @@ impl StrategyConfig {
             }
             sizing.to_runtime()?;
         }
+        let exit = self.exit.resolve()?;
+        if let Some(q) = exit.forecast_target_quantile
+            && !(0.5..=1.0).contains(&q)
+        {
+            bail!("`exit.forecast_target_quantile` must be in 0.5..=1.0");
+        }
         // The ranked engine caps the scoring horizon at expiry, so a new entry
         // opened inside `horizon_days` of expiry would be scored on a silently
         // truncated horizon. The entry blackout must therefore be at least as
@@ -682,14 +736,14 @@ impl StrategyConfig {
         // The live-POP and momentum exits read the forecast at exit time, so they
         // only make sense in ranked mode.
         if self.mode != StrategyMode::Ranked
-            && (self.exit.live_pop_floor.is_some() || self.exit.naked_momentum_exit)
+            && (exit.live_pop_floor.is_some() || exit.naked_momentum_exit)
         {
             bail!(
                 "exit.live_pop_floor and exit.naked_momentum_exit need the forecast \
                  and apply only to ranked mode"
             );
         }
-        if let Some(floor) = self.exit.live_pop_floor
+        if let Some(floor) = exit.live_pop_floor
             && !(0.0..=1.0).contains(&floor)
         {
             bail!("exit.live_pop_floor must be in 0..=1, got {floor}");
@@ -798,28 +852,31 @@ impl StrategyConfig {
         })
     }
 
-    pub fn run_config(&self) -> RunConfig {
-        RunConfig {
+    pub fn run_config(&self) -> Result<RunConfig> {
+        let exit = self.exit.resolve()?;
+        Ok(RunConfig {
             initial_cash: self.initial_cash,
             costs: Costs {
                 commission_per_contract: self.costs.commission_per_contract,
             },
             timing: self.execution.timing,
             exits: ExitRules {
-                profit_target_pct: self.exit.profit_target_pct,
-                stop_loss_pct: self.exit.stop_loss_pct,
-                underlying_past_short_strike: self.exit.underlying_past_short_strike,
-                live_pop_floor: self.exit.live_pop_floor,
-                naked_trailing_stop_pct: self.exit.naked_trailing_stop_pct,
-                naked_momentum_exit: self.exit.naked_momentum_exit,
+                forecast_target_quantile: exit
+                    .forecast_target_quantile
+                    .or(self.ranking.forecast_target_quantile),
+                profit_target_pct: exit.profit_target_pct,
+                stop_loss_pct: exit.stop_loss_pct,
+                underlying_past_short_strike: exit.underlying_past_short_strike,
+                live_pop_floor: exit.live_pop_floor,
+                naked_trailing_stop_pct: exit.naked_trailing_stop_pct,
+                naked_momentum_exit: exit.naked_momentum_exit,
                 // The forecast-horizon exit keys off the model's own horizon.
-                forecast_horizon_days: self
-                    .exit
+                forecast_horizon_days: exit
                     .close_after_forecast_horizon
                     .then_some(self.model.horizon_days),
-                max_time_pct: self.exit.max_time_pct,
-                close_before_earnings: self.exit.close_before_earnings,
-                min_days_before_expiry: self.exit.min_days_before_expiry,
+                max_time_pct: exit.max_time_pct,
+                close_before_earnings: exit.close_before_earnings,
+                min_days_before_expiry: exit.min_days_before_expiry,
             },
             // Absent resolves by account: a shared account lets capital bind, a
             // per-symbol account is in-or-out.
@@ -851,7 +908,7 @@ impl StrategyConfig {
                     (self.account == AccountMode::Shared && self.mode == StrategyMode::Ranked)
                         .then(|| SizingConfig::default().to_runtime().expect("valid default"))
                 }),
-        }
+        })
     }
 }
 
@@ -899,7 +956,7 @@ commission_per_contract = 0.65
         assert_eq!(config.symbols, ["SPY", "QQQ"]);
         assert_eq!(config.expiry, NaiveDate::from_ymd_opt(2026, 8, 21).unwrap());
 
-        let run = config.run_config();
+        let run = config.run_config().unwrap();
         assert_eq!(run.initial_cash, 50_000.0);
         assert_eq!(run.timing, Timing::NextBar);
         assert_eq!(run.exits.profit_target_pct, Some(50.0));
@@ -932,7 +989,7 @@ commission_per_contract = 0.65
         ));
         assert_eq!(config.execution.delta_tolerance, 0.07);
         assert_eq!(config.execution.max_debit, None);
-        assert_eq!(config.exit.profit_target_pct, None);
+        assert_eq!(config.exit.resolve().unwrap().profit_target_pct, None);
     }
 
     /// Each symbol must get a fresh signal, or one symbol's price history leaks
@@ -1013,6 +1070,48 @@ horizon_days = 10.0
         )
         .unwrap();
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn a_named_exit_bundle_resolves_and_owns_its_forecast_target() {
+        let config: StrategyConfig = toml::from_str(
+            "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nmode=\"ranked\"\nexit=\"base\"\n[ranking]\nforecast_target_quantile=0.70",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        let run = config.run_config().unwrap();
+        assert_eq!(run.exits.forecast_target_quantile, Some(0.85));
+        assert_eq!(run.exits.profit_target_pct, Some(50.0));
+    }
+
+    #[test]
+    fn an_inline_exit_inherits_the_ranker_quantile_only_when_unset() {
+        let config: StrategyConfig = toml::from_str(
+            "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nmode=\"ranked\"\n[exit]\nprofit_target_pct=25.0\n[ranking]\nforecast_target_quantile=0.70",
+        )
+        .unwrap();
+        let run = config.run_config().unwrap();
+        assert_eq!(run.exits.forecast_target_quantile, Some(0.70));
+        assert_eq!(run.exits.profit_target_pct, Some(25.0));
+    }
+
+    #[test]
+    fn a_label_and_inline_exit_cannot_both_be_set() {
+        let err = toml::from_str::<StrategyConfig>(
+            "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nexit=\"base\"\n[exit]\nprofit_target_pct=25.0",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate key `exit`"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_exit_label_fails_with_the_label_in_context() {
+        let config: StrategyConfig = toml::from_str(
+            "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nexit=\"does-not-exist\"",
+        )
+        .unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("does-not-exist"), "{err}");
     }
 
     #[test]

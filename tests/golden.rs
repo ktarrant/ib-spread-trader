@@ -217,7 +217,7 @@ fn shared_run(
     path: &str,
 ) -> (report::Report, ib_spread_trader::engine::SharedRun) {
     let config = StrategyConfig::load(path).unwrap();
-    let run_config = config.run_config();
+    let run_config = config.run_config().unwrap();
     let all_series: Vec<ChainSeries> = config
         .symbols
         .iter()
@@ -368,7 +368,7 @@ fn a_never_firing_strategy_returns_its_capital_exactly_on_real_data() {
     .unwrap();
     let series = ChainSeries::load(&snapshot, "SPY", config.expiry).unwrap();
     let mut strategy = config.strategy().unwrap();
-    let run = engine::run_symbol(&series, &mut strategy, &config.run_config()).unwrap();
+    let run = engine::run_symbol(&series, &mut strategy, &config.run_config().unwrap()).unwrap();
 
     assert_eq!(run.census.triggers, 0);
     assert_eq!(run.final_equity, run.initial_cash);

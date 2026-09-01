@@ -1232,7 +1232,7 @@ fn ranked_choose(
     choice.map(|choice| {
         // The forecast target: the favourable quantile of the entry distribution,
         // in the trade's direction. A price, so lot count never touches it.
-        let forecast_target = ranked.ranking.forecast_target_quantile.map(|q| {
+        let forecast_target = config.exits.forecast_target_quantile.map(|q| {
             let level = if choice.candidate.spread.profits_from_a_rise() {
                 q
             } else {

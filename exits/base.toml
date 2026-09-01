@@ -1,0 +1,8 @@
+# Default ranked exits. The exit target has its own copy of the favorable
+# quantile; it intentionally matches the EV ranker's scoring cap today.
+forecast_target_quantile = 0.85
+profit_target_pct = 50.0
+stop_loss_pct = 100.0
+close_before_earnings = true
+underlying_past_short_strike = true
+close_after_forecast_horizon = true

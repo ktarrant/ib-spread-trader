@@ -21,6 +21,9 @@ use crate::spread::{Side, Spread};
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct ExitRules {
+    /// Favorable quantile used to materialize an entry's forecast price target.
+    /// It belongs to the exit bundle even though the target is fixed at entry.
+    pub forecast_target_quantile: Option<f64>,
     /// Close once gross P&L reaches this percentage of max profit.
     pub profit_target_pct: Option<f64>,
     /// Close once gross P&L falls to minus this percentage of the debit paid.

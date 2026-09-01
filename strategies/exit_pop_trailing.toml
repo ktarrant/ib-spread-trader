@@ -11,19 +11,11 @@ name    = "exit-pop-trailing"
 symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR"]
 expiry  = "2026-08-21"
 mode    = "ranked"
+exit    = "pop_trailing"
 
 [execution]
 timing = "next_bar"
 earnings_blackout_days = 3
-
-# The only difference from mean_reversion.toml: the give-up / let-it-run rules.
-[exit]
-profit_target_pct = 50.0
-close_before_earnings = true
-underlying_past_short_strike = true    # debit take-profit
-close_after_forecast_horizon = true    # credit full-window cap
-live_pop_floor = 0.25                   # debit give-up
-naked_trailing_stop_pct = 30.0         # naked let-it-run
 
 [costs]
 commission_per_contract = 0.65

@@ -116,7 +116,7 @@ fn main() -> Result<()> {
             trades,
         } => {
             let strategy_config = StrategyConfig::load(&config)?;
-            let run_config = strategy_config.run_config();
+            let run_config = strategy_config.run_config()?;
 
             // Load every symbol's series once, skipping those with no two-sided
             // option bars (a zero-return run would dilute every real result).

@@ -11,17 +11,11 @@ name    = "prob-profit"
 symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR"]
 expiry  = "2026-08-21"
 mode    = "ranked"
+exit    = "base"
 
 [execution]
 timing = "next_bar"
 earnings_blackout_days = 3
-
-[exit]
-profit_target_pct = 50.0
-stop_loss_pct = 100.0
-close_before_earnings = true
-underlying_past_short_strike = true
-close_after_forecast_horizon = true
 
 [costs]
 commission_per_contract = 0.65
