@@ -123,6 +123,65 @@ mod tests {
         assert!(!failed.passes_gate(), "7/12 does not clear the LOSO gate");
     }
 
+    /// The Python drivers write the records, so their copy of the gate could
+    /// drift from this one and nothing would notice — a registry of records that
+    /// say `passed` under thresholds nobody applies any more. Recomputing every
+    /// checked-in record here makes that drift a test failure instead.
+    #[test]
+    fn every_checked_in_record_still_earns_its_verdict() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut models = 0;
+        for entry in std::fs::read_dir(root.join("models")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let record: ValidationRecord = serde_json::from_str(&text)
+                .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+            assert_eq!(
+                record.passed,
+                record.passes_gate(),
+                "{} records a verdict the gate does not reproduce",
+                path.display()
+            );
+            models += 1;
+        }
+        assert!(models >= 2, "expected the model registry, found {models}");
+
+        let mut rankers = 0;
+        for entry in std::fs::read_dir(root.join("rankers")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let record: RankerValidationRecord = serde_json::from_str(&text)
+                .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+            assert_eq!(
+                record.passed,
+                record.passes_gate(),
+                "{} records a verdict the gate does not reproduce",
+                path.display()
+            );
+            rankers += 1;
+        }
+        assert!(rankers >= 1, "expected the ranker registry, found {rankers}");
+    }
+
+    /// The two labeled models are the gate's worked example in both directions:
+    /// the mean-reversion drift clears it, the random-walk null does not.
+    #[test]
+    fn the_shipped_model_registry_records_a_pass_and_the_null_a_fail() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("models");
+        for (label, expected) in [("mean-reversion", true), ("driftless", false)] {
+            let text = std::fs::read_to_string(root.join(format!("{label}.json"))).unwrap();
+            let record: ValidationRecord = serde_json::from_str(&text).unwrap();
+            assert_eq!(record.label, label);
+            assert_eq!(record.passes_gate(), expected, "{label}");
+        }
+    }
+
     #[test]
     fn the_ranker_gate_needs_positive_candidate_and_decile_ordering() {
         let record = RankerValidationRecord {

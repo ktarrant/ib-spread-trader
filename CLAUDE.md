@@ -423,7 +423,11 @@ the working directory — a binary copied elsewhere still reads this repo's bloc
 `models/<label>.json` records the forecast gate (CRPS skill, PIT calibration,
 coverage, direction, and per-symbol robustness). `rankers/<label>.json` records
 candidate Spearman and decile monotonicity paired with a model label. Regenerate
-them with `scripts/validate_model.py` and `scripts/validate_ranker.py`.
+them with `scripts/validate_model.py` and `scripts/validate_ranker.py`. The gate
+lives in `src/model/validation.rs` and the drivers repeat its thresholds, so
+`every_checked_in_record_still_earns_its_verdict` recomputes every record's
+verdict in `cargo test` — a record whose thresholds have drifted fails there
+rather than sitting in the registry asserting a claim nobody applies.
 
 **A ranker record grades the key that ranker actually orders by** — the
 expected-P/L ratio for `expected_value`, the model probability of profit for
