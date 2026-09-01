@@ -1,0 +1,61 @@
+# Driftless price-target model — the honest random-walk null.
+#
+# Identical to mean_reversion.toml except the drift is OFF (trend_weight = 0), so
+# the forecast is a pure lognormal random walk with vol = ATM IV. This is the
+# baseline the mean-reversion model must beat: with no directional view, the only
+# edge is theta, so it trades almost exclusively credit spreads near expiry.
+# Keep it as the model-axis comparison — the "does the drift actually help" test.
+
+name    = "driftless"
+symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR"]
+expiry  = "2026-08-21"
+initial_cash = 100000.0
+mode    = "ranked"
+
+[execution]
+timing = "next_bar"
+max_open_positions = 1
+earnings_blackout_days = 3
+
+[exit]
+profit_target_pct = 50.0
+stop_loss_pct = 100.0
+close_before_earnings = true
+underlying_past_short_strike = true
+
+[costs]
+commission_per_contract = 0.65
+
+[features]
+trend_fast = 10
+trend_slow = 30
+atr_period = 14
+realized_vol_period = 20
+skew_moneyness = 0.05
+
+# The only difference from mean_reversion.toml: trend_weight = 0 (no drift).
+[model]
+bars_per_year = 3276.0
+realized_vol_weight = 0.0
+fallback_vol = 0.30
+trend_weight = 0.0
+vwap_reversion = 0.0
+skew_weight = 0.0
+grid_sigma = 4.0
+grid_points = 101
+
+[candidates]
+rights = ["call", "put"]
+allow_debit = true
+allow_credit = true
+min_width = 0.0
+max_relative_spread = 0.35
+max_loss = 500.0
+quantity = 1
+
+[ranking]
+horizon_days = 7.0
+min_score = 0.02
+min_expected_pl = 0.0
+forecast_target_quantile = 0.85
+scorer_sample_per_bar = 20

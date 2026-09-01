@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Run every strategy variant and tabulate their backtests side by side.
+
+The price-target framework varies along three axes — price model, scorer, and
+account/sizing — plus the exit. Each `strategies/*.toml` is one point in that
+space. This script runs them all and prints one row per variant so the axes can
+be compared directly: the forecast headline (CRPS skill vs a random walk,
+directional hit-rate) from the dense per-bar eval, and the trade guardrail
+(count, return, drawdown, profit factor, structure mix).
+
+Usage:
+    python scripts/compare_strategies.py              # all strategies/*.toml
+    python scripts/compare_strategies.py a.toml b.toml # just these
+
+Requires a built binary (`cargo build`) and a capture snapshot on disk; each run
+is a full backtest, so this takes a couple of minutes over the whole set.
+"""
+
+from __future__ import annotations
+
+import glob
+import json
+import re
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+
+BIN = "target/debug/ib-spread-trader"
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def structure(trade: dict) -> str:
+    legs = re.findall(r"([+-])\d+([CP])", trade["description"])
+    if len(legs) == 1:
+        return "naked"
+    return "credit" if trade["entry_debit"] < 0 else "debit"
+
+
+def run(config: str) -> dict | None:
+    out = subprocess.run(
+        [BIN, "backtest", "--config", config, "--trades"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    if out.returncode != 0:
+        sys.stderr.write(f"  {config}: {out.stderr.strip().splitlines()[-1:]}\n")
+        return None
+    d = json.loads(out.stdout)
+    t = d["totals"]
+    mix = Counter(structure(x) for x in d.get("trades", []))
+    pooled = (d.get("model_eval") or {}).get("pooled") or {}
+    return {
+        "name": Path(config).stem,
+        "trades": t["trades"],
+        "return_pct": t["return_pct"],
+        "max_dd": t["max_drawdown"] * 100,
+        "pf": t.get("profit_factor") or 0.0,
+        "crps_skill": pooled.get("crps_skill", float("nan")),
+        "dir_hit": pooled.get("directional_hit_rate", float("nan")) * 100,
+        "mix": "/".join(f"{n}{mix[k]}" for k, n in (("credit", "cr"), ("debit", "db"), ("naked", "nk")) if mix[k]),
+    }
+
+
+def main() -> None:
+    configs = sys.argv[1:] or sorted(glob.glob("strategies/*.toml", root_dir=ROOT))
+    rows = [r for c in configs if (r := run(str(c)))]
+    if not rows:
+        sys.exit("no strategy produced a result")
+
+    hdr = f"{'strategy':>16}{'trades':>8}{'return%':>9}{'maxDD%':>8}{'pf':>6}{'crps_skill':>12}{'dir%':>7}  structure"
+    print(hdr)
+    print("-" * len(hdr))
+    for r in rows:
+        print(
+            f"{r['name']:>16}{r['trades']:>8}{r['return_pct']:>9.1f}{r['max_dd']:>8.0f}"
+            f"{r['pf']:>6.2f}{r['crps_skill']:>+12.4f}{r['dir_hit']:>7.1f}  {r['mix']}"
+        )
+
+
+if __name__ == "__main__":
+    main()

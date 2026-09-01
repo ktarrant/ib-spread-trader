@@ -347,11 +347,13 @@ takes 10.7s instead of 0.24s.
 
 ## Strategies are TOML over Rust traits
 
-`strategies/rsi_bull_call.toml` is the worked example. The three stages are named
-by string with their parameters inline, so a parameter sweep needs no recompile;
-genuinely new logic is still a trait impl. `StrategyConfig::validate` builds every
-stage up front, so a typo fails before any I/O rather than after the first symbol
-has already run.
+`strategies/mean_reversion.toml` is the worked example; the shipped configs are all
+`mode = "ranked"` (the staged three-stage pipeline is retired — its configs are
+gone, its engine dormant). Every stage/section is named by string with parameters
+inline, so a parameter sweep needs no recompile; genuinely new logic is still a
+trait impl (`PriceModel`, or a staged `Signal`/`Structure`/`Selector`).
+`StrategyConfig::validate` builds every stage up front, so a typo fails before any
+I/O rather than after the first symbol has already run.
 
 **Every field carries `#[serde(default)]`, and unknown keys are refused.** A
 partial config that fails to deserialize is a live papercut in `ib-option-calc`
@@ -380,28 +382,18 @@ last point is the final option bar's *mark* — positions valued at what they co
 have been sold for, a day before they actually settled — and anyone plotting
 `equity.csv` would read a different ending than the summary states.
 
-### What the reference strategy actually does
+### What the main model actually does
 
-`cargo run -- backtest --config strategies/rsi_bull_call.toml` over all 12
-symbols, as a sanity baseline (not an endorsement — 22 trades proves nothing):
-
-```
-1412 triggers -> 734 declined (RSI crossed *down* through 30: bearish, and a
-                              call structure declines it)
-              -> 433 at position limit
-              ->  44 too close to expiry (the 8-day entry blackout)
-              ->  22 earnings blackout
-              -> 157 rejected (85 debit above limit, 72 no strike near 0.30 delta)
-              ->  22 filled
-```
-
-The rejection example reads `no call within tolerance of 0.30 delta (closest
-quoted: 0.407)` — that is META's truncated ladder, showing up in real data
-exactly as predicted. META alone accounts for 16 rejections, AMD for 28.
-
-With the default expiry rules, no trade settles at intrinsic — all 22 exit on a
-real quote (11 before-expiry, 5 before-earnings, 5 profit target, 1 stop), and the
-honest traded P&L is a small loss the old settlement figure used to mask.
+`cargo run -- backtest --config strategies/mean_reversion.toml` over all 12
+symbols, as a sanity baseline (not a profit claim — 26 trades over one expiry
+proves nothing about P&L). The forecast beats the null (CRPS skill +0.013,
+directional hit-rate 57 %), and that shows up in the **structure mix**: 17 debit
+spreads and 9 naked longs, **no credit spreads** — the directional forecast gives
+the ranker a target to point long structures at. Contrast `driftless.toml`, which
+with no directional view trades 30 credit spreads and 2 debits. Exits are all on a
+real quote (10 forecast-target, 7 before-earnings, 7 before-expiry, 2 stop);
+settlement is zero. `scripts/compare_strategies.py` tabulates this against every
+other variant.
 
 ## The ranked price-target engine is a second decision path, not a replacement
 
@@ -450,11 +442,11 @@ interim worst case.
 enumerated -> priceable -> liquid -> within-loss -> positive-EV -> above-min-score
 -> chosen — and the report surfaces it beside the trade log, the way
 `signal_diagnostics` surfaces the staged gates. On the reference snapshot,
-`ranked_verticals.toml` prices ~5.6 M candidate verticals down to 9 taken. The
-enumeration counts are model-dependent — the model decides how many bars hold a
-position and so are *not* enumerating — which is why the driftless default
-enumerates far more than the old drifted one did. A ranked run whose `chosen` is a
-rounding error against `enumerated` has been floored, not backtested.
+`mean_reversion.toml` prices ~1.9 M candidate verticals down to 26 taken (the
+driftless null enumerates ~8 M — the model decides how many bars hold a position
+and so are *not* enumerating, so a more-selective model enumerates far more). A
+ranked run whose `chosen` is a rounding error against `enumerated` has been
+floored, not backtested.
 
 ## The price model is evaluated, not assumed
 
@@ -471,13 +463,47 @@ The realized read looks *forward* in the already-loaded series. It is safe only
 because it feeds evaluation and never a decision — see `src/model/eval.rs`. Do not
 reuse that read anywhere a trade could see it.
 
-**This is not academic.** The v1 model shipped with a trend+skew drift; evaluation
-showed it forecast *worse* than a random walk (CRPS skill −0.39, PIT 0.63, coverage
-0.38/0.75) and lost money. Zeroing the drift restored calibration (PIT 0.52,
-near-nominal coverage) and flipped the P&L positive, so **the default is now
-driftless**. Turn a drift weight up only once it beats the null out-of-sample. The
-null-beating gate is the floor: a config that cannot beat a random walk is not a
-better forecaster, whatever P&L it posted.
+**This is not academic — it drove the model we ship.** v1 shipped a *momentum*
+drift (trend + skew) and forecast **worse** than a random walk (CRPS skill −0.39),
+so the drift was zeroed to an honest null. Then a disciplined search on the dense
+forecast eval found the real edge: at a **one-week horizon**, **fading** the
+fast/slow trend gap (mean-reversion, `trend_weight = -0.5`) forecasts *better*
+than the null — CRPS skill +0.013, 57 % directional hit-rate, robust across 9/12
+symbols under leave-one-symbol-out. Momentum was exactly backwards: short horizons
+are the reversion regime, momentum needs weeks-to-months. Two companion findings:
+**ATM-IV-only vol** (`realized_vol_weight = 0`) calibrates best (pooled coverage
+53/81/88), and the directional edge **decays to a coin-flip by two weeks** — so the
+horizon is deliberately short and, via the guard in `validate()`, must stay ≤ the
+entry blackout so a scored entry always gets the full horizon.
+
+The null-beating gate is the floor: a config that cannot beat a random walk
+out-of-sample is not a better forecaster, whatever P&L it posted. And the converse
+holds too — mean-reversion is adopted on its **forecast** merit, not its backtest
+P&L, which on ~30 trades over one expiry is too noisy to trust. The trade log is a
+guardrail; `forecasts.csv` (two orders of magnitude denser) is where tuning has
+power.
+
+### The strategy variants — one framework, single-axis comparisons
+
+The framework has three swappable axes — **price model**, **scorer**, **exit** —
+plus **account/sizing**. `strategies/` holds one config per interesting point, each
+differing from the `mean_reversion` base on exactly one axis, so a comparison
+isolates that axis:
+
+| Config | Axis | What it is |
+|---|---|---|
+| `mean_reversion.toml` | — | The main model (IV vol, `trend_weight -0.5`, 1-week horizon, EV scorer). Debit + naked mix. |
+| `driftless.toml` | model | The honest random-walk null (`trend_weight 0`). Credit-heavy theta harvest, ~0 skill. |
+| `prob_profit.toml` | scorer | `metric = "prob_profit"` — rewards hit-rate over magnitude. |
+| `shared_20k.toml` | account | The main model as one shared $20k account with risk+lot sizing. |
+
+`scripts/compare_strategies.py` runs them all and tabulates the forecast headline
+(CRPS skill, directional hit-rate) beside the trade guardrail (return, drawdown,
+profit factor, structure mix). The staged pipeline (`signal → structure → selector`)
+is retired: its strategy configs and file-golden tests are gone, though the engine
+code stays dormant behind `Strategy::Staged` and keeps its inline unit tests. A
+future **RSI-oversold** model would reuse `indicators::Rsi` (independent of the
+staged pipeline) as a new drift term, validated on the same null-beating gate.
 
 ## Two account models: per-symbol (default) and one shared pool
 
@@ -524,9 +550,11 @@ name (`risk_per_position`, scaled by score up to `max_risk_per_position`) and a
 **lot cap** (`max_lots`) bounds fill size — the risk cap binds on expensive
 spreads, the lot cap on cheap ones, so neither a single name nor a single fill
 runs away. There is no market-impact model, so the lot cap is the stand-in that
-keeps a large fill from clearing at the one-lot quote. On the reference snapshot
-`ranked_verticals_20k` runs at 10%/25%/5-lot, holding drawdown near 13% (vs ~55%
-uncapped) at profit factor ~4.8.
+keeps a large fill from clearing at the one-lot quote. `shared_20k.toml` runs the
+main (mean-reversion) model as one shared $20k account at 10%/25%/5-lot. The caps
+*bound* the account, they do not smooth it: the directional model carries naked
+longs, so its curve is more volatile than the driftless credit harvester's (~13%
+drawdown) that the sizing was first tuned against.
 
 ## Conventions from the capture side that this repo must not re-learn
 
@@ -556,8 +584,10 @@ uncapped) at profit factor ~4.8.
 ## When a golden test fails
 
 `tests/golden.rs` pins values confirmed by hand: SPY's parity forward at a known
-bar, the quality account, META's rejection count, and the reference strategy's
-full run down to the cent. They are deterministic.
+bar, the quality account, and the full runs of the ranked variants
+(`driftless`, `mean_reversion`, `shared_20k`) down to the cent — funnel counts,
+P&L, structure mix, and the forecast-eval sign (driftless ~0 skill,
+mean-reversion > 0). They are deterministic.
 
 So decide which happened before touching one: a regression, or a deliberate
 change to the model. Only the second is a reason to edit the expected value, and

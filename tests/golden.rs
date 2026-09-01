@@ -211,12 +211,14 @@ fn the_underlying_still_prints_after_the_last_option_bar() {
     );
 }
 
-/// The whole pipeline, pinned end to end. These numbers are deterministic; a
-/// change to any of them means the model changed, intentionally or otherwise.
+/// The driftless model — the honest random-walk null — pinned end to end. With
+/// no directional view the only edge is theta, so it trades almost entirely
+/// credit spreads. These numbers are deterministic; a change means the model or
+/// its config changed, intentionally or otherwise.
 #[test]
-fn the_reference_strategy_reproduces_its_recorded_run() {
+fn the_driftless_model_reproduces_its_recorded_run() {
     let snapshot = snapshot_or_skip!();
-    let config = StrategyConfig::load("strategies/rsi_bull_call.toml").unwrap();
+    let config = StrategyConfig::load("strategies/driftless.toml").unwrap();
     let run_config = config.run_config();
 
     let mut runs = Vec::new();
@@ -229,163 +231,103 @@ fn the_reference_strategy_reproduces_its_recorded_run() {
     let totals = &built.totals;
 
     assert_eq!(totals.symbols, 12);
-    // Re-derived after the expiry rules became the default (close >=3 days out,
-    // no entry within 8 days of expiry). Positions now exit on a real quote, so
-    // settlement is gone and the honest traded P&L stands on its own — here a
-    // small loss the settlement figure used to mask.
-    assert_eq!(totals.trades, 22);
-    assert_eq!(totals.census.triggers, 1412);
-    assert_eq!(
-        totals.census.declined, 734,
-        "bearish crossings a call structure declines"
-    );
-    assert_eq!(totals.census.at_position_limit, 433);
-    assert_eq!(totals.census.unfillable_intents, 0);
-    assert_eq!(totals.census.earnings_blackout, 22);
-    assert_eq!(
-        totals.census.too_close_to_expiry, 44,
-        "the 8-day entry blackout now refuses late entries"
-    );
-
-    assert_eq!(totals.census.rejections["debit_above_limit"], 85);
-    assert_eq!(totals.census.rejections["no_strike_near_target_delta"], 72);
-
-    assert!(
-        (totals.total_pnl - (-542.20)).abs() < 0.01,
-        "{}",
-        totals.total_pnl
-    );
-    assert!(
-        (totals.traded_pnl - (-542.20)).abs() < 0.01,
-        "{}",
-        totals.traded_pnl
-    );
-    assert!(
-        totals.settled_pnl.abs() < 0.01,
-        "no position settles at intrinsic now: {}",
-        totals.settled_pnl
-    );
-    assert!((totals.commission_paid - 57.20).abs() < 0.01);
-
-    // Every trade closed on a quote; nothing was left to settle at expiry.
-    assert_eq!(totals.exits_by_reason["before_earnings"], 5);
-    assert_eq!(totals.exits_by_reason["before_expiry"], 11);
-    assert_eq!(totals.exits_by_reason["profit_target"], 5);
-    assert_eq!(totals.exits_by_reason["stop_loss"], 1);
-    assert!(!totals.exits_by_reason.contains_key("expiry_settlement"));
-
-    // Cash, the trade log and the curve have to agree or the report is decoration.
-    let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
-    assert!((totals.total_pnl - booked).abs() < 1e-6);
-    let curve = report::combined_curve(&runs);
-    assert!((curve.last().unwrap().equity - totals.final_equity).abs() < 1e-6);
-}
-
-/// Pin the new signal's whole gate funnel as well as its trade. This is a
-/// deliberately strict baseline, not a claim of statistical significance: the
-/// sensitivity run shows volume confirmation is the binding filter.
-#[test]
-fn the_volatility_contraction_breakout_reproduces_its_recorded_run() {
-    let snapshot = snapshot_or_skip!();
-    let config =
-        StrategyConfig::load("strategies/volatility_contraction_breakout_bull_call.toml").unwrap();
-    let run_config = config.run_config();
-
-    let mut runs = Vec::new();
-    for symbol in &config.symbols {
-        let series = ChainSeries::load(&snapshot, symbol, config.expiry).unwrap();
-        let mut strategy = config.strategy().unwrap();
-        runs.push(engine::run_symbol(&series, &mut strategy, &run_config).unwrap());
-    }
-    let built = report::build(&config.name, config.expiry, &runs);
-    let totals = &built.totals;
-    let gates = &totals.census.signal_diagnostics;
-
-    // Re-derived after snapshot gained 5-min data for all symbols. The ATM IV
-    // gate now fails on most 5-min bars (no option snapshot), so bars_ready
-    // drops to the ~111 option bars where previous_atm_iv survived.
-    assert_eq!(gates["bars_seen"], 58_158);
-    assert_eq!(gates["bars_ready"], 111);
-    assert_eq!(gates["contraction_pass"], 15);
-    assert_eq!(gates["breakout_pass"], 10);
-    assert_eq!(gates["volume_pass"], 2);
-    assert_eq!(gates["iv_pass"], 2);
-    assert_eq!(gates["missing_underlying"], 129);
-
-    assert_eq!(totals.census.triggers, 2);
-    assert_eq!(totals.census.too_close_to_expiry, 0);
-    // Both triggers rejected: one debit too high, one no delta match.
-    assert_eq!(totals.trades, 0);
-    assert!((totals.total_pnl - 0.0).abs() < 0.01, "{}", totals.total_pnl);
-}
-
-/// The ranked price-target engine, pinned end to end. These numbers are
-/// deterministic and depend on `ranked_verticals.toml`'s default weights; a
-/// change to any of them means the model or its config changed, intentionally or
-/// otherwise. The funnel is the point of interest: half a million candidate
-/// verticals priced, cascading down to the 31 the model actually took.
-#[test]
-fn the_ranked_strategy_reproduces_its_recorded_run() {
-    let snapshot = snapshot_or_skip!();
-    let config = StrategyConfig::load("strategies/ranked_verticals.toml").unwrap();
-    let run_config = config.run_config();
-
-    let mut runs = Vec::new();
-    for symbol in &config.symbols {
-        let series = ChainSeries::load(&snapshot, symbol, config.expiry).unwrap();
-        let mut strategy = config.strategy().unwrap();
-        runs.push(engine::run_symbol(&series, &mut strategy, &run_config).unwrap());
-    }
-    let built = report::build(&config.name, config.expiry, &runs);
-    let totals = &built.totals;
-
-    assert_eq!(totals.symbols, 12);
-    assert_eq!(totals.trades, 14);
+    assert_eq!(totals.trades, 32);
 
     // The candidate funnel: enumerated -> priceable -> liquid -> within-loss ->
     // positive-EV -> above-min-score -> chosen. Every vertical is bounded, so
-    // priceable equals enumerated. The enumeration counts are model-dependent
-    // because the model controls how many bars hold a position (and so are not
-    // enumerating): the driftless default is selective and holds less often,
-    // leaving far more bars to enumerate than the old drifted default did.
+    // priceable equals enumerated.
     let funnel = &totals.census.ranking;
-    assert_eq!(funnel.enumerated, 6_585_983);
-    assert_eq!(funnel.priceable, 6_585_983);
-    assert_eq!(funnel.liquid, 6_420_004);
-    assert_eq!(funnel.within_loss, 1_754_321);
-    assert_eq!(funnel.positive_ev, 2_911);
-    assert_eq!(funnel.above_min_score, 34);
-    assert_eq!(funnel.chosen, 14, "chosen must equal the trade count");
+    assert_eq!(funnel.enumerated, 8_202_635);
+    assert_eq!(funnel.priceable, 8_202_635);
+    assert_eq!(funnel.liquid, 8_011_782);
+    assert_eq!(funnel.within_loss, 2_266_894);
+    assert_eq!(funnel.positive_ev, 4_285);
+    assert_eq!(funnel.above_min_score, 384);
+    assert_eq!(funnel.chosen, 32, "chosen must equal the trade count");
 
-    // The score models the forecast-target exit (payoff capped at the target), so
-    // selection shifts to near-ATM structures that actually reach a take-profit —
-    // most close on the 50%-of-max profit target. Everything exits on a quote;
-    // settlement is zero.
-    assert!((totals.total_pnl - 388.90).abs() < 0.01, "{}", totals.total_pnl);
-    assert!((totals.traded_pnl - 388.90).abs() < 0.01, "{}", totals.traded_pnl);
+    // A random walk has no directional edge (~49% hit-rate), so it neither beats
+    // nor clearly loses to the null on CRPS — a break-even-ish theta harvester.
+    let pooled = &built.model_eval.as_ref().unwrap().pooled;
+    assert!(pooled.crps_skill.abs() < 0.01, "skill {}", pooled.crps_skill);
+
+    // Everything exits on a quote; settlement is zero.
+    assert!((totals.total_pnl - -149.20).abs() < 0.01, "{}", totals.total_pnl);
+    assert!((totals.traded_pnl - -149.20).abs() < 0.01, "{}", totals.traded_pnl);
     assert!(totals.settled_pnl.abs() < 0.01, "{}", totals.settled_pnl);
-    assert_eq!(
-        totals.exits_by_reason["profit_target"], 8,
-        "near-ATM picks reach the profit target"
-    );
-    assert_eq!(totals.exits_by_reason["forecast_target"], 1);
+    // The credit spreads close when the underlying reaches the short strike.
+    assert_eq!(totals.exits_by_reason["underlying_past_short"], 31);
     // The forecast target rides on every ranked position for the chart.
     assert!(built.trades.iter().all(|t| t.forecast_target.is_some()));
 
-    // This selective run happens to pick all debit verticals; that credit
-    // orientations are enumerated and priceable is covered by the candidates
-    // unit tests. Pin that every pick's orientation is read from the fill sign.
-    // With the forecast-target exit capping the upside, the capped score favours
-    // credit spreads (reliable small wins) over debits — both orientations trade.
+    // Driftless is credit-heavy but both orientations trade (30 credit, 2 debit).
     let credits = built.trades.iter().filter(|t| t.entry_debit < 0.0).count();
-    assert!(credits >= 1, "credit verticals are chosen too");
-    assert!(credits < built.trades.len(), "not every pick is a credit");
+    assert!(credits >= 1 && credits < built.trades.len(), "credits {credits}");
 
-    // Cash, the trade log and the curve must agree, ranked or staged.
+    // Cash, the trade log and the curve must agree.
     let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
     assert!((totals.total_pnl - booked).abs() < 1e-6);
     let curve = report::combined_curve(&runs);
     assert!((curve.last().unwrap().equity - totals.final_equity).abs() < 1e-6);
+}
+
+/// The mean-reversion model — the main strategy — pinned end to end. The
+/// directional forecast (fade the trend) beats the random-walk null, and that
+/// unlocks the structure mix: debit spreads and naked longs instead of the
+/// driftless model's credit-only theta harvest.
+#[test]
+fn the_mean_reversion_model_reproduces_its_recorded_run() {
+    let snapshot = snapshot_or_skip!();
+    let config = StrategyConfig::load("strategies/mean_reversion.toml").unwrap();
+    let run_config = config.run_config();
+
+    let mut runs = Vec::new();
+    for symbol in &config.symbols {
+        let series = ChainSeries::load(&snapshot, symbol, config.expiry).unwrap();
+        let mut strategy = config.strategy().unwrap();
+        runs.push(engine::run_symbol(&series, &mut strategy, &run_config).unwrap());
+    }
+    let built = report::build(&config.name, config.expiry, &runs);
+    let totals = &built.totals;
+
+    assert_eq!(totals.symbols, 12);
+    assert_eq!(totals.trades, 26);
+
+    let funnel = &totals.census.ranking;
+    assert_eq!(funnel.enumerated, 1_934_541);
+    assert_eq!(funnel.chosen, 26);
+
+    // The forecast beats the null: positive CRPS skill and a >50% directional
+    // hit-rate. This is the whole reason the mean-reversion model exists.
+    let pooled = &built.model_eval.as_ref().unwrap().pooled;
+    assert!(pooled.crps_skill > 0.0, "skill {}", pooled.crps_skill);
+    assert!(
+        pooled.directional_hit_rate > 0.5,
+        "dir {}",
+        pooled.directional_hit_rate
+    );
+
+    // The directional forecast routes selection into debit spreads and naked
+    // longs — no credit spreads — the diversified mix the driftless model cannot
+    // produce. (P&L on ~26 trades is noise; the forecast is the validated part.)
+    // A naked long is a single leg (no short strike, so no '-' in the label).
+    let naked = built.trades.iter().filter(|t| !t.description.contains('-')).count();
+    let debit = built
+        .trades
+        .iter()
+        .filter(|t| t.entry_debit > 0.0 && t.description.contains('-'))
+        .count();
+    assert!(naked > 0, "naked longs are chosen");
+    assert!(debit > 0, "debit spreads are chosen");
+    assert_eq!(
+        built.trades.iter().filter(|t| t.entry_debit < 0.0).count(),
+        0,
+        "no credit spreads under the directional forecast"
+    );
+    assert!((totals.total_pnl - -630.90).abs() < 0.01, "{}", totals.total_pnl);
+    assert!(totals.settled_pnl.abs() < 0.01, "{}", totals.settled_pnl);
+
+    let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
+    assert!((totals.total_pnl - booked).abs() < 1e-6);
 }
 
 /// The shared account runs all twelve symbols against one $20k pool over a
@@ -396,7 +338,7 @@ fn the_ranked_strategy_reproduces_its_recorded_run() {
 #[test]
 fn the_shared_account_runs_all_symbols_against_one_pool() {
     let snapshot = snapshot_or_skip!();
-    let config = StrategyConfig::load("strategies/ranked_verticals_20k.toml").unwrap();
+    let config = StrategyConfig::load("strategies/shared_20k.toml").unwrap();
     let run_config = config.run_config();
 
     // One shared account: the per-symbol cap defaults to 1 in shared mode.
@@ -417,16 +359,17 @@ fn the_shared_account_runs_all_symbols_against_one_pool() {
     let built = report::build_shared(&config.name, config.expiry, &shared);
     let totals = &built.totals;
 
-    // One $20k pool, not $20k per symbol. Sizing blends a risk cap (10%/pos, 25%
-    // max) with a lot cap (5), for a gentle curve: ~13% drawdown at pf ~4.8.
+    // One $20k pool, not $20k per symbol. This is the mean-reversion model under
+    // a shared account with a risk cap (10%/pos, 25% max) and a lot cap (5). The
+    // directional model carries naked longs, so the curve is more volatile than
+    // the driftless credit harvester — the sizing caps bound it, not smooth it.
     assert!((totals.capital_deployed - 20_000.0).abs() < 1e-6);
-    assert_eq!(totals.trades, 14);
-    assert!((totals.total_pnl - 1851.50).abs() < 0.01, "{}", totals.total_pnl);
+    assert_eq!(totals.trades, 26);
+    assert!((totals.total_pnl - -2734.70).abs() < 0.01, "{}", totals.total_pnl);
     assert!(totals.settled_pnl.abs() < 0.01, "{}", totals.settled_pnl);
-    // At this gentle sizing the lot cap binds before capital, so the account
-    // never fills and no opportunity is turned away for lack of capital.
+    // The lot cap binds before capital, so the account never fills and no
+    // opportunity is turned away for lack of capital.
     assert_eq!(totals.census.capital_limited, 0);
-    assert!(totals.max_drawdown < 0.15, "drawdown {}", totals.max_drawdown);
 
     // Invariant 1: capital at risk never exceeds the one $20k pool; invariant 2:
     // at most one position is open per symbol at any instant; invariant 3: the
@@ -469,23 +412,6 @@ fn the_shared_account_runs_all_symbols_against_one_pool() {
     let booked: f64 = built.trades.iter().map(|t| t.pnl).sum();
     assert!((totals.total_pnl - booked).abs() < 1e-6);
     assert!((shared.equity_curve.last().unwrap().equity - totals.final_equity).abs() < 1e-6);
-}
-
-/// META's ladder reaches barely above the money on many bars, which is the real
-/// case selector rejection exists for. If this ever stops rejecting, check
-/// whether the ladder changed before assuming the selector improved.
-#[test]
-fn metas_truncated_ladder_rejects_the_far_leg() {
-    let snapshot = snapshot_or_skip!();
-    let config = StrategyConfig::load("strategies/rsi_bull_call.toml").unwrap();
-    let series = ChainSeries::load(&snapshot, "META", config.expiry).unwrap();
-    let mut strategy = config.strategy().unwrap();
-    let run = engine::run_symbol(&series, &mut strategy, &config.run_config()).unwrap();
-
-    assert_eq!(run.census.total_rejections(), 35);
-    let example = &run.census.rejection_examples["no_strike_near_target_delta"];
-    assert!(example.contains("0.30 delta"), "{example}");
-    assert!(example.contains("closest quoted"), "{example}");
 }
 
 /// A strategy that never fires must return exactly its capital — no drift, no
