@@ -19,6 +19,7 @@ pub mod eval;
 pub mod features;
 pub mod price_model;
 pub mod ranker;
+pub mod validation;
 
 pub use candidates::{Candidate, CandidateConfig, RankingFunnel, enumerate_verticals};
 pub use distribution::PriceDistribution;
@@ -28,3 +29,4 @@ pub use price_model::{LognormalDriftModel, LognormalModelConfig, PriceModel};
 pub use ranker::{
     RankMetric, RankedChoice, RankingConfig, expected_pl_and_score, prob_profit_of, rank,
 };
+pub use validation::ValidationRecord;
