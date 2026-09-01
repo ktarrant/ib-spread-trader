@@ -1,0 +1,16 @@
+# Probability-of-profit alternative over the same candidate universe.
+[candidates]
+rights = ["call", "put"]
+allow_debit = true
+allow_credit = true
+min_width = 0.0
+max_relative_spread = 0.35
+max_loss = 500.0
+quantity = 1
+
+[ranking]
+metric = "prob_profit"
+min_score = 0.02
+min_expected_pl = 0.0
+forecast_target_quantile = 0.85
+scorer_sample_per_bar = 20

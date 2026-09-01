@@ -4,15 +4,15 @@ Backtests modular option-spread strategies against captured Interactive Brokers
 history. Built to validate algorithms before they trade live through the IB API;
 **it places no orders, live or paper, and opens its data read-only.**
 
-A strategy is three composable stages, named in a TOML file:
+A ranked strategy is five composable, reusable labels:
 
 ```
-Signal              ->  Structure            ->  Selector
-RSI(14) crosses 30      bull call spread         which strikes, at what cost
+PriceModel -> Ranker -> PortfolioModel -> ExitModel    (over a DataSet)
 ```
 
-Each stage is a Rust trait, so parameters change without recompiling and new
-logic is a small impl.
+Each block is a strict TOML config, and model/ranker labels carry auditable JSON
+validation records. Parameters change without recompiling; genuinely new model or
+allocation logic remains a small Rust trait implementation.
 
 ## Quick start
 
@@ -24,58 +24,37 @@ cargo test
 cargo run -- catalog                                       # what is backtestable
 cargo run -- chain --symbol SPY --expiry 2026-08-21 \
                    --at 2026-08-19T15:00:00+00:00          # one resolved ladder
-cargo run -- backtest --config strategies/rsi_bull_call.toml --out out/
+cargo run -- backtest --config strategies/mean_reversion.toml --out out/
+python3 scripts/compare_strategies.py
+python3 scripts/validate_model.py strategies/mean_reversion.toml
 ```
 
 Every subcommand prints JSON to stdout and nothing else, so it pipes into `jq`.
 `--out` additionally writes `trades.csv` and `equity.csv`.
 
-## A strategy
+## A strategy composition
 
 ```toml
-name    = "rsi-oversold-bull-call"
-symbols = ["SPY", "QQQ", "NVDA"]
-expiry  = "2026-08-21"
-
-[signal]
-kind = "rsi_cross"
-period = 14
-level = 30.0
-
-[structure]
-kind = "vertical"
-right = "call"          # call + bullish trigger = bull call debit spread
-long_delta = 0.50
-short_delta = 0.30
-quantity = 1
+name      = "mean-reversion"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "ev"
+portfolio = "shared_20k"
+exit      = "base"
+dataset   = "2026-08-21"
 
 [execution]
-delta_tolerance = 0.07  # refuse rather than substitute a strike nobody asked for
-max_debit = 1000.0
 timing = "next_bar"
+earnings_blackout_days = 3
 
-[exit]
-profit_target_pct = 50.0
-stop_loss_pct = 100.0
+[costs]
+commission_per_contract = 0.65
 ```
 
-The repository also includes
-`strategies/volatility_contraction_breakout_bull_call.toml`. Its signal requires
-the previous bar's 20-bar Bollinger width to rank in the lowest historical
-decile, then a close above the prior 20-bar high on elevated stock volume,
-without a simultaneous ATM-IV shock. Volume is compared with the median of the
-same New York 30-minute slot across prior sessions, so the normal opening and
-closing peaks are not mistaken for confirmation. ATM IV is reconstructed from
-the OTM smile using the same interpolation as `ib-option-viz`.
-
-Multi-gate signals add a `signal_diagnostics` census to the JSON report. It shows
-how many bars reached contraction, breakout, volume, and IV gates, which matters
-when a strict configuration produces few or no trades.
-
-Legs are named by **absolute delta**, which is why one `[structure]` block covers
-both directions: for calls strike rises as delta falls, so long-0.50/short-0.30 is
-a bull call; for puts strike rises as |delta| rises, so the identical targets give
-a bear put.
+Labels resolve under `models/`, `rankers/`, `portfolios/`, `exits/`, and
+`datasets/`. Any block can instead be an inline table for an experiment. The
+shipped strategy variants change one label at a time, including a driftless model
+null, probability-of-profit ranker, two exit bundles, and equal-weight portfolio.
 
 ## What it refuses to do
 
@@ -104,11 +83,12 @@ Most of the design is about not manufacturing edge that was never there.
 |---|---|
 | `data/` | Read-only snapshot access, coverage catalog, chain loading |
 | `pricing/` | Black-76, put-call-parity forward, implied vol, delta |
-| `indicators/`, `signal/` | Stage one: when to act |
-| `structure/` | Stage two: what to build |
-| `execution/` | Stage three: which strikes, and what it costs |
-| `portfolio/`, `engine/` | Positions, the bar loop, exits, settlement |
+| `model/` | Forecasts, ranking, evaluation, validation gates |
+| `execution/` | Which strikes fill, and what crossing the book costs |
+| `indicators/`, `signal/`, `structure/` | The retired staged pipeline, kept dormant behind `Strategy::Staged` |
+| `portfolio/`, `engine/` | Allocation policies, positions, bar loop, exits, settlement |
 | `report/` | Summary, trade log, equity curve, rejection census |
+| `models/`, `rankers/`, `portfolios/`, `exits/`, `datasets/` | Labeled block registries |
 
 `tests/golden.rs` pins hand-confirmed values against the real snapshot and skips
 cleanly when none is present.

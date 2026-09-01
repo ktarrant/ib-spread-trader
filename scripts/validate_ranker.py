@@ -32,7 +32,7 @@ def scalar(source: str, key: str, default: str | None = None) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
-    parser.add_argument("--label", default="ev")
+    parser.add_argument("--label")
     parser.add_argument("--model-label")
     parser.add_argument("--db", type=Path)
     parser.add_argument("--binary", type=Path, default=DEFAULT_BINARY)
@@ -44,13 +44,20 @@ def main() -> None:
     args = parse_args()
     config = args.config if args.config.is_absolute() else ROOT / args.config
     source = config.read_text()
-    model_label = args.model_label or scalar(source, "name", config.stem)
-    expiry = scalar(source, "expiry")
+    model_label = args.model_label or scalar(source, "model", scalar(source, "name", config.stem))
+    label = args.label or scalar(source, "ranker", "ev")
+    dataset_label = scalar(source, "dataset", "")
+    dataset_source = (
+        (ROOT / "datasets" / f"{dataset_label}.toml").read_text()
+        if dataset_label
+        else source
+    )
+    expiry = scalar(dataset_source, "expiry")
     command = [str(args.binary)]
     if args.db:
         command.extend(["--db", str(args.db)])
     command.extend(["backtest", "--config", str(config)])
-    print(f"validating ranker {args.label} with model {model_label}", file=sys.stderr)
+    print(f"validating ranker {label} with model {model_label}", file=sys.stderr)
     result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
@@ -62,7 +69,7 @@ def main() -> None:
     spearman = scorer["spearman"]
     monotonicity = scorer["decile_monotonicity"]
     record = {
-        "label": args.label,
+        "label": label,
         "model_label": model_label,
         "dataset": expiry,
         "spearman": spearman,
@@ -73,7 +80,7 @@ def main() -> None:
     registry = args.registry if args.registry.is_absolute() else ROOT / args.registry
     registry.mkdir(parents=True, exist_ok=True)
     rendered = json.dumps(record, indent=2) + "\n"
-    (registry / f"{args.label}.json").write_text(rendered)
+    (registry / f"{label}.json").write_text(rendered)
     sys.stdout.write(rendered)
 
 

@@ -1,8 +1,8 @@
 //! Strategy configuration in TOML.
 //!
-//! The three pipeline stages are named by string and their parameters given
-//! inline, so a parameter sweep needs no recompile. Genuinely new logic is still
-//! a trait impl — this is composition over built-in blocks, not an interpreter.
+//! Ranked strategies compose five label-or-inline blocks: price model, ranker,
+//! portfolio model, exit model, and dataset. A parameter sweep needs no
+//! recompile; genuinely new logic is still a trait implementation.
 //!
 //! **Every field carries `#[serde(default)]`.** Without it a partial config
 //! fails to deserialize, which is a live papercut in the sibling `ib-option-calc`
@@ -37,17 +37,19 @@ pub struct StrategyConfig {
     pub name: String,
     #[serde(default)]
     pub symbols: Vec<String>,
+    #[serde(default = "default_expiry")]
     pub expiry: NaiveDate,
+    /// A named dataset under `datasets/`, or an inline `[dataset]` block.
+    #[serde(default)]
+    pub dataset: Option<DatasetBlock>,
     #[serde(default = "default_cash")]
     pub initial_cash: f64,
     /// Which decision engine to run. Absent means the staged pipeline, so every
     /// existing config keeps working untouched.
     #[serde(default)]
     pub mode: StrategyMode,
-    /// Whether each symbol gets its own `initial_cash` (the default, and what
-    /// every existing config does) or all symbols share one account. Shared
-    /// makes `initial_cash` a single pool that entries compete for, funded
-    /// best-score-first and sized against the capital still free.
+    /// Legacy inline account selection. Named/inline `portfolio` blocks supersede
+    /// this; shared is the default when no portfolio block is present.
     #[serde(default)]
     pub account: AccountMode,
     #[serde(default)]
@@ -61,17 +63,20 @@ pub struct StrategyConfig {
     pub exit: ExitBlock,
     #[serde(default)]
     pub costs: CostsConfig,
-    /// Ranked-mode sections. Ignored in staged mode.
+    /// Legacy inline ranked-mode sections. A model/ranker label supersedes the
+    /// corresponding fields while preserving them for one-off configs.
     #[serde(default)]
     pub features: FeaturesConfig,
     #[serde(default)]
-    pub model: ModelConfig,
+    pub model: ModelBlock,
     #[serde(default)]
     pub candidates: CandidatesConfig,
     #[serde(default)]
     pub ranking: RankingSectionConfig,
-    /// Score-weighted position sizing. Absent means fixed one-lot entries.
-    /// Ranked mode only — the staged path has no score to size against.
+    /// A named ranker bundle under `rankers/`, or an inline `[ranker]` block.
+    #[serde(default)]
+    pub ranker: Option<RankerBlock>,
+    /// Legacy inline score-weighted sizing; named/inline `portfolio` supersedes it.
     #[serde(default)]
     pub sizing: Option<SizingConfig>,
     /// A named portfolio bundle under `portfolios/`, or an inline `[portfolio]`
@@ -111,6 +116,9 @@ fn default_cash() -> f64 {
     // A single shared account, so a realistic limited-capital figure rather than
     // a per-symbol sleeve.
     20_000.0
+}
+fn default_expiry() -> NaiveDate {
+    NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid sentinel date")
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -381,7 +389,7 @@ impl Default for ExitConfig {
 
 /// A strategy can reuse a named exit bundle or define one inline. TOML itself
 /// rejects trying to provide both `exit = "..."` and `[exit]` as a duplicate key.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum ExitBlock {
     Label(String),
@@ -391,6 +399,115 @@ pub enum ExitBlock {
 impl Default for ExitBlock {
     fn default() -> Self {
         Self::Inline(ExitConfig::default())
+    }
+}
+
+/// A selected block supersedes the legacy fields it replaces, and a superseded
+/// field beside it would be **silently ignored** — the same papercut
+/// `deny_unknown_fields` exists to prevent. Only the raw text can catch it: once
+/// deserialized, a field that was written is indistinguishable from one that
+/// took its default. So `load` refuses the pair and names both keys.
+///
+/// `[model]` is the exception that needs the label test: it is *itself* the
+/// inline block, so `[features]` only conflicts with a `model = "label"` string.
+fn reject_shadowed_fields(text: &str) -> Result<()> {
+    let raw: toml::Table = match toml::from_str(text) {
+        // A parse error is the deserializer's to report, with its span.
+        Err(_) => return Ok(()),
+        Ok(raw) => raw,
+    };
+    // (block key, only a string label supersedes, the fields it supersedes)
+    const BLOCKS: [(&str, bool, &[&str]); 4] = [
+        ("model", true, &["features"]),
+        ("ranker", false, &["candidates", "ranking"]),
+        ("dataset", false, &["symbols", "expiry"]),
+        ("portfolio", false, &["account", "initial_cash", "sizing"]),
+    ];
+    for (block, label_only, shadowed) in BLOCKS {
+        let selected = match raw.get(block) {
+            None => false,
+            Some(value) => !label_only || value.is_str(),
+        };
+        if !selected {
+            continue;
+        }
+        if let Some(key) = shadowed.iter().find(|key| raw.contains_key(**key)) {
+            bail!(
+                "`{block}` selects a block, so `{key}` beside it would be ignored; \
+                 move it inside the block, or drop `{block}`"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A block is written either as a label or as its own inline table.
+enum LabelOrInline<T> {
+    Label(String),
+    Inline(T),
+}
+
+/// `#[serde(untagged)]` answers a typo inside an inline block with "data did not
+/// match any variant", naming the enum instead of the misspelled key — the exact
+/// papercut `deny_unknown_fields` exists to prevent, and one a labeled block file
+/// does not have (it deserializes into the inner type directly). Dispatching on
+/// the value's own shape — a string is a label, anything else is the block —
+/// keeps an inline block's error the inner type's own, which names the field.
+fn label_or_inline<'de, D, T>(deserializer: D) -> Result<LabelOrInline<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    match toml::Value::deserialize(deserializer)? {
+        toml::Value::String(label) => Ok(LabelOrInline::Label(label)),
+        inline => T::deserialize(inline)
+            .map(LabelOrInline::Inline)
+            .map_err(serde::de::Error::custom),
+    }
+}
+
+impl<'de> Deserialize<'de> for ExitBlock {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match label_or_inline(deserializer)? {
+            LabelOrInline::Label(label) => Self::Label(label),
+            LabelOrInline::Inline(inline) => Self::Inline(inline),
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for PortfolioBlock {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match label_or_inline(deserializer)? {
+            LabelOrInline::Label(label) => Self::Label(label),
+            LabelOrInline::Inline(inline) => Self::Inline(inline),
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ModelBlock {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match label_or_inline(deserializer)? {
+            LabelOrInline::Label(label) => Self::Label(label),
+            LabelOrInline::Inline(inline) => Self::Inline(inline),
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for DatasetBlock {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match label_or_inline(deserializer)? {
+            LabelOrInline::Label(label) => Self::Label(label),
+            LabelOrInline::Inline(inline) => Self::Inline(inline),
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for RankerBlock {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match label_or_inline(deserializer)? {
+            LabelOrInline::Label(label) => Self::Label(label),
+            LabelOrInline::Inline(inline) => Self::Inline(inline),
+        })
     }
 }
 
@@ -582,7 +699,7 @@ impl Default for PortfolioConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum PortfolioBlock {
     Label(String),
@@ -717,6 +834,61 @@ impl ModelConfig {
     }
 }
 
+/// A complete labeled forecasting block owns both feature extraction and model
+/// weights/horizon. Legacy inline configs retain `[features]` + `[model]`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelBundleConfig {
+    pub features: FeaturesConfig,
+    pub model: ModelConfig,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum ModelBlock {
+    Label(String),
+    Inline(ModelConfig),
+}
+
+impl Default for ModelBlock {
+    fn default() -> Self {
+        Self::Inline(ModelConfig::default())
+    }
+}
+
+/// The symbols and expiry that identify the currently available dataset.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DatasetConfig {
+    pub symbols: Vec<String>,
+    pub expiry: NaiveDate,
+}
+
+impl Default for DatasetConfig {
+    fn default() -> Self {
+        Self {
+            symbols: Vec::new(),
+            expiry: default_expiry(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum DatasetBlock {
+    Label(String),
+    Inline(DatasetConfig),
+}
+
+impl DatasetBlock {
+    fn resolve(&self) -> Result<DatasetConfig> {
+        match self {
+            Self::Label(label) => load_labeled("datasets", label),
+            Self::Inline(config) => Ok(config.clone()),
+        }
+    }
+}
+
 /// `[candidates]` — which verticals to enumerate and the liquidity/loss limits.
 /// `max_width` is optional so "no cap" stays JSON-serializable (an infinity
 /// would not).
@@ -826,20 +998,57 @@ impl RankingSectionConfig {
     }
 }
 
+/// Candidate universe plus scoring rule as one reusable ranking block.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RankerBundleConfig {
+    pub candidates: CandidatesConfig,
+    pub ranking: RankingSectionConfig,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum RankerBlock {
+    Label(String),
+    Inline(RankerBundleConfig),
+}
+
+impl RankerBlock {
+    fn resolve(&self) -> Result<RankerBundleConfig> {
+        match self {
+            Self::Label(label) => load_labeled("rankers", label),
+            Self::Inline(config) => Ok(config.clone()),
+        }
+    }
+}
+
 impl StrategyConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading strategy config {}", path.display()))?;
-        let config: Self = toml::from_str(&text)
+        reject_shadowed_fields(&text)
+            .with_context(|| format!("reading strategy config {}", path.display()))?;
+        let mut config: Self = toml::from_str(&text)
             .with_context(|| format!("parsing strategy config {}", path.display()))?;
+        // Materialize dataset identity for existing callers and for the report's
+        // resolved config, while retaining the label alongside it.
+        if let Some(dataset) = &config.dataset {
+            let resolved = dataset.resolve()?;
+            config.symbols = resolved.symbols;
+            config.expiry = resolved.expiry;
+        }
         config.validate()?;
         Ok(config)
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.symbols.is_empty() {
+        let dataset = self.resolved_dataset()?;
+        if dataset.symbols.is_empty() {
             bail!("`symbols` is empty; nothing to backtest");
+        }
+        if dataset.expiry == default_expiry() {
+            bail!("an expiry is required, inline or through a dataset label");
         }
         if self.portfolio.is_some() && self.sizing.is_some() {
             bail!("use either `portfolio` or legacy `[sizing]`, not both");
@@ -887,22 +1096,53 @@ impl StrategyConfig {
             bail!("exit.live_pop_floor must be in 0..=1, got {floor}");
         }
         if self.mode == StrategyMode::Ranked {
+            let model = self.resolved_model()?;
             match self.execution.min_entry_days_before_expiry {
-                Some(min_days) if (min_days as f64) < self.model.horizon_days => bail!(
+                Some(min_days) if (min_days as f64) < model.model.horizon_days => bail!(
                     "execution.min_entry_days_before_expiry ({}) must be >= model.horizon_days ({}) \
                      so a scored entry always gets the full horizon",
                     min_days,
-                    self.model.horizon_days
+                    model.model.horizon_days
                 ),
                 None => bail!(
                     "ranked mode needs execution.min_entry_days_before_expiry set to at least \
                      model.horizon_days ({}), or a late entry is scored on a truncated horizon",
-                    self.model.horizon_days
+                    model.model.horizon_days
                 ),
                 _ => {}
             }
         }
         Ok(())
+    }
+
+    fn resolved_dataset(&self) -> Result<DatasetConfig> {
+        match &self.dataset {
+            Some(block) => block.resolve(),
+            None => Ok(DatasetConfig {
+                symbols: self.symbols.clone(),
+                expiry: self.expiry,
+            }),
+        }
+    }
+
+    fn resolved_model(&self) -> Result<ModelBundleConfig> {
+        match &self.model {
+            ModelBlock::Label(label) => load_labeled("models", label),
+            ModelBlock::Inline(model) => Ok(ModelBundleConfig {
+                features: self.features,
+                model: *model,
+            }),
+        }
+    }
+
+    fn resolved_ranker(&self) -> Result<RankerBundleConfig> {
+        match &self.ranker {
+            Some(block) => block.resolve(),
+            None => Ok(RankerBundleConfig {
+                candidates: self.candidates.clone(),
+                ranking: self.ranking,
+            }),
+        }
     }
 
     fn resolved_portfolio(&self) -> Result<ResolvedPortfolio> {
@@ -1034,18 +1274,22 @@ impl StrategyConfig {
     }
 
     fn ranked_strategy(&self) -> Result<RankedStrategy> {
+        let model = self.resolved_model()?;
+        let ranker = self.resolved_ranker()?;
         Ok(RankedStrategy {
             name: self.name.clone(),
-            features: FeatureEngine::new(self.features.to_runtime())?,
-            model: Box::new(LognormalDriftModel::new(self.model.to_runtime()?)),
-            candidates: self.candidates.to_runtime()?,
-            ranking: self.ranking.to_runtime()?,
+            features: FeatureEngine::new(model.features.to_runtime())?,
+            model: Box::new(LognormalDriftModel::new(model.model.to_runtime()?)),
+            candidates: ranker.candidates.to_runtime()?,
+            ranking: ranker.ranking.to_runtime()?,
         })
     }
 
     pub fn run_config(&self) -> Result<RunConfig> {
         let exit = self.exit.resolve()?;
         let portfolio = self.resolved_portfolio()?;
+        let model = self.resolved_model()?;
+        let ranker = self.resolved_ranker()?;
         Ok(RunConfig {
             initial_cash: portfolio.initial_cash,
             costs: Costs {
@@ -1055,7 +1299,7 @@ impl StrategyConfig {
             exits: ExitRules {
                 forecast_target_quantile: exit
                     .forecast_target_quantile
-                    .or(self.ranking.forecast_target_quantile),
+                    .or(ranker.ranking.forecast_target_quantile),
                 profit_target_pct: exit.profit_target_pct,
                 stop_loss_pct: exit.stop_loss_pct,
                 underlying_past_short_strike: exit.underlying_past_short_strike,
@@ -1065,7 +1309,7 @@ impl StrategyConfig {
                 // The forecast-horizon exit keys off the model's own horizon.
                 forecast_horizon_days: exit
                     .close_after_forecast_horizon
-                    .then_some(self.model.horizon_days),
+                    .then_some(model.model.horizon_days),
                 max_time_pct: exit.max_time_pct,
                 close_before_earnings: exit.close_before_earnings,
                 min_days_before_expiry: exit.min_days_before_expiry,
@@ -1229,6 +1473,8 @@ horizon_days = 10.0
             "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nmode=\"ranked\"\n[model]\nhorzon_days=3.0",
         )
         .unwrap_err();
+        // The message names the misspelled key, not the block enum: an inline
+        // block deserializes through its own type, so it errors like one.
         assert!(err.to_string().contains("horzon_days"), "{err}");
 
         // A non-positive horizon fails validation before any I/O.
@@ -1309,7 +1555,95 @@ horizon_days = 10.0
             "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\n[portfolio]\ninitial_cahs=20000",
         )
         .unwrap_err();
-        assert!(typo.to_string().contains("PortfolioBlock"), "{typo}");
+        assert!(typo.to_string().contains("initial_cahs"), "{typo}");
+    }
+
+    #[test]
+    fn the_main_strategy_resolves_all_five_labeled_blocks() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("strategies/mean_reversion.toml");
+        let config = StrategyConfig::load(path).unwrap();
+        assert_eq!(config.symbols.len(), 12);
+        assert_eq!(config.expiry, NaiveDate::from_ymd_opt(2026, 8, 21).unwrap());
+        assert!(matches!(&config.model, ModelBlock::Label(label) if label == "mean-reversion"));
+        assert!(matches!(&config.ranker, Some(RankerBlock::Label(label)) if label == "ev"));
+        assert!(matches!(&config.exit, ExitBlock::Label(label) if label == "base"));
+        assert!(matches!(&config.portfolio, Some(PortfolioBlock::Label(label)) if label == "shared_20k"));
+        assert!(matches!(&config.dataset, Some(DatasetBlock::Label(label)) if label == "2026-08-21"));
+
+        let Strategy::Ranked(ranked) = config.strategy().unwrap() else {
+            panic!("the composition is ranked");
+        };
+        assert_eq!(ranked.model.horizon_days(), 7.0);
+        assert_eq!(ranked.ranking.min_score, 0.02);
+    }
+
+    #[test]
+    fn unknown_model_ranker_and_dataset_labels_fail_with_context() {
+        for (field, value) in [
+            ("model", "missing-model"),
+            ("ranker", "missing-ranker"),
+            ("dataset", "missing-dataset"),
+        ] {
+            let source = if field == "dataset" {
+                format!("mode=\"ranked\"\ndataset=\"{value}\"")
+            } else {
+                format!(
+                    "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nmode=\"ranked\"\n{field}=\"{value}\""
+                )
+            };
+            let config: StrategyConfig = toml::from_str(&source).unwrap();
+            let err = config.validate().unwrap_err();
+            assert!(err.to_string().contains(value), "{field}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_label_refuses_the_legacy_field_it_supersedes() {
+        // Each pair would otherwise parse fine, with the inline half silently
+        // ignored — a config that reads as one thing and runs as another.
+        for source in [
+            "mode=\"ranked\"\nmodel=\"mean-reversion\"\n[features]\ntrend_fast=5",
+            "mode=\"ranked\"\nranker=\"ev\"\n[ranking]\nmin_score=0.5",
+            "mode=\"ranked\"\nranker=\"ev\"\n[candidates]\nmax_loss=100.0",
+            "mode=\"ranked\"\ndataset=\"2026-08-21\"\nsymbols=[\"SPY\"]",
+            "mode=\"ranked\"\ndataset=\"2026-08-21\"\nexpiry=\"2026-08-21\"",
+            "mode=\"ranked\"\nportfolio=\"shared_20k\"\ninitial_cash=50000.0",
+            "mode=\"ranked\"\nportfolio=\"shared_20k\"\naccount=\"per_symbol\"",
+        ] {
+            let err = reject_shadowed_fields(source).unwrap_err();
+            assert!(err.to_string().contains("would be ignored"), "{source}: {err}");
+        }
+    }
+
+    #[test]
+    fn an_inline_block_still_pairs_with_its_own_legacy_fields() {
+        // `[model]` *is* the inline block, so `[features]` belongs beside it —
+        // only the string label form supersedes them. Same for a one-off account.
+        reject_shadowed_fields(
+            "symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\n[features]\ntrend_fast=5\n[model]\nhorizon_days=7.0",
+        )
+        .unwrap();
+        reject_shadowed_fields("initial_cash=50000.0\naccount=\"per_symbol\"\n[sizing]\nmax_lots=3")
+            .unwrap();
+    }
+
+    #[test]
+    fn every_shipped_strategy_resolves_its_labels() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("strategies");
+        let mut count = 0;
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|ext| ext != "toml") {
+                continue;
+            }
+            let config = StrategyConfig::load(&path)
+                .unwrap_or_else(|err| panic!("{}: {err:#}", path.display()));
+            // A composition that resolves must also build its stages.
+            config.strategy().unwrap();
+            config.run_config().unwrap();
+            count += 1;
+        }
+        assert!(count >= 6, "expected the shipped variant set, found {count}");
     }
 
     #[test]

@@ -42,11 +42,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def validation_config(source: str, symbols: list[str]) -> str:
+def validation_config(source: str, symbols: list[str], expiry: str) -> str:
     replacement = "symbols = " + json.dumps(symbols)
     text, count = re.subn(r"(?m)^symbols\s*=\s*\[[^\n]*\]", replacement, source, count=1)
+    if count == 0:
+        text, count = re.subn(
+            r'(?m)^dataset\s*=\s*"[^"]+"\s*$',
+            replacement + f'\nexpiry = "{expiry}"',
+            text,
+            count=1,
+        )
     if count != 1:
-        raise ValueError("validation currently needs a top-level `symbols = [...]` array")
+        raise ValueError("validation needs an inline dataset or dataset label")
+
+    # Materialize the ranker label so scorer sampling can be disabled without
+    # changing the registered block or the forecast being evaluated.
+    ranker_label = scalar(text, "ranker", "")
+    if ranker_label:
+        ranker_source = (ROOT / "rankers" / f"{ranker_label}.toml").read_text()
+        text = re.sub(r'(?m)^ranker\s*=\s*"[^"]+"\s*$', "", text, count=1)
+        text += "\n" + ranker_source
     if re.search(r"(?m)^scorer_sample_per_bar\s*=", text):
         text = re.sub(
             r"(?m)^scorer_sample_per_bar\s*=.*$",
@@ -81,11 +96,22 @@ def main() -> None:
     args = parse_args()
     config_path = args.config if args.config.is_absolute() else ROOT / args.config
     source = config_path.read_text()
-    label = scalar(source, "name", config_path.stem)
-    symbols_match = re.search(r"(?m)^symbols\s*=\s*(\[[^\n]*\])", source)
+    model_label = scalar(source, "model", scalar(source, "name", config_path.stem))
+    dataset_label = scalar(source, "dataset", "")
+    dataset_source = (
+        (ROOT / "datasets" / f"{dataset_label}.toml").read_text()
+        if dataset_label
+        else source
+    )
+    symbols_match = re.search(r"(?m)^symbols\s*=\s*(\[[^\n]*\])", dataset_source)
     symbols = json.loads(symbols_match.group(1)) if symbols_match else []
-    expiry = scalar(source, "expiry")
-    model_match = re.search(r"(?ms)^\[model\]\s*(.*?)(?=^\[|\Z)", source)
+    expiry = scalar(dataset_source, "expiry")
+    model_source = (
+        (ROOT / "models" / f"{model_label}.toml").read_text()
+        if scalar(source, "model", "")
+        else source
+    )
+    model_match = re.search(r"(?ms)^\[model\]\s*(.*?)(?=^\[|\Z)", model_source)
     horizon_match = (
         re.search(r"(?m)^horizon_days\s*=\s*([0-9.eE+-]+)", model_match.group(1))
         if model_match
@@ -100,15 +126,15 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="ib-model-validation-") as temp_name:
         temp = Path(temp_name)
         pooled_config = temp / "pooled.toml"
-        pooled_config.write_text(validation_config(source, symbols))
-        print(f"validating {label} across {len(symbols)} symbols", file=sys.stderr)
+        pooled_config.write_text(validation_config(source, symbols, expiry))
+        print(f"validating {model_label} across {len(symbols)} symbols", file=sys.stderr)
         pooled_report = backtest(args.binary, pooled_config, args.db)
         pooled = pooled_report["model_eval"]["pooled"]
 
         held_out_hits: list[float] = []
         for symbol in symbols:
             fold_config = temp / f"held-out-{symbol.lower()}.toml"
-            fold_config.write_text(validation_config(source, [symbol]))
+            fold_config.write_text(validation_config(source, [symbol], expiry))
             print(f"  held out: {symbol}", file=sys.stderr)
             report = backtest(args.binary, fold_config, args.db)
             held_out_hits.append(report["model_eval"]["pooled"]["directional_hit_rate"])
@@ -122,7 +148,7 @@ def main() -> None:
         and passing_symbols >= required_symbols
     )
     record = {
-        "label": label,
+        "label": model_label,
         "dataset": str(expiry),
         "horizon_days": horizon_days,
         "crps_skill": pooled["crps_skill"],
@@ -140,7 +166,7 @@ def main() -> None:
 
     registry = args.registry if args.registry.is_absolute() else ROOT / args.registry
     registry.mkdir(parents=True, exist_ok=True)
-    destination = registry / f"{label}.json"
+    destination = registry / f"{model_label}.json"
     rendered = json.dumps(record, indent=2) + "\n"
     destination.write_text(rendered)
     sys.stdout.write(rendered)

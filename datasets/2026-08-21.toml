@@ -1,0 +1,3 @@
+# The sole captured expiry currently available for validation.
+symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR"]
+expiry = "2026-08-21"

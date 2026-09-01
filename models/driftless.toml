@@ -1,0 +1,18 @@
+# Random-walk null; intentionally fails the labeled-model gate (see JSON).
+[features]
+trend_fast = 10
+trend_slow = 30
+atr_period = 14
+realized_vol_period = 20
+skew_moneyness = 0.05
+
+[model]
+horizon_days = 7.0
+bars_per_year = 3276.0
+realized_vol_weight = 0.0
+fallback_vol = 0.30
+trend_weight = 0.0
+vwap_reversion = 0.0
+skew_weight = 0.0
+grid_sigma = 4.0
+grid_points = 101

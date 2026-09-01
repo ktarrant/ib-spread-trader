@@ -1,79 +1,15 @@
-# Mean-reversion price-target model — the main strategy.
-#
-# The price-target engine forecasts a distribution over the underlying one
-# trading week out, enumerates every debit and credit vertical (and naked long)
-# the ladder supplies, marks each to model against that distribution, and takes
-# the best expected P/L per unit of risk. The forecast carries a *mean-reversion*
-# drift: it fades the fast/slow trend gap rather than following it.
-#
-# Why mean-reversion (and not momentum): on the reference snapshot, at a one-week
-# horizon, fading the trend forecasts *better than a random walk* — 57%
-# directional hit-rate, +0.013 CRPS skill, robust across 9/12 symbols under
-# leave-one-symbol-out. v1's momentum drift did the opposite and lost. Short
-# horizons are the reversion regime; momentum needs weeks-to-months.
-#
-# This is the base config; driftless.toml (model), prob_profit.toml (scorer), and
-# exit_pop_trailing.toml / exit_momentum.toml (exit) are single-axis variations.
-#
-# Account: every backtest runs as one shared $20k pool by default (account =
-# "shared", initial_cash = 20000, with score-weighted sizing at 10%/25%/5-lot) —
-# a realistic limited-capital account, not the sum of per-symbol sleeves. All of
-# that is inherited from the code defaults; a config need only override to differ.
+# Main validated composition. Each label resolves to a strict block registry.
+name      = "mean-reversion"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "ev"
+portfolio = "shared_20k"
+exit      = "base"
+dataset   = "2026-08-21"
 
-name    = "mean-reversion"
-symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR"]
-expiry  = "2026-08-21"
-mode    = "ranked"
-exit    = "base"
-
-# Close well before the tape stops so a position exits on a real quote. The
-# 8-day entry blackout is also the guard for the 7-day scoring horizon: an entry
-# always gets the full horizon (validate() enforces blackout >= horizon).
 [execution]
 timing = "next_bar"
 earnings_blackout_days = 3
 
 [costs]
 commission_per_contract = 0.65
-
-[features]
-trend_fast = 10
-trend_slow = 30
-atr_period = 14
-realized_vol_period = 20
-skew_moneyness = 0.05
-
-# The forecast. Vol is ATM IV alone (realized_vol_weight = 0): on the reference
-# snapshot that is the best-calibrated blend (pooled coverage 53/81/88 vs nominal
-# 50/80/90), where trailing realized vol runs too narrow on the jumpy names.
-# trend_weight = -0.5 is the mean-reversion drift (negative = fade the trend);
-# the -0.4..-0.7 range is a flat calibration plateau, so the exact value is not a
-# knife-edge. Only the drift's *sign* sets direction; magnitude tunes calibration.
-[model]
-horizon_days = 7.0
-bars_per_year = 3276.0
-realized_vol_weight = 0.0
-fallback_vol = 0.30
-trend_weight = -0.5
-vwap_reversion = 0.0
-skew_weight = 0.0
-grid_sigma = 4.0
-grid_points = 101
-
-[candidates]
-rights = ["call", "put"]
-allow_debit = true
-allow_credit = true
-min_width = 0.0
-max_relative_spread = 0.35
-max_loss = 500.0
-quantity = 1
-
-# One trading week (7 calendar days = same weekday next week, a clean realized
-# read). The directional edge peaks at ~1 week and decays to a coin-flip by two
-# weeks, so the horizon is deliberately short.
-[ranking]
-min_score = 0.02
-min_expected_pl = 0.0
-forecast_target_quantile = 0.85
-scorer_sample_per_bar = 20

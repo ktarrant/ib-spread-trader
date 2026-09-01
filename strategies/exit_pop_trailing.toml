@@ -1,17 +1,11 @@
-# Exit variant: live-POP give-up on debit spreads + trailing stop on naked longs.
-#
-# Same model, scorer, and forecast as mean_reversion.toml — only the exit differs,
-# so a comparison against it isolates the exit axis. Debit spreads still take
-# profit at the short strike, but now *give up* when their live probability of
-# profit (the spread re-scored against the current forecast) falls below 25%.
-# Naked longs are let to run with a 30% trailing stop instead of a hard forecast
-# target. Credit spreads still run their full forecast window.
-
-name    = "exit-pop-trailing"
-symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR"]
-expiry  = "2026-08-21"
-mode    = "ranked"
-exit    = "pop_trailing"
+# Exit-axis variant: only the exit label changes from mean_reversion.
+name      = "exit-pop-trailing"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "ev"
+portfolio = "shared_20k"
+exit      = "pop_trailing"
+dataset   = "2026-08-21"
 
 [execution]
 timing = "next_bar"
@@ -19,36 +13,3 @@ earnings_blackout_days = 3
 
 [costs]
 commission_per_contract = 0.65
-
-[features]
-trend_fast = 10
-trend_slow = 30
-atr_period = 14
-realized_vol_period = 20
-skew_moneyness = 0.05
-
-[model]
-horizon_days = 7.0
-bars_per_year = 3276.0
-realized_vol_weight = 0.0
-fallback_vol = 0.30
-trend_weight = -0.5
-vwap_reversion = 0.0
-skew_weight = 0.0
-grid_sigma = 4.0
-grid_points = 101
-
-[candidates]
-rights = ["call", "put"]
-allow_debit = true
-allow_credit = true
-min_width = 0.0
-max_relative_spread = 0.35
-max_loss = 500.0
-quantity = 1
-
-[ranking]
-min_score = 0.02
-min_expected_pl = 0.0
-forecast_target_quantile = 0.85
-scorer_sample_per_bar = 20

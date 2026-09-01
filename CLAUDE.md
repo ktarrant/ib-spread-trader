@@ -5,15 +5,20 @@ Guidance for Claude Code working in this repository.
 ## What this is
 
 A Rust backtester for **modular option-spread strategies**, built to validate
-algorithms before they trade live through the IB API. The pipeline is three
-composable stages:
+algorithms before they trade live through the IB API. A backtest is a composition
+of five labeled blocks, each a strict TOML file that can be validated and reused
+on its own:
 
 ```
-Signal (RSI crosses 30)  ->  Structure (bull call spread)  ->  Selector (which strikes, what cost)
+PriceModel  ->  Ranker  ->  PortfolioModel  ->  ExitModel        (over a DataSet)
+ (forecast)     (score)      (size & fund)       (when to close)
 ```
 
-Each stage is a trait, and a strategy is a TOML file naming one of each. Live
-execution is **not** in scope yet; the seams exist so it can be added without rework.
+Each block is a trait or a config, and a strategy TOML names one of each — so a
+comparison changes exactly one label and the difference is attributable to that
+axis. An earlier `Signal -> Structure -> Selector` pipeline is retired but kept
+dormant behind `Strategy::Staged`. Live execution is **not** in scope yet; the
+seams exist so it can be added without rework.
 
 ## Sibling repos — read, never modify
 
@@ -349,7 +354,7 @@ crossings of the book. So the rule fires for **debit structures only**
 
 Credit spreads instead run to the end of their **forecast window**:
 `close_after_forecast_horizon` closes a position once it has been open as long as
-`ranking.horizon_days` — the horizon it was scored to, after which the forecast no
+`model.horizon_days` — the horizon it was scored to, after which the forecast no
 longer speaks to it. It keys off the scoring horizon directly (so the two can
 never drift apart) and applies to any structure, capping how long anything drifts
 past the model's view. It sits below the take-profit and stop in priority, so a
@@ -377,8 +382,8 @@ context. The reorder is behavior-neutral — the feature engine still advances o
 per bar, in order — which the unchanged ranked goldens prove. `leg_vols` and
 `peak_value` ride on `OpenPosition` to feed live POP and the trailing stop.
 
-Exit is a framework axis: `exit_pop_trailing.toml` and `exit_momentum.toml` are
-the `mean_reversion` base with only the exit changed, and
+Exit is a framework axis: the `pop_trailing` and `momentum` labels under `exits/`
+are selected by strategies that otherwise match the `mean_reversion` base, and
 `scripts/compare_strategies.py`'s exit-mix column shows *how* each variant closes.
 
 ## Test fixtures generate their own options
@@ -394,11 +399,31 @@ takes 10.7s instead of 0.24s.
 
 `strategies/mean_reversion.toml` is the worked example; the shipped configs are all
 `mode = "ranked"` (the staged three-stage pipeline is retired — its configs are
-gone, its engine dormant). Every stage/section is named by string with parameters
-inline, so a parameter sweep needs no recompile; genuinely new logic is still a
-trait impl (`PriceModel`, or a staged `Signal`/`Structure`/`Selector`).
+gone, its engine dormant). A ranked strategy composes five strict labels:
+`model`, `ranker`, `portfolio`, `exit`, and `dataset`. They resolve TOML under the
+matching plural directories; each field also accepts an inline table for one-off
+runs. Genuinely new logic is still a trait impl (`PriceModel`, `PortfolioModel`,
+or a staged `Signal`/`Structure`/`Selector`).
 `StrategyConfig::validate` builds every stage up front, so a typo fails before any
 I/O rather than after the first symbol has already run.
+
+A label **supersedes** the legacy inline fields it replaces — `model` supersedes
+`[features]`, `ranker` supersedes `[candidates]`/`[ranking]`, `dataset` supersedes
+`symbols`/`expiry`, `portfolio` supersedes `account`/`initial_cash`/`[sizing]` —
+and writing both is **refused**, not silently resolved (`reject_shadowed_fields`,
+which reads the raw TOML because a written field and a defaulted one are
+indistinguishable once deserialized). A config must read the way it runs; that is
+the same reason unknown keys are refused. The block enums deserialize by
+dispatching on the value's shape rather than `#[serde(untagged)]`, so a typo
+inside an inline block still names the misspelled key instead of the enum.
+
+Labels resolve under `CARGO_MANIFEST_DIR`, so they follow the **source tree**, not
+the working directory — a binary copied elsewhere still reads this repo's blocks.
+
+`models/<label>.json` records the forecast gate (CRPS skill, PIT calibration,
+coverage, direction, and per-symbol robustness). `rankers/<label>.json` records
+candidate Spearman and decile monotonicity paired with a model label. Regenerate
+them with `scripts/validate_model.py` and `scripts/validate_ranker.py`.
 
 **Every field carries `#[serde(default)]`, and unknown keys are refused.** A
 partial config that fails to deserialize is a live papercut in `ib-option-calc`
@@ -430,15 +455,19 @@ have been sold for, a day before they actually settled — and anyone plotting
 ### What the main model actually does
 
 `cargo run -- backtest --config strategies/mean_reversion.toml` over all 12
-symbols, as a sanity baseline (not a profit claim — 26 trades over one expiry
-proves nothing about P&L). The forecast beats the null (CRPS skill +0.013,
-directional hit-rate 57 %), and that shows up in the **structure mix**: 17 debit
-spreads and 9 naked longs, **no credit spreads** — the directional forecast gives
-the ranker a target to point long structures at. Contrast `driftless.toml`, which
-with no directional view trades 30 credit spreads and 2 debits. Exits are all on a
-real quote (10 forecast-target, 7 before-earnings, 7 before-expiry, 2 stop);
-settlement is zero. `scripts/compare_strategies.py` tabulates this against every
-other variant.
+symbols on the shared $20k pool, as a sanity baseline (not a profit claim — 51
+trades over one expiry proves nothing about P&L, and this one *loses*: −$5,510,
+a 54.8 % drawdown). The forecast beats the null (CRPS skill +0.013, directional
+hit-rate 56.9 %), and that shows up in the **structure mix**: 34 debit spreads,
+12 naked longs, and only 5 credit — the directional forecast gives the ranker a
+target to point long structures at. Contrast `driftless.toml`, which with no
+directional view takes 4 trades, **all credit**. Exits are all on a real quote
+(37 forecast-horizon, 5 forecast-target, 4 before-expiry, 3 before-earnings, 2
+short-strike); settlement is zero. The forecast being right and the account still
+losing is the whole reason the report leads with `model_eval` and treats P&L as a
+guardrail — and why the sizing is a comparable axis (`equal_weight.toml` takes the
+same 51 trades for −5.7 %). `scripts/compare_strategies.py` tabulates this against
+every other variant.
 
 ## The ranked price-target engine is a second decision path, not a replacement
 
@@ -487,11 +516,11 @@ interim worst case.
 enumerated -> priceable -> liquid -> within-loss -> positive-EV -> above-min-score
 -> chosen — and the report surfaces it beside the trade log, the way
 `signal_diagnostics` surfaces the staged gates. On the reference snapshot,
-`mean_reversion.toml` prices ~1.9 M candidate verticals down to 26 taken (the
-driftless null enumerates ~8 M — the model decides how many bars hold a position
-and so are *not* enumerating, so a more-selective model enumerates far more). A
-ranked run whose `chosen` is a rounding error against `enumerated` has been
-floored, not backtested.
+`mean_reversion.toml` prices 8 732 187 candidate verticals down to 51 taken. The
+model decides how many bars hold a position and so are *not* enumerating, which
+is why a more-selective model can enumerate more, not less. A ranked run whose
+`chosen` is a rounding error against `enumerated` has been floored, not
+backtested.
 
 ## The price model is evaluated, not assumed
 
@@ -530,8 +559,8 @@ power.
 
 ### The strategy variants — one framework, single-axis comparisons
 
-The framework has three swappable axes — **price model**, **scorer**, **exit** —
-plus **account/sizing**. `strategies/` holds one config per interesting point, each
+The framework has five labeled axes — **price model**, **ranker**, **portfolio**,
+**exit**, and **dataset**. `strategies/` holds one config per interesting point, each
 differing from the `mean_reversion` base on exactly one axis, so a comparison
 isolates that axis:
 
@@ -541,12 +570,13 @@ isolates that axis:
 | `driftless.toml` | model | The honest random-walk null (`trend_weight 0`). Credit-heavy theta harvest, ~0 skill. |
 | `prob_profit.toml` | scorer | `metric = "prob_profit"` — rewards hit-rate over magnitude. |
 | `exit_pop_trailing.toml` / `exit_momentum.toml` | exit | Structure-scoped give-ups: live-POP on debits, trailing vs momentum on nakeds. |
+| `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
 
 All run as one shared $20k account (the default), so their P&L is comparable.
 
 `scripts/compare_strategies.py` runs them all and tabulates the forecast headline
 (CRPS skill, directional hit-rate) beside the trade guardrail (return, drawdown,
-profit factor, structure mix). The staged pipeline (`signal → structure → selector`)
+return/drawdown, profit factor, structure mix). The staged pipeline (`signal → structure → selector`)
 is retired: its strategy configs and file-golden tests are gone, though the engine
 code stays dormant behind `Strategy::Staged` and keeps its inline unit tests. A
 future **RSI-oversold** model would reuse `indicators::Rsi` (independent of the
@@ -554,11 +584,11 @@ staged pipeline) as a new drift term, validated on the same null-beating gate.
 
 ## The account model: one shared pool is the default
 
-A backtest runs **every symbol against one `initial_cash`** — the default is
-`account = "shared"`, `initial_cash = 20000`, with score-weighted sizing
-(`10%/25%/5-lot`), all from the code defaults so a config need only override to
-differ. `account = "per_symbol"` opts back into an account per symbol (`run_symbol`
-each, `report::build` summing them); it still exists, but is no longer the default.
+A backtest runs **every symbol against one `initial_cash`** — the default
+`portfolio = "shared_20k"` label uses a shared account with score-weighted sizing
+(`10%/25%/5-lot`). `equal_weight_1` swaps only the allocation rule. An inline
+portfolio with `account = "per_symbol"` opts back into an account per symbol
+(`run_symbol` each, `report::build` summing them).
 
 The shared account is the default because per-symbol sizing was quietly running
 *N* independent accounts: a `$20k` run was `$20k × 9 symbols ≈ $180k`, and the
@@ -567,9 +597,8 @@ account do", so it is the honest basis for comparing strategies. `run_shared`
 iterates a **single global timeline merged across all symbols** —
 sequential-per-symbol cannot model two names competing for the same dollars *at
 the same time* (it either double-counts or serializes them). The defaults live in
-`config.rs`: `AccountMode::Shared`, `default_cash = 20000`, `max_open_positions`
-resolved high for shared, and a default `SizingConfig` applied for a shared ranked
-account.
+`portfolios/shared_20k.toml`: shared account, $20k cash, one position per symbol,
+and the `ScoreWeightedSizer` policy.
 
 Per timestamp, in order: execute due closes (frees capital) → fund the due opens
 **best-score-first** across symbols, each sized at fill against the capital still
@@ -577,12 +606,12 @@ free → mark every symbol's positions and record one account equity point →
 decide (exits + entry) and queue for each symbol's next bar. Consequences that
 are deliberate, not bugs:
 
-- **Sizing moves to fill time** on this path (`Intent::Open` carries a
-  `SizingHint`; `execute` calls `size_lots`), because lots must be counted
+- **Allocation moves to fill time** on this path (`Intent::Open` carries an
+  `AllocationHint`; `execute` calls the selected `PortfolioModel`), because lots must be counted
   against the capital actually free when the order fills, not one bar earlier.
   The per-symbol path still sizes at decision time — its behaviour is unchanged.
 - **Low-value trades get squeezed out when capital is scarce** — best-first
-  funding plus `size_lots`'s `min(available)` cap means a full account funds only
+  funding plus the portfolio policy's remaining-budget cap means a full account funds only
   the top scores; the rest count `census.capital_limited`.
 - **One position per symbol** (`max_positions_per_symbol`, defaulted to 1 in
   shared mode) so capital diversifies across names rather than piling into one.
@@ -594,10 +623,11 @@ are deliberate, not bugs:
 `SharedRun` carries the one portfolio + one equity curve + per-symbol
 `SymbolDiag`s; `report::build_shared` turns each symbol into a *view* over its
 slice of the shared trades, so the per-symbol columns and model/scorer eval
-aggregate exactly as before while the totals come from the single pool. The
-report shape is unchanged, so the viewer renders a shared run as-is.
+aggregate exactly as before while the totals come from the single pool. Existing
+report fields remain stable; scorer decile monotonicity and return/drawdown are
+additive fields, so the viewer can continue rendering the contract as-is.
 
-Sizing blends two caps (both in `[sizing]`): a **risk cap** bounds dollars per
+The `shared_20k` score-weighted policy blends two caps: a **risk cap** bounds dollars per
 name (`risk_per_position`, scaled by score up to `max_risk_per_position`) and a
 **lot cap** (`max_lots`) bounds fill size — the risk cap binds on expensive
 spreads, the lot cap on cheap ones, so neither a single name nor a single fill
