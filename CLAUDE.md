@@ -835,16 +835,27 @@ isolates that axis:
 | `exit_pop_trailing.toml` / `exit_momentum.toml` | exit | Structure-scoped give-ups: live-POP on debits, trailing vs momentum on nakeds. |
 | `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
 | `credit_pop.toml` | ranker | Credit spreads only, ordered by probability of profit. Its scorer discriminates best of the set (Spearman 0.45) and it still loses — see below. |
-| `credit_pop_floor.toml` | exit | `credit_pop` plus the live-POP give-up, the credit side's only risk exit. Cuts the tail, loses more. |
-| `credit_pop_floor10/15.toml` | exit | The give-up loosened to 0.10 / 0.15 — the floor sweep. |
-| `credit_pop_high.toml` | ranker | Credit-only PoP entry *gated* at 70 % odds (`min_prob_profit`). Halves drawdown; makes the give-up redundant. |
-| `credit_pop_high_floor10.toml` | exit | The gate plus a loose give-up — identical to `credit_pop_high`, which is the finding. |
-| `credit_balanced.toml` | ranker | Reward/risk banded 0.40–0.70 with wider wings — payoff near half of max loss. |
-| `credit_balanced_stop.toml` / `credit_pop_stop.toml` | exit | The adverse-forecast stop on each credit entry. |
-| `credit_pop_stop_conviction.toml` / `_flat.toml` | portfolio | Score-weighted from one lot vs one lot flat — the arms that showed the score does not size. |
-| `credit_h7_mr` / `h7_drift` / `h14_mr` / `h14_drift` | model | The horizon × drift 2×2 on a common entry window. |
+| `credit_pop_stop.toml` / `_conviction.toml` / `_flat.toml` | exit, portfolio | The adverse-forecast stop, then the same 35 trades sized three ways — the arms that showed the score does not size. |
 
-All run as one shared $20k account (the default), so their P&L is comparable.
+The first six run as one shared $20k account (the default), so their P&L is
+comparable; the `credit_pop_stop_*` trio deliberately varies the sizing.
+
+**The exploratory credit configs have been retired, and their findings have not.**
+The POP-floor sweep, the 70 %-odds entry gate, the reward/risk band and the whole
+horizon 2×2 each answered their question — the numbers are recorded in the
+sections above and the configs are in git history. What stays is the *vocabulary*
+they were written in: every block they composed is still under `models/`,
+`rankers/`, `exits/` and `portfolios/`, including `credit_balanced`,
+`credit_pop_high`, the three `pop_floor*` bundles and the 14-day models with their
+validation records. Re-running any of them is a four-line strategy file.
+
+**14-day credit spreads are on hold.** Not because the idea failed — the vol
+scaling held and a model cleared the gate — but because the pass rested on a
+single held-out symbol from a search over one snapshot, which is a question about
+data rather than about modelling. `models/mean-reversion-14d-slow.json` and
+`mean-reversion-14d.json` are kept exactly so a second expiry can re-run
+`scripts/validate_model.py` against the same labels and see whether the result
+survives out of period.
 
 `scripts/compare_strategies.py` runs them all and tabulates the forecast headline
 (CRPS skill, directional hit-rate) beside the trade guardrail (return, drawdown,
