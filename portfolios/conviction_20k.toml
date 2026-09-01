@@ -1,0 +1,25 @@
+# One shared $20k pool, sized so the ranker's score actually decides the size.
+#
+# `shared_20k` sets `risk_per_position = 0.10` — $2,000, which already buys 4 lots
+# of a $500-max-loss candidate — so its *minimum* size is 4 and `max_lots = 5`
+# clips the top. Its lots come out {4, 5} and nothing else: nominally
+# score-weighted, effectively flat at maximum leverage.
+#
+# 0.025 is $500, one lot. A trade that merely clears the entry floor now takes the
+# smallest position, and it takes a 5x score (0.10 against the 0.02 baseline) to
+# reach the 5-lot cap. That is what "weight by conviction" has to mean when
+# `baseline_score` equals the entry floor: the floor-clearing trade is the unit.
+#
+# Read any comparison against a flat-1-lot arm as well as against shared_20k —
+# on a score distribution piled at the floor, conviction weighting and simply
+# trading smaller are hard to tell apart, and only the flat arm separates them.
+account = "shared"
+initial_cash = 20000.0
+max_positions_per_symbol = 1
+
+[model]
+kind = "score_weighted"
+risk_per_position = 0.025
+max_risk_per_position = 0.25
+baseline_score = 0.02
+max_lots = 5

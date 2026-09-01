@@ -1,0 +1,15 @@
+# The control for it: one lot flat. Separates 'the score sizes well' from 'less leverage is better', which the score distribution otherwise confounds.
+name      = "credit-pop-stop-flat"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "credit_pop"
+portfolio = "equal_weight_1"
+exit      = "forecast_stop"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+
+[costs]
+commission_per_contract = 0.65

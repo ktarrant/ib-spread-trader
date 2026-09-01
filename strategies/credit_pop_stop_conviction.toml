@@ -1,0 +1,15 @@
+# Portfolio-axis on credit_pop_stop: size by score from one lot up, so a stop frees capital that is redeployed small unless the next candidate is convincing.
+name      = "credit-pop-stop-conviction"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "credit_pop"
+portfolio = "conviction_20k"
+exit      = "forecast_stop"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+
+[costs]
+commission_per_contract = 0.65

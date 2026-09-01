@@ -498,12 +498,47 @@ rather than when the position is merely behind and still has the time it needs.
 
 It cuts the tail every time it is used — the worst trade is the same −$1 933 in
 both, the structural stop rather than a full-width loss. But it does not reliably
-improve the account, and the reason is the same one the POP floor ran into:
-**capital freed by a good exit is immediately redeployed at full size** (28 → 35
-trades on `credit_pop`), because the sizer takes the 5-lot cap on every entry. On
-this dataset no exit rule tested beats having none, and the pattern points at the
-**portfolio** axis rather than the exit axis — an exit that frees capital is only
-worth what the next trade does with it.
+improve the account, because capital freed by a good exit is redeployed (28 → 35
+trades on `credit_pop`). That pointed at the **portfolio** axis, and pulling on it
+found the sharpest result in this whole line of work.
+
+### The score orders candidates and does not size them
+
+**`shared_20k` is nominally score-weighted and effectively flat at maximum
+leverage.** `risk_per_position = 0.10` is $2 000, which already buys 4 lots of a
+$500-max-loss candidate, so its *minimum* size is 4 and `max_lots = 5` clips the
+top: its lots come out `{4, 5}` and nothing else. And `min_score` (the entry
+floor) equals `baseline_score` (the sizing baseline) at 0.02, so the worst trade
+taken gets multiplier exactly 1.0× and scores pile just above it — median 0.023,
+2 of 28 ever reaching the 0.05 that would hit the risk cap.
+
+`conviction_20k` sets `risk_per_position = 0.025` — one lot — so the multiplier
+has somewhere to go. Run against `credit_pop_stop`, whose 35 trades are
+**identical** in all three arms (same entries, same exits; only the lots differ):
+
+| portfolio | mean lots | total lots | return | max DD | **P&L per lot** |
+|---|---|---|---|---|---|
+| `shared_20k` (4–5) | 4.66 | 163 | −9.7 % | 45.0 % | −$11.86 |
+| `conviction_20k` (1–5 by score) | 1.57 | 55 | −10.0 % | 19.3 % | **−$36.45** |
+| `equal_weight_1` (1 flat) | 1.00 | 35 | **−0.9 %** | 10.3 % | **−$5.03** |
+
+**The more size is concentrated by score, the worse each lot does.** Sizing by the
+score is not neutral here, it is actively harmful, and the direct check agrees: on
+the flat arm, the bottom half of these trades by score averaged **+$83** and the
+top half **−$88**.
+
+That looks like it contradicts `scorer_eval`'s Spearman of +0.45, and it does not.
+The Spearman measures the score across *sampled counterfactual candidates on every
+bar* — a broad cross-section, most of which is never traded. The trades taken are
+the per-bar argmax subject to the floors, so within that already-selected sliver
+the score has no discriminating power left. **A score can rank a population well
+and be useless or perverse among its own winners**, which is exactly the trap that
+makes score-weighted sizing look obviously right. Rank with it; do not size with
+it, on this evidence.
+
+Read the returns as a guardrail (35 trades, one expiry), but note the mechanism is
+supported twice over and independently — by P&L per lot across three sizing
+policies on identical trades, and by the within-sample score/outcome split.
 
 
 ## Test fixtures generate their own options
@@ -726,6 +761,7 @@ isolates that axis:
 | `credit_pop_high_floor10.toml` | exit | The gate plus a loose give-up — identical to `credit_pop_high`, which is the finding. |
 | `credit_balanced.toml` | ranker | Reward/risk banded 0.40–0.70 with wider wings — payoff near half of max loss. |
 | `credit_balanced_stop.toml` / `credit_pop_stop.toml` | exit | The adverse-forecast stop on each credit entry. |
+| `credit_pop_stop_conviction.toml` / `_flat.toml` | portfolio | Score-weighted from one lot vs one lot flat — the arms that showed the score does not size. |
 
 All run as one shared $20k account (the default), so their P&L is comparable.
 
