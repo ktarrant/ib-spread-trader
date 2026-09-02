@@ -445,6 +445,52 @@ Do not read the returns: 8 trades is not a sample. The drawdown and the
 identical-runs fact are structural rather than P&L noise, and those are the parts
 worth carrying forward.
 
+### A live forecast target is inert; the horizon cap is the real lever
+
+**Do not rebuild `forecast_target` to read the current forecast.** It sounds like
+the way to let a winner run and it is provably nothing: measured over every bar
+of every open position in the base run, the live 0.85-quantile target sat beyond
+current spot on **1108 of 1108** bullish position-bars. A distribution centred
+near spot always projects more upside, so a target recomputed each bar retreats
+exactly as fast as price approaches it. The rule would never fire — that is not
+letting winners run, it is deleting the exit.
+
+The live forecast *does* carry signal, in its **drift** rather than its quantile:
+`q50 − spot` changes sign during **49 of 51** positions. But only **35.6 %** of
+bars point upward at all (median drift −0.45), so a strict "close when the
+forecast turns against me" rule would shut a bullish position almost at once. It
+needs hysteresis to be a rule rather than a hair trigger — and that 35.6 % is the
+PIT bias again: this model is bearish about two thirds of the time, in a sample
+that rose.
+
+**Switching the horizon cap off is the lever that works, and it is
+structure-dependent.** `close_after_forecast_horizon` is 37 of the base run's 51
+exits, so `exits/no_horizon.toml` is the largest change the exit axis allows
+without new code:
+
+| | trades | return | max DD | ret/dd | median bars held | avg win | avg loss |
+|---|---|---|---|---|---|---|---|
+| base (cap on) | 51 | −27.6 % | 54.8 % | −0.50 | 66 | $1 119 | −$1 039 |
+| `no_horizon` | 26 | **−13.7 %** | **38.5 %** | **−0.35** | **144** | **$1 436** | −$1 426 |
+
+Winners do run — the average win rises 28 % — and so do losers, which is the
+honest half. But the split by structure is the finding:
+
+| sleeve | cap on | cap off |
+|---|---|---|
+| naked longs | −$707 (12) | **+$3 932 (9)** |
+| debit spreads | +$2 023 (34) | **−$6 666 (17)** |
+
+A naked long has unbounded upside and wants the time; a **debit spread's payoff is
+capped, so extra time adds no upside and all the downside** — and decay runs
+against a long-premium position the whole while. The horizon cap should plausibly
+be scoped like the give-ups already are: off for nakeds, on for spreads. That is
+the same lesson the exit axis keeps producing, arriving from a third direction.
+
+Read it with the usual caution: holding 2.2× longer means the one-per-symbol slot
+frees up half as often, so `no_horizon` takes 26 trades rather than 51 and the two
+runs are not the same trades measured twice.
+
 ### Banning credit spreads changes the wrapper, not the bet
 
 `mean_reversion` takes 5 credit spreads and 4 of them lose, together −$6 827 —
@@ -866,7 +912,7 @@ isolates that axis:
 | `prob_profit.toml` | scorer | `metric = "prob_profit"` — rewards hit-rate over magnitude. |
 | `exit_pop_trailing.toml` / `exit_momentum.toml` | exit | Structure-scoped give-ups: live-POP on debits, trailing vs momentum on nakeds. |
 | `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
-| `mean_reversion_no_credit.toml` | ranker | The base with `allow_credit = false`. Recovers $135 of a $5,510 loss — the bets return as bear put debits. |
+| `mean_reversion_no_horizon.toml` | exit | The base without the forecast-horizon cap. Halves the loss; nakeds gain, debit spreads lose. |
 | `credit_pop.toml` | ranker | Credit spreads only, ordered by probability of profit. Its scorer discriminates best of the set (Spearman 0.45) and it still loses — see below. |
 | `credit_pop_stop.toml` / `_conviction.toml` / `_flat.toml` | exit, portfolio | The adverse-forecast stop, then the same 35 trades sized three ways — the arms that showed the score does not size. |
 

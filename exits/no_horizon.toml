@@ -1,0 +1,18 @@
+# The base exits with the forecast-horizon cap removed, to let winners run.
+#
+# `close_after_forecast_horizon` is the dominant exit in the base bundle — 37 of
+# mean_reversion's 51 trades close on it — so switching it off is the largest
+# single change available to the exit axis without new code. What remains: the
+# profit target, the entry forecast target, the short-strike take-profit, the
+# stop, earnings, and the hard expiry blackout.
+#
+# The trade-off it makes explicit: the horizon cap is what stops a position
+# drifting past the distance the model was scored to, so removing it lets a
+# winner keep running *and* lets a loser keep bleeding, with only the stop and
+# the expiry blackout to end it.
+forecast_target_quantile = 0.85
+profit_target_pct = 50.0
+stop_loss_pct = 100.0
+close_before_earnings = true
+underlying_past_short_strike = true
+close_after_forecast_horizon = false

@@ -1,0 +1,16 @@
+# Exit-axis variant: the main model with the forecast-horizon cap switched off,
+# so a position runs until a price rule, earnings, or the expiry blackout ends it.
+name      = "mean-reversion-no-horizon"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "ev"
+portfolio = "shared_20k"
+exit      = "no_horizon"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+
+[costs]
+commission_per_contract = 0.65
