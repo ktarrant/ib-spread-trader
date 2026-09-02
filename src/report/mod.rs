@@ -29,6 +29,8 @@ pub struct Census {
     pub capital_limited: usize,
     pub too_close_to_expiry: usize,
     pub earnings_blackout: usize,
+    /// Bars refused by the RSI entry band. Zero unless the band is configured.
+    pub rsi_out_of_band: usize,
     pub signal_diagnostics: BTreeMap<String, usize>,
     pub rejections: BTreeMap<String, usize>,
     pub rejection_examples: BTreeMap<String, String>,
@@ -181,6 +183,7 @@ fn assemble(
         census.capital_limited += run.census.capital_limited;
         census.too_close_to_expiry += run.census.too_close_to_expiry;
         census.earnings_blackout += run.census.earnings_blackout;
+        census.rsi_out_of_band += run.census.rsi_out_of_band;
         census.ranking.merge(&run.census.ranking);
         for (gate, count) in &run.signal_diagnostics {
             *census.signal_diagnostics.entry(gate.clone()).or_default() += count;

@@ -1,0 +1,28 @@
+# Timing variant: the main model, refusing entries when the underlying is
+# overbought.
+#
+# The band gates on *where this model has skill*, not on where price is going.
+# Conditioning the forecast log on RSI(14): CRPS skill is +0.0319 when oversold
+# and -0.0091 when overbought, positive on 9 of 12 symbols below RSI 45 and only
+# 5 of 12 above 70.
+#
+# Read it as regime-conditional, not as a validated edge. The snapshot is a
+# rising market, where dips get bought and rallies keep running — exactly the
+# conditions that flatter a mean-reversion forecaster below RSI 45 and break it
+# above 70. A falling sample could invert the whole result, and there is no
+# second sample here to check it against.
+name      = "mean-reversion-rsi"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "ev"
+portfolio = "shared_20k"
+exit      = "base"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+max_entry_rsi = 70.0
+
+[costs]
+commission_per_contract = 0.65

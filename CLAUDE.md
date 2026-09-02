@@ -481,6 +481,31 @@ Note the directional hit-rate points the other way — it peaks in the *neutral*
 buckets. Direction and distribution disagree about where this model is good, so a
 gate justified on CRPS should be stated as such and not sold as better direction.
 
+**`execution.min_entry_rsi` / `max_entry_rsi` act on that**, refusing entries
+outside the band and counting them as `census.rsi_out_of_band`. RSI rides on
+`Features` beside the other indicators, advanced unconditionally so it warms; a
+`None` reading refuses nothing, because the gate asserts "RSI is outside the
+band" and a warming indicator has not established that. The price model ignores
+the field — this is a gate, not a drift term. `mean_reversion_rsi.toml` sets
+`max_entry_rsi = 70`:
+
+| | trades | return | max DD | ret/dd | pf | debit | naked |
+|---|---|---|---|---|---|---|---|
+| base | 51 | −27.6 % | 54.8 % | −0.50 | 0.82 | +$2 023 | −$707 |
+| `max_entry_rsi = 70` | 46 | **−5.0 %** | 41.0 % | **−0.12** | **0.96** | **+$5 512** | **+$320** |
+
+874 bars refused. Five trades fewer turn −$5 510 into −$994, and both long
+sleeves improve — the credit sleeve is untouched at −$6 827 because all five
+credit entries happened below RSI 70.
+
+**Treat this as regime-conditional, not as an edge.** The snapshot is a rising
+market, where dips get bought and rallies keep running — exactly the conditions
+that flatter a mean-reversion forecaster below RSI 45 and break it above 70. A
+falling sample could invert the result and there is no second sample here to
+check against, which is the same limit the 14-day model ran into. What the gate
+is honestly built on is narrower than "RSI times entries well": it is "do not act
+where this model has no measured skill."
+
 ### ATM IV is already the whole vol input; what is missing is *elevation*
 
 Worth knowing before proposing IV as a model input, because it is not merely an
@@ -997,6 +1022,7 @@ isolates that axis:
 | `exit_pop_trailing.toml` / `exit_momentum.toml` | exit | Structure-scoped give-ups: live-POP on debits, trailing vs momentum on nakeds. |
 | `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
 | `mean_reversion_no_horizon.toml` | exit | The base without the forecast-horizon cap. Halves the loss; nakeds gain, debit spreads lose. |
+| `mean_reversion_rsi.toml` | execution | The base refusing entries above RSI 70. −27.6 % → −5.0 %; regime-conditional. |
 | `credit_pop.toml` | ranker | Credit spreads only, ordered by probability of profit. Its scorer discriminates best of the set (Spearman 0.45) and it still loses — see below. |
 | `credit_pop_stop.toml` / `_conviction.toml` / `_flat.toml` | exit, portfolio | The adverse-forecast stop, then the same 35 trades sized three ways — the arms that showed the score does not size. |
 

@@ -12,7 +12,7 @@
 //! than a fabricated value. The price model decides how to fall back.
 
 use crate::data::ChainSnapshot;
-use crate::indicators::{Atr, RealizedVol, Sma, Vwap};
+use crate::indicators::{Atr, RealizedVol, Rsi, Sma, Vwap};
 use anyhow::{Result, bail};
 use chrono::Timelike;
 use chrono_tz::America::New_York;
@@ -30,6 +30,8 @@ pub struct FeatureConfig {
     pub realized_vol_winsor_k: f64,
     /// Log-moneyness magnitude at which put/call skew is measured (e.g. 0.05).
     pub skew_moneyness: f64,
+    /// RSI lookback on the option-bar spot series, for the entry-timing gate.
+    pub rsi_period: usize,
 }
 
 impl Default for FeatureConfig {
@@ -41,6 +43,7 @@ impl Default for FeatureConfig {
             realized_vol_period: 20,
             realized_vol_winsor_k: 3.0,
             skew_moneyness: 0.05,
+            rsi_period: 14,
         }
     }
 }
@@ -77,6 +80,9 @@ pub struct Features {
     /// Per-bar realized volatility (population stddev of log returns).
     pub realized_vol: Option<f64>,
     pub atm_iv: Option<f64>,
+    /// RSI of the spot series, `None` until the indicator is warm. Read by the
+    /// entry-timing gate; the price model ignores it.
+    pub rsi: Option<f64>,
     /// OTM put IV minus OTM call IV; positive is the usual equity skew.
     pub skew: Option<f64>,
     pub days_to_earnings: Option<i64>,
@@ -94,6 +100,7 @@ pub struct FeatureEngine {
     atr: Atr,
     vwap: Vwap,
     realized_vol: RealizedVol,
+    rsi: Rsi,
     skew_moneyness: f64,
 }
 
@@ -118,6 +125,7 @@ impl FeatureEngine {
                 config.realized_vol_period,
                 config.realized_vol_winsor_k,
             )?,
+            rsi: Rsi::new(config.rsi_period)?,
             skew_moneyness: config.skew_moneyness,
         })
     }
@@ -156,6 +164,9 @@ impl FeatureEngine {
             u.close.unwrap_or(spot),
         );
         let realized_vol = self.realized_vol.next(spot);
+        // Advanced unconditionally, like the averages: an indicator fed only on
+        // the bars someone happens to read never warms.
+        let rsi = self.rsi.next(spot);
 
         let minute_of_day = {
             let local = chain.ts.with_timezone(&New_York);
@@ -173,6 +184,7 @@ impl FeatureEngine {
             atr,
             realized_vol,
             atm_iv: chain.atm_implied_vol(),
+            rsi,
             skew: chain.put_call_skew(self.skew_moneyness),
             days_to_earnings: earnings.days_to,
             days_since_earnings: earnings.days_since,
@@ -225,6 +237,7 @@ mod tests {
 
     fn compact_config() -> FeatureConfig {
         FeatureConfig {
+            rsi_period: 14,
             trend_fast: 2,
             trend_slow: 3,
             atr_period: 2,

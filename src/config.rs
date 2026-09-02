@@ -291,6 +291,12 @@ pub struct ExecutionConfig {
     #[serde(default = "default_min_entry_days_before_expiry")]
     pub min_entry_days_before_expiry: Option<u32>,
     /// Refuse new entries within this many calendar days of an earnings
+    /// Entry-timing band on RSI of the option-bar spot series: a bar outside it
+    /// opens nothing. Ranked mode only — the staged path has no feature engine.
+    #[serde(default)]
+    pub min_entry_rsi: Option<f64>,
+    #[serde(default)]
+    pub max_entry_rsi: Option<f64>,
     /// announcement. Prevents opening positions that would be immediately
     /// closed by `close_before_earnings`.
     #[serde(default)]
@@ -321,6 +327,8 @@ impl Default for ExecutionConfig {
             max_open_positions: None,
             max_positions_per_symbol: None,
             min_entry_days_before_expiry: default_min_entry_days_before_expiry(),
+            min_entry_rsi: None,
+            max_entry_rsi: None,
             earnings_blackout_days: None,
         }
     }
@@ -760,6 +768,8 @@ pub struct FeaturesConfig {
     pub realized_vol_period: usize,
     pub realized_vol_winsor_k: f64,
     pub skew_moneyness: f64,
+    /// RSI lookback for the entry-timing gate. The price model ignores it.
+    pub rsi_period: usize,
 }
 
 impl Default for FeaturesConfig {
@@ -772,6 +782,7 @@ impl Default for FeaturesConfig {
             realized_vol_period: d.realized_vol_period,
             realized_vol_winsor_k: d.realized_vol_winsor_k,
             skew_moneyness: d.skew_moneyness,
+            rsi_period: d.rsi_period,
         }
     }
 }
@@ -785,6 +796,7 @@ impl FeaturesConfig {
             realized_vol_period: self.realized_vol_period,
             realized_vol_winsor_k: self.realized_vol_winsor_k,
             skew_moneyness: self.skew_moneyness,
+            rsi_period: self.rsi_period,
         }
     }
 }
@@ -1131,6 +1143,24 @@ impl StrategyConfig {
         {
             bail!("exit.live_pop_floor must be in 0..=1, got {floor}");
         }
+        for (name, bound) in [
+            ("min_entry_rsi", self.execution.min_entry_rsi),
+            ("max_entry_rsi", self.execution.max_entry_rsi),
+        ] {
+            if let Some(v) = bound
+                && !(0.0..=100.0).contains(&v)
+            {
+                bail!("`execution.{name}` must be in 0..=100, got {v}");
+            }
+            if bound.is_some() && self.mode != StrategyMode::Ranked {
+                bail!("`execution.{name}` needs the feature engine and applies only to ranked mode");
+            }
+        }
+        if let (Some(lo), Some(hi)) = (self.execution.min_entry_rsi, self.execution.max_entry_rsi)
+            && lo > hi
+        {
+            bail!("execution.min_entry_rsi ({lo}) exceeds max_entry_rsi ({hi})");
+        }
         if self.mode == StrategyMode::Ranked {
             let model = self.resolved_model()?;
             match self.execution.min_entry_days_before_expiry {
@@ -1406,6 +1436,8 @@ impl StrategyConfig {
             max_positions_per_symbol: portfolio.max_positions_per_symbol,
             min_entry_days_before_expiry: self.execution.min_entry_days_before_expiry,
             earnings_blackout_days: self.execution.earnings_blackout_days,
+            min_entry_rsi: self.execution.min_entry_rsi,
+            max_entry_rsi: self.execution.max_entry_rsi,
             portfolio_model: portfolio.model,
         })
     }

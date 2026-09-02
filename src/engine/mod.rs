@@ -77,6 +77,17 @@ pub struct RunConfig {
     /// Refuse new entries within this many calendar days of an earnings
     /// announcement. Prevents the same open-close churn as the expiry gate.
     pub earnings_blackout_days: Option<u32>,
+    /// Entry-timing gate on RSI of the option-bar spot series. A bar outside
+    /// `[min_entry_rsi, max_entry_rsi]` opens nothing.
+    ///
+    /// This gates on *where the model has skill*, not on where price is going:
+    /// on the reference snapshot the forecast beats its null by +0.032 when
+    /// oversold and loses to it when overbought. It is therefore a claim about
+    /// this model in this sample, and the sample rose — in a falling market a
+    /// mean-reversion forecaster would plausibly be broken at the other end.
+    /// Ranked mode only; the staged path has no feature engine to read.
+    pub min_entry_rsi: Option<f64>,
+    pub max_entry_rsi: Option<f64>,
     /// Ranked allocation policy. `None` preserves fixed one-lot entries; shared
     /// ranked configs resolve to the score-weighted model by default.
     pub portfolio_model: Option<PortfolioModelKind>,
@@ -93,6 +104,8 @@ impl Default for RunConfig {
             max_positions_per_symbol: None,
             min_entry_days_before_expiry: None,
             earnings_blackout_days: None,
+            min_entry_rsi: None,
+            max_entry_rsi: None,
             portfolio_model: None,
         }
     }
@@ -162,6 +175,7 @@ enum EntryGate {
     PositionLimit,
     TooCloseToExpiry,
     EarningsBlackout,
+    RsiOutOfBand,
 }
 
 fn entry_gate(
@@ -171,6 +185,7 @@ fn entry_gate(
     expiry_instant: DateTime<Utc>,
     bar_ts: DateTime<Utc>,
     next_earnings: Option<&EarningsEvent>,
+    rsi: Option<f64>,
 ) -> EntryGate {
     let open_after_exits = open_positions - exiting;
     if open_after_exits >= config.max_open_positions {
@@ -185,6 +200,12 @@ fn entry_gate(
         .is_some_and(|days| exits::in_earnings_blackout(bar_ts, next_earnings, days))
     {
         EntryGate::EarningsBlackout
+    } else if rsi.is_some_and(|v| {
+        config.min_entry_rsi.is_some_and(|lo| v < lo) || config.max_entry_rsi.is_some_and(|hi| v > hi)
+    }) {
+        // A missing reading cannot refuse: the gate asserts "RSI is outside the
+        // band", and a warming indicator has not established that.
+        EntryGate::RsiOutOfBand
     } else {
         EntryGate::Open
     }
@@ -250,6 +271,8 @@ pub struct Census {
     pub too_close_to_expiry: usize,
     /// Refused because within the earnings blackout window.
     pub earnings_blackout: usize,
+    /// Refused because RSI sat outside the configured entry band.
+    pub rsi_out_of_band: usize,
     /// Closed at intrinsic because option quotes were unavailable.
     pub synthetic_exits: usize,
     /// A ranked choice was made but the capital left could not fund even one
@@ -430,10 +453,12 @@ pub fn run_symbol(
                                 series.expiry_instant(),
                                 bar.ts,
                                 next_earnings,
+                        None,
                             ) {
                                 EntryGate::PositionLimit => census.at_position_limit += 1,
                                 EntryGate::TooCloseToExpiry => census.too_close_to_expiry += 1,
                                 EntryGate::EarningsBlackout => census.earnings_blackout += 1,
+                                EntryGate::RsiOutOfBand => census.rsi_out_of_band += 1,
                                 EntryGate::Open => match staged.selector.resolve(&spec, &bar) {
                                     Ok(spread) => {
                                         entering = Some(Intent::Open {
@@ -461,10 +486,12 @@ pub fn run_symbol(
                         series.expiry_instant(),
                         bar.ts,
                         next_earnings,
+                        ctx.rsi,
                     ) {
                         EntryGate::PositionLimit => census.at_position_limit += 1,
                         EntryGate::TooCloseToExpiry => census.too_close_to_expiry += 1,
                         EntryGate::EarningsBlackout => census.earnings_blackout += 1,
+                                EntryGate::RsiOutOfBand => census.rsi_out_of_band += 1,
                         EntryGate::Open => {
                             if let Some((choice, bounds)) = ranked_choose(
                                 ranked,
@@ -844,10 +871,12 @@ pub fn run_shared(
                         series.expiry_instant(),
                         bar.ts,
                         next_earnings,
+                        ctx.rsi,
                     ) {
                         EntryGate::PositionLimit => census[*si].at_position_limit += 1,
                         EntryGate::TooCloseToExpiry => census[*si].too_close_to_expiry += 1,
                         EntryGate::EarningsBlackout => census[*si].earnings_blackout += 1,
+                        EntryGate::RsiOutOfBand => census[*si].rsi_out_of_band += 1,
                         EntryGate::Open => {
                             if let Some((choice, bounds)) = ranked_choose(
                                 ranked,
@@ -900,10 +929,12 @@ pub fn run_shared(
                                 series.expiry_instant(),
                                 bar.ts,
                                 next_earnings,
+                        None,
                             ) {
                                 EntryGate::PositionLimit => census[*si].at_position_limit += 1,
                                 EntryGate::TooCloseToExpiry => census[*si].too_close_to_expiry += 1,
                                 EntryGate::EarningsBlackout => census[*si].earnings_blackout += 1,
+                        EntryGate::RsiOutOfBand => census[*si].rsi_out_of_band += 1,
                                 EntryGate::Open => match staged.selector.resolve(&spec, bar) {
                                     Ok(spread) => {
                                         entering = Some(Intent::Open {
@@ -1086,6 +1117,8 @@ struct RankedContext {
     full_horizon_years: f64,
     /// The current trend feature, for the momentum exit.
     trend: Option<f64>,
+    /// The current RSI reading, for the entry-timing gate.
+    rsi: Option<f64>,
 }
 
 impl RankedContext {
@@ -1150,6 +1183,7 @@ fn ranked_observe(
         forward_scale,
         full_horizon_years,
         trend: features.trend,
+        rsi: features.rsi,
     }
 }
 
@@ -1665,6 +1699,45 @@ pub mod testing {
             Strategy::Staged(staged) => staged,
             Strategy::Ranked(_) => panic!("expected a staged strategy"),
         }
+    }
+}
+
+
+#[cfg(test)]
+mod rsi_gate_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn cfg(min: Option<f64>, max: Option<f64>) -> RunConfig {
+        RunConfig {
+            min_entry_rsi: min,
+            max_entry_rsi: max,
+            max_open_positions: 10,
+            min_entry_days_before_expiry: None,
+            ..RunConfig::default()
+        }
+    }
+
+    /// The gate refuses a bar outside the band and passes one inside it. A
+    /// missing reading cannot refuse: the claim is "RSI is outside the band",
+    /// and a warming indicator has not established that.
+    #[test]
+    fn the_rsi_band_refuses_only_a_reading_it_actually_has() {
+        let ts = Utc.with_ymd_and_hms(2026, 7, 1, 15, 0, 0).unwrap();
+        let expiry = Utc.with_ymd_and_hms(2026, 8, 21, 20, 0, 0).unwrap();
+        let c = cfg(None, Some(70.0));
+
+        let gate = |rsi| entry_gate(0, 0, &c, expiry, ts, None, rsi);
+        assert!(matches!(gate(Some(80.0)), EntryGate::RsiOutOfBand));
+        assert!(matches!(gate(Some(70.0)), EntryGate::Open), "the bound is inclusive");
+        assert!(matches!(gate(Some(45.0)), EntryGate::Open));
+        assert!(matches!(gate(None), EntryGate::Open), "a warming indicator refuses nothing");
+
+        // The lower bound is the mirror, and an unset band never fires.
+        let lo = cfg(Some(30.0), None);
+        assert!(matches!(entry_gate(0, 0, &lo, expiry, ts, None, Some(20.0)), EntryGate::RsiOutOfBand));
+        let off = cfg(None, None);
+        assert!(matches!(entry_gate(0, 0, &off, expiry, ts, None, Some(99.0)), EntryGate::Open));
     }
 }
 
