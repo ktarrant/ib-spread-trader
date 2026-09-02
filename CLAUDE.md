@@ -445,6 +445,42 @@ Do not read the returns: 8 trades is not a sample. The drawdown and the
 identical-runs fact are structural rather than P&L noise, and those are the parts
 worth carrying forward.
 
+### The model's skill is regime-dependent, and RSI finds the regime
+
+The engine has no notion of *when* to act: it opens whenever a candidate clears
+the floors and the symbol's one slot is free, so it is close to always in the
+market — a position is open on **46.6 %** of option bars overall, and **79 % on
+SPY, 77 % on QQQ**. There is no timing gate anywhere in the ranked path.
+
+Conditioning the dense forecast log on RSI(14) of the 30-minute spot series shows
+that is a mistake, on 6 049 forecasts rather than 51 trades:
+
+| bucket | n | dir hit % | CRPS skill | mean abs. realized move |
+|---|---|---|---|---|
+| RSI <30 (oversold) | 470 | 53.8 | **+0.0319** | **5.82 %** |
+| RSI 30–45 | 1 688 | 54.6 | +0.0210 | 5.42 % |
+| RSI 45–55 | 1 587 | **58.0** | +0.0057 | 4.94 % |
+| RSI 55–70 | 1 800 | 57.3 | +0.0124 | 4.41 % |
+| RSI >70 (overbought) | 504 | 54.6 | **−0.0091** | 3.79 % |
+| *all* | *6 049* | *56.3* | *+0.0136* | *4.89 %* |
+
+The model forecasts **2.3× better than its own average when oversold and worse
+than a random walk when overbought**, and the subsequent move shrinks
+monotonically as RSI rises — so "ready to move" is literally measurable, and it
+is the same axis. Per symbol, **RSI<45 gives positive skill on 9 of 12** — the
+same robustness the shipped model itself clears — while RSI>70 manages only 5 of
+12, with the failures enormous (PLTR −0.46, AMZN −0.29, SPY −0.20).
+
+This is the same finding as three others in this file arriving from a fourth
+direction. RSI>70 *is* the melt-up regime; the drift measurement said the model is
+bearish on 64 % of bars, the PIT said it sits too low, and the sample rose. A
+mean-reversion forecaster is broken in a rally, and RSI is a cheap, dense way to
+name that state **before** entering rather than after losing.
+
+Note the directional hit-rate points the other way — it peaks in the *neutral*
+buckets. Direction and distribution disagree about where this model is good, so a
+gate justified on CRPS should be stated as such and not sold as better direction.
+
 ### ATM IV is already the whole vol input; what is missing is *elevation*
 
 Worth knowing before proposing IV as a model input, because it is not merely an
