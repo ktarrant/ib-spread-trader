@@ -1,0 +1,16 @@
+# The same signal with no patience: only the crossing bar itself. Tests whether the window in naked_rsi_recovery is helping or merely admitting stale entries.
+name      = "naked-rsi-recovery-tight"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "naked_only"
+portfolio = "shared_20k"
+exit      = "trailing"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+max_bars_since_rsi_cross_up = 0
+
+[costs]
+commission_per_contract = 0.65

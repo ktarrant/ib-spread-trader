@@ -506,6 +506,46 @@ The lesson generalises past RSI: **a timing gate should be shaped like the
 measured skill, not like the indicator.** "Both extremes" is a fact about RSI;
 "oversold only" is a fact about this model.
 
+### "Recently crossed up" beats "is oversold" — on one trade, and on 609 forecasts
+
+`max_entry_rsi = 30` opens *while price is still falling*. `FeatureEngine` now
+also counts `bars_since_rsi_cross_up` (a `CrossDetector` against
+`rsi_cross_level`, default 30), and `execution.max_bars_since_rsi_cross_up`
+refuses entries until RSI has actually turned back up — waiting for the bounce
+rather than catching the knife. Never having crossed is a **refusal**, unlike a
+missing RSI reading: "it has not turned up" is established, not unmeasured.
+
+| arm | trades | return | max DD | ret/dd | pf | rights |
+|---|---|---|---|---|---|---|
+| both RSI extremes | 49 | −53.9 % | 54.9 % | −0.98 | 0.23 | 18C 31P |
+| oversold, RSI≤30 | 17 | −5.1 % | 16.3 % | −0.31 | 0.57 | 17C 0P |
+| **cross-up, ≤6 bars** | 24 | **+14.8 %** | 20.6 % | 0.72 | 2.03 | 24C 0P |
+| **cross-up, that bar only** | 14 | **+18.2 %** | 15.1 % | **1.21** | 3.04 | 14C 0P |
+
+**Do not read those returns.** One META trade is **+$3 444** — 116 % of the 6-bar
+arm's total profit and 94 % of the tight arm's. Remove it and they are −$474 and
++$206: flat, not profitable. These are 14 and 24 trades, and they are the best of
+roughly six gate variants tried on one snapshot, so the P&L is a selection
+artifact until something denser agrees.
+
+Something denser does, partly. Bucketing the 6 049-forecast log by distance from
+a cross-up:
+
+| bucket | n | CRPS skill | dir hit % |
+|---|---|---|---|
+| within 6 bars of a cross-up | 609 | **+0.0321** | 56.0 |
+| 7–26 bars after | 964 | +0.0137 | 59.0 |
+| 27+ bars after | 3 923 | +0.0032 | 54.6 |
+| never crossed up yet | 553 | **+0.0612** | 63.8 |
+
+Just after a turn the model forecasts ~10× better than deep into a stale trend,
+which is a real gradient on real sample sizes and does support gating on
+recency. But the **best bucket is "never crossed up yet"** — symbols still in
+their first descent, which the gate refuses outright. That is a caution against
+believing the mechanism as stated: what the data likes is not "the bounce
+started" so much as "the trend is fresh", and the cross-up is one proxy for that
+among several the gate does not test.
+
 ### `prob_profit` is calibrated where it does not matter and optimistic where it does
 
 `ScorerRecord` carries `prob_profit` beside the realized outcome, so the
@@ -1151,6 +1191,7 @@ isolates that axis:
 | `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
 | `mean_reversion_no_horizon.toml` | exit | The base without the forecast-horizon cap. Halves the loss; nakeds gain, debit spreads lose. |
 | `naked_rsi_trailing.toml` | model+ranker+exit | Nakeds at RSI extremes on a trailing stop. Loses 53.9 %; the overbought half is 9/10 of it. |
+| `naked_rsi_recovery.toml` / `_tight.toml` | execution | Enter after RSI turns up through 30, within N bars. First positive arms — and one trade is ~all of it. |
 | `naked_rsi_oversold.toml` / `_bull.toml` | execution, ranker | The oversold half alone: −5.1 %. Forcing calls changes nothing — it already picked calls. |
 | `mean_reversion_rsi.toml` | execution | The base refusing entries above RSI 70. −27.6 % → −5.0 %; regime-conditional. |
 | `credit_pop.toml` | ranker | Credit spreads only, ordered by probability of profit. Its scorer discriminates best of the set (Spearman 0.45) and it still loses — see below. |

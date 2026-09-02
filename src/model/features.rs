@@ -12,7 +12,7 @@
 //! than a fabricated value. The price model decides how to fall back.
 
 use crate::data::ChainSnapshot;
-use crate::indicators::{Atr, RealizedVol, Rsi, Sma, Vwap};
+use crate::indicators::{Atr, Cross, CrossDetector, RealizedVol, Rsi, Sma, Vwap};
 use anyhow::{Result, bail};
 use chrono::Timelike;
 use chrono_tz::America::New_York;
@@ -32,6 +32,8 @@ pub struct FeatureConfig {
     pub skew_moneyness: f64,
     /// RSI lookback on the option-bar spot series, for the entry-timing gate.
     pub rsi_period: usize,
+    /// The level whose upward crossing `bars_since_rsi_cross_up` counts from.
+    pub rsi_cross_level: f64,
 }
 
 impl Default for FeatureConfig {
@@ -44,6 +46,7 @@ impl Default for FeatureConfig {
             realized_vol_winsor_k: 3.0,
             skew_moneyness: 0.05,
             rsi_period: 14,
+            rsi_cross_level: 30.0,
         }
     }
 }
@@ -124,6 +127,12 @@ pub struct Features {
     /// RSI of the spot series, `None` until the indicator is warm. Read by the
     /// entry-timing gate; the price model ignores it.
     pub rsi: Option<f64>,
+    /// Option bars since RSI last crossed **up** through `rsi_cross_level`, or
+    /// `None` if it has not done so yet. Zero on the crossing bar itself.
+    ///
+    /// This is the difference between "oversold" and "recovering": the level
+    /// gate opens while price is still falling, this one waits for the turn.
+    pub bars_since_rsi_cross_up: Option<u32>,
     /// OTM put IV minus OTM call IV; positive is the usual equity skew.
     pub skew: Option<f64>,
     pub days_to_earnings: Option<i64>,
@@ -142,6 +151,9 @@ pub struct FeatureEngine {
     vwap: Vwap,
     realized_vol: RealizedVol,
     rsi: Rsi,
+    rsi_cross: CrossDetector,
+    rsi_cross_level: f64,
+    bars_since_rsi_cross_up: Option<u32>,
     skew_moneyness: f64,
 }
 
@@ -167,6 +179,9 @@ impl FeatureEngine {
                 config.realized_vol_winsor_k,
             )?,
             rsi: Rsi::new(config.rsi_period)?,
+            rsi_cross: CrossDetector::new(),
+            rsi_cross_level: config.rsi_cross_level,
+            bars_since_rsi_cross_up: None,
             skew_moneyness: config.skew_moneyness,
         })
     }
@@ -208,6 +223,15 @@ impl FeatureEngine {
         // Advanced unconditionally, like the averages: an indicator fed only on
         // the bars someone happens to read never warms.
         let rsi = self.rsi.next(spot);
+        // Age the counter first, then reset it if this bar is itself the cross,
+        // so the crossing bar reports 0 rather than 1.
+        self.bars_since_rsi_cross_up = self.bars_since_rsi_cross_up.map(|n| n.saturating_add(1));
+        if let Some(v) = rsi
+            && let Some(Cross::Up) = self.rsi_cross.update(v - self.rsi_cross_level)
+        {
+            self.bars_since_rsi_cross_up = Some(0);
+        }
+        let bars_since_rsi_cross_up = self.bars_since_rsi_cross_up;
 
         let minute_of_day = {
             let local = chain.ts.with_timezone(&New_York);
@@ -226,6 +250,7 @@ impl FeatureEngine {
             realized_vol,
             atm_iv: chain.atm_implied_vol(),
             rsi,
+            bars_since_rsi_cross_up,
             skew: chain.put_call_skew(self.skew_moneyness),
             days_to_earnings: earnings.days_to,
             days_since_earnings: earnings.days_since,
@@ -279,6 +304,7 @@ mod tests {
     fn compact_config() -> FeatureConfig {
         FeatureConfig {
             rsi_period: 14,
+            rsi_cross_level: 30.0,
             trend_fast: 2,
             trend_slow: 3,
             atr_period: 2,

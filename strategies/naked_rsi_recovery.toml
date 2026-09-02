@@ -1,0 +1,16 @@
+# Enter after RSI turns up through 30, not while it is under it. The level gate buys a falling knife; this waits for the bounce to start and then allows a window of bars to act in. Same nakeds and trailing stop as naked_rsi_oversold, so the pair isolates 'oversold' against 'recovering'.
+name      = "naked-rsi-recovery"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "naked_only"
+portfolio = "shared_20k"
+exit      = "trailing"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+max_bars_since_rsi_cross_up = 6
+
+[costs]
+commission_per_contract = 0.65

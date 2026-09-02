@@ -297,6 +297,13 @@ pub struct ExecutionConfig {
     pub min_entry_rsi: Option<f64>,
     #[serde(default)]
     pub max_entry_rsi: Option<f64>,
+    /// Refuse entries unless RSI crossed **up** through `features.rsi_cross_level`
+    /// within this many option bars. `Some(0)` means the crossing bar only.
+    ///
+    /// The difference from the band: `max_entry_rsi = 30` opens while price is
+    /// still falling, this waits for the turn and then allows a window.
+    #[serde(default)]
+    pub max_bars_since_rsi_cross_up: Option<u32>,
     /// Which side of the band opens trades. `inside` (the default) refuses the
     /// extremes and trades the middle; `outside` refuses the middle and trades
     /// only the extremes — a mean-reversion entry that waits for a stretched
@@ -336,6 +343,7 @@ impl Default for ExecutionConfig {
             min_entry_rsi: None,
             max_entry_rsi: None,
             entry_rsi_zone: RsiZone::default(),
+            max_bars_since_rsi_cross_up: None,
             earnings_blackout_days: None,
         }
     }
@@ -777,6 +785,8 @@ pub struct FeaturesConfig {
     pub skew_moneyness: f64,
     /// RSI lookback for the entry-timing gate. The price model ignores it.
     pub rsi_period: usize,
+    /// The level whose upward crossing the recovery gate counts from.
+    pub rsi_cross_level: f64,
 }
 
 impl Default for FeaturesConfig {
@@ -790,6 +800,7 @@ impl Default for FeaturesConfig {
             realized_vol_winsor_k: d.realized_vol_winsor_k,
             skew_moneyness: d.skew_moneyness,
             rsi_period: d.rsi_period,
+            rsi_cross_level: d.rsi_cross_level,
         }
     }
 }
@@ -804,6 +815,7 @@ impl FeaturesConfig {
             realized_vol_winsor_k: self.realized_vol_winsor_k,
             skew_moneyness: self.skew_moneyness,
             rsi_period: self.rsi_period,
+            rsi_cross_level: self.rsi_cross_level,
         }
     }
 }
@@ -1163,6 +1175,13 @@ impl StrategyConfig {
                 bail!("`execution.{name}` needs the feature engine and applies only to ranked mode");
             }
         }
+        if self.execution.max_bars_since_rsi_cross_up.is_some() && self.mode != StrategyMode::Ranked
+        {
+            bail!(
+                "`execution.max_bars_since_rsi_cross_up` needs the feature engine \
+                 and applies only to ranked mode"
+            );
+        }
         if let (Some(lo), Some(hi)) = (self.execution.min_entry_rsi, self.execution.max_entry_rsi)
             && lo > hi
         {
@@ -1446,6 +1465,7 @@ impl StrategyConfig {
             min_entry_rsi: self.execution.min_entry_rsi,
             max_entry_rsi: self.execution.max_entry_rsi,
             entry_rsi_zone: self.execution.entry_rsi_zone,
+            max_bars_since_rsi_cross_up: self.execution.max_bars_since_rsi_cross_up,
             portfolio_model: portfolio.model,
         })
     }

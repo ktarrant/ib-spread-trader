@@ -89,6 +89,9 @@ pub struct RunConfig {
     pub min_entry_rsi: Option<f64>,
     pub max_entry_rsi: Option<f64>,
     pub entry_rsi_zone: RsiZone,
+    /// Refuse entries unless RSI crossed up through its level within this many
+    /// bars — "recovering" rather than "oversold".
+    pub max_bars_since_rsi_cross_up: Option<u32>,
     /// Ranked allocation policy. `None` preserves fixed one-lot entries; shared
     /// ranked configs resolve to the score-weighted model by default.
     pub portfolio_model: Option<PortfolioModelKind>,
@@ -108,6 +111,7 @@ impl Default for RunConfig {
             min_entry_rsi: None,
             max_entry_rsi: None,
             entry_rsi_zone: RsiZone::default(),
+            max_bars_since_rsi_cross_up: None,
             portfolio_model: None,
         }
     }
@@ -178,6 +182,7 @@ enum EntryGate {
     TooCloseToExpiry,
     EarningsBlackout,
     RsiOutOfBand,
+    NoRecentRsiCross,
 }
 
 /// Record every open position's mark on this bar. Runs after `update_peaks`, so
@@ -214,8 +219,9 @@ fn entry_gate(
     expiry_instant: DateTime<Utc>,
     bar_ts: DateTime<Utc>,
     next_earnings: Option<&EarningsEvent>,
-    rsi: Option<f64>,
+    timing: EntryTiming,
 ) -> EntryGate {
+    let EntryTiming { rsi, bars_since_rsi_cross_up } = timing;
     let open_after_exits = open_positions - exiting;
     if open_after_exits >= config.max_open_positions {
         EntryGate::PositionLimit
@@ -229,6 +235,12 @@ fn entry_gate(
         .is_some_and(|days| exits::in_earnings_blackout(bar_ts, next_earnings, days))
     {
         EntryGate::EarningsBlackout
+    } else if config.max_bars_since_rsi_cross_up.is_some_and(|window| {
+        // No crossing yet is a refusal, unlike a missing RSI reading: "it has not
+        // turned up" is an established fact, not an absent measurement.
+        bars_since_rsi_cross_up.is_none_or(|n| n > window)
+    }) {
+        EntryGate::NoRecentRsiCross
     } else if rsi.is_some_and(|v| config.entry_rsi_zone.refuses(v, config)) {
         // A missing reading cannot refuse: the gate asserts "RSI is outside the
         // band", and a warming indicator has not established that.
@@ -236,6 +248,15 @@ fn entry_gate(
     } else {
         EntryGate::Open
     }
+}
+
+/// The feature readings the entry-timing gates consult. Grouped because they are
+/// one thing — what the feature engine saw this bar — and because the staged
+/// path has none of them, which `EntryTiming::default()` says plainly.
+#[derive(Debug, Clone, Copy, Default)]
+struct EntryTiming {
+    rsi: Option<f64>,
+    bars_since_rsi_cross_up: Option<u32>,
 }
 
 /// Which side of the RSI band opens trades.
@@ -360,6 +381,8 @@ pub struct Census {
     pub earnings_blackout: usize,
     /// Refused because RSI sat outside the configured entry band.
     pub rsi_out_of_band: usize,
+    /// Refused because RSI had not recently crossed up through its level.
+    pub no_recent_rsi_cross: usize,
     /// Closed at intrinsic because option quotes were unavailable.
     pub synthetic_exits: usize,
     /// A ranked choice was made but the capital left could not fund even one
@@ -545,12 +568,13 @@ pub fn run_symbol(
                                 series.expiry_instant(),
                                 bar.ts,
                                 next_earnings,
-                        None,
+                                EntryTiming::default(),
                             ) {
                                 EntryGate::PositionLimit => census.at_position_limit += 1,
                                 EntryGate::TooCloseToExpiry => census.too_close_to_expiry += 1,
                                 EntryGate::EarningsBlackout => census.earnings_blackout += 1,
                                 EntryGate::RsiOutOfBand => census.rsi_out_of_band += 1,
+                                EntryGate::NoRecentRsiCross => census.no_recent_rsi_cross += 1,
                                 EntryGate::Open => match staged.selector.resolve(&spec, &bar) {
                                     Ok(spread) => {
                                         entering = Some(Intent::Open {
@@ -579,12 +603,16 @@ pub fn run_symbol(
                         series.expiry_instant(),
                         bar.ts,
                         next_earnings,
-                        ctx.rsi,
+                        EntryTiming {
+                            rsi: ctx.rsi,
+                            bars_since_rsi_cross_up: ctx.bars_since_rsi_cross_up,
+                        },
                     ) {
                         EntryGate::PositionLimit => census.at_position_limit += 1,
                         EntryGate::TooCloseToExpiry => census.too_close_to_expiry += 1,
                         EntryGate::EarningsBlackout => census.earnings_blackout += 1,
                                 EntryGate::RsiOutOfBand => census.rsi_out_of_band += 1,
+                                EntryGate::NoRecentRsiCross => census.no_recent_rsi_cross += 1,
                         EntryGate::Open => {
                             if let Some((choice, bounds)) = ranked_choose(
                                 ranked,
@@ -969,12 +997,16 @@ pub fn run_shared(
                         series.expiry_instant(),
                         bar.ts,
                         next_earnings,
-                        ctx.rsi,
+                        EntryTiming {
+                            rsi: ctx.rsi,
+                            bars_since_rsi_cross_up: ctx.bars_since_rsi_cross_up,
+                        },
                     ) {
                         EntryGate::PositionLimit => census[*si].at_position_limit += 1,
                         EntryGate::TooCloseToExpiry => census[*si].too_close_to_expiry += 1,
                         EntryGate::EarningsBlackout => census[*si].earnings_blackout += 1,
                         EntryGate::RsiOutOfBand => census[*si].rsi_out_of_band += 1,
+                        EntryGate::NoRecentRsiCross => census[*si].no_recent_rsi_cross += 1,
                         EntryGate::Open => {
                             if let Some((choice, bounds)) = ranked_choose(
                                 ranked,
@@ -1028,12 +1060,13 @@ pub fn run_shared(
                                 series.expiry_instant(),
                                 bar.ts,
                                 next_earnings,
-                        None,
+                                EntryTiming::default(),
                             ) {
                                 EntryGate::PositionLimit => census[*si].at_position_limit += 1,
                                 EntryGate::TooCloseToExpiry => census[*si].too_close_to_expiry += 1,
                                 EntryGate::EarningsBlackout => census[*si].earnings_blackout += 1,
                         EntryGate::RsiOutOfBand => census[*si].rsi_out_of_band += 1,
+                        EntryGate::NoRecentRsiCross => census[*si].no_recent_rsi_cross += 1,
                                 EntryGate::Open => match staged.selector.resolve(&spec, bar) {
                                     Ok(spread) => {
                                         entering = Some(Intent::Open {
@@ -1220,6 +1253,8 @@ struct RankedContext {
     trend: Option<f64>,
     /// The current RSI reading, for the entry-timing gate.
     rsi: Option<f64>,
+    /// Bars since RSI turned up through its level, for the recovery gate.
+    bars_since_rsi_cross_up: Option<u32>,
     /// What the model saw this bar, recorded onto any position opened from it.
     entry_features: crate::model::EntryFeatures,
 }
@@ -1287,6 +1322,7 @@ fn ranked_observe(
         full_horizon_years,
         trend: features.trend,
         rsi: features.rsi,
+        bars_since_rsi_cross_up: features.bars_since_rsi_cross_up,
         entry_features: (&features).into(),
     }
 }
@@ -1844,7 +1880,7 @@ mod rsi_gate_tests {
         let expiry = Utc.with_ymd_and_hms(2026, 8, 21, 20, 0, 0).unwrap();
         let c = cfg(None, Some(70.0));
 
-        let gate = |rsi| entry_gate(0, 0, &c, expiry, ts, None, rsi);
+        let gate = |rsi| entry_gate(0, 0, &c, expiry, ts, None, EntryTiming { rsi, ..Default::default() });
         assert!(matches!(gate(Some(80.0)), EntryGate::RsiOutOfBand));
         assert!(matches!(gate(Some(70.0)), EntryGate::Open), "the bound is inclusive");
         assert!(matches!(gate(Some(45.0)), EntryGate::Open));
@@ -1852,9 +1888,46 @@ mod rsi_gate_tests {
 
         // The lower bound is the mirror, and an unset band never fires.
         let lo = cfg(Some(30.0), None);
-        assert!(matches!(entry_gate(0, 0, &lo, expiry, ts, None, Some(20.0)), EntryGate::RsiOutOfBand));
+        assert!(matches!(entry_gate(0, 0, &lo, expiry, ts, None, EntryTiming { rsi: Some(20.0), ..Default::default() }), EntryGate::RsiOutOfBand));
         let off = cfg(None, None);
-        assert!(matches!(entry_gate(0, 0, &off, expiry, ts, None, Some(99.0)), EntryGate::Open));
+        assert!(matches!(entry_gate(0, 0, &off, expiry, ts, None, EntryTiming { rsi: Some(99.0), ..Default::default() }), EntryGate::Open));
+    }
+
+    /// "Recently crossed up" is a different claim from "is oversold": the level
+    /// gate opens while price is still falling, this one waits for the turn.
+    #[test]
+    fn the_recovery_gate_waits_for_the_turn_and_then_allows_a_window() {
+        let ts = Utc.with_ymd_and_hms(2026, 7, 1, 15, 0, 0).unwrap();
+        let expiry = Utc.with_ymd_and_hms(2026, 8, 21, 20, 0, 0).unwrap();
+        let c = RunConfig {
+            max_bars_since_rsi_cross_up: Some(6),
+            max_open_positions: 10,
+            min_entry_days_before_expiry: None,
+            ..RunConfig::default()
+        };
+        let gate = |n| {
+            entry_gate(0, 0, &c, expiry, ts, None, EntryTiming {
+                bars_since_rsi_cross_up: n,
+                ..Default::default()
+            })
+        };
+        assert!(matches!(gate(Some(0)), EntryGate::Open), "the crossing bar itself");
+        assert!(matches!(gate(Some(6)), EntryGate::Open), "the window is inclusive");
+        assert!(matches!(gate(Some(7)), EntryGate::NoRecentRsiCross), "stale");
+        // Never having crossed is a refusal, unlike a missing RSI reading: "it
+        // has not turned up" is established, not unmeasured.
+        assert!(matches!(gate(None), EntryGate::NoRecentRsiCross));
+
+        // Unset, the gate refuses nothing at all.
+        let off = RunConfig {
+            max_open_positions: 10,
+            min_entry_days_before_expiry: None,
+            ..RunConfig::default()
+        };
+        assert!(matches!(
+            entry_gate(0, 0, &off, expiry, ts, None, EntryTiming::default()),
+            EntryGate::Open
+        ));
     }
 
     /// `Outside` is the mirror: it refuses the middle and trades the extremes,
@@ -1871,7 +1944,7 @@ mod rsi_gate_tests {
             min_entry_days_before_expiry: None,
             ..RunConfig::default()
         };
-        let gate = |rsi| entry_gate(0, 0, &c, expiry, ts, None, rsi);
+        let gate = |rsi| entry_gate(0, 0, &c, expiry, ts, None, EntryTiming { rsi, ..Default::default() });
         assert!(matches!(gate(Some(20.0)), EntryGate::Open), "oversold trades");
         assert!(matches!(gate(Some(85.0)), EntryGate::Open), "overbought trades");
         assert!(matches!(gate(Some(50.0)), EntryGate::RsiOutOfBand), "the middle is refused");
@@ -1887,7 +1960,7 @@ mod rsi_gate_tests {
             min_entry_days_before_expiry: None,
             ..RunConfig::default()
         };
-        assert!(matches!(entry_gate(0, 0, &empty, expiry, ts, None, Some(50.0)), EntryGate::Open));
+        assert!(matches!(entry_gate(0, 0, &empty, expiry, ts, None, EntryTiming { rsi: Some(50.0), ..Default::default() }), EntryGate::Open));
     }
 }
 
