@@ -473,7 +473,7 @@ split says exactly why:
 
 | entry regime | n | total P&L | wins | rights |
 |---|---|---|---|---|
-| oversold (RSI<30) | 17 | −$1 010 | 9/17 | 11C 6P |
+| oversold (RSI<30) | 17 | −$1 010 | 9/17 | **17C 0P** |
 | **overbought (RSI>70)** | **32** | **−$9 772** | **8/32** | 1C **31P** |
 
 Nine tenths of the loss comes from the overbought half — which the forecast eval
@@ -481,6 +481,26 @@ had already marked as the regime where this model scores **−0.0091 CRPS skill,
 worse than a random walk**, against +0.0319 when oversold. Symmetric entries
 against an asymmetric skill profile spend two thirds of their trades in the half
 the model cannot forecast, buying puts into a rally that kept going.
+
+Cutting to the good half is `naked_rsi_oversold.toml` — `max_entry_rsi = 30` with
+the default `inside` zone, which already means "open at or below 30" and needed
+no new knob:
+
+| arm | trades | return | max DD | ret/dd | pf |
+|---|---|---|---|---|---|
+| both extremes | 49 | −53.9 % | 54.9 % | −0.98 | 0.23 |
+| **oversold only** | 17 | **−5.1 %** | **16.3 %** | **−0.31** | **0.57** |
+
+A tenth of the loss and a third of the drawdown, from removing entries rather
+than improving any of them. Still negative — this is not a strategy — but the
+gate does what the forecast eval said it would.
+
+**Restricting to calls is a no-op, and that is the interesting part.**
+`naked_rsi_bull.toml` adds `rights = ["call"]` and produces a *byte-identical*
+run, because the oversold entries were **already 17 calls and no puts**. The
+mean-reversion drift leans against the stretch on its own, so "trade the oversold
+regime" and "be bullish" are the same instruction here — the direction never
+needed configuring, only the timing did.
 
 The lesson generalises past RSI: **a timing gate should be shaped like the
 measured skill, not like the indicator.** "Both extremes" is a fact about RSI;
@@ -1131,6 +1151,7 @@ isolates that axis:
 | `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
 | `mean_reversion_no_horizon.toml` | exit | The base without the forecast-horizon cap. Halves the loss; nakeds gain, debit spreads lose. |
 | `naked_rsi_trailing.toml` | model+ranker+exit | Nakeds at RSI extremes on a trailing stop. Loses 53.9 %; the overbought half is 9/10 of it. |
+| `naked_rsi_oversold.toml` / `_bull.toml` | execution, ranker | The oversold half alone: −5.1 %. Forcing calls changes nothing — it already picked calls. |
 | `mean_reversion_rsi.toml` | execution | The base refusing entries above RSI 70. −27.6 % → −5.0 %; regime-conditional. |
 | `credit_pop.toml` | ranker | Credit spreads only, ordered by probability of profit. Its scorer discriminates best of the set (Spearman 0.45) and it still loses — see below. |
 | `credit_pop_stop.toml` / `_conviction.toml` / `_flat.toml` | exit, portfolio | The adverse-forecast stop, then the same 35 trades sized three ways — the arms that showed the score does not size. |

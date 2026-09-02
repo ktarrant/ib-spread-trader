@@ -1,0 +1,16 @@
+# Oversold entries AND calls only — the strictly bullish reading. Differs from naked_rsi_oversold on the ranker alone, so the pair separates 'trade the model's good regime' from 'force the bullish structure'.
+name      = "naked-rsi-bull"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "naked_calls"
+portfolio = "shared_20k"
+exit      = "trailing"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+max_entry_rsi = 30.0
+
+[costs]
+commission_per_contract = 0.65

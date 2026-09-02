@@ -1,0 +1,20 @@
+# Naked long calls only — the structure forced bullish, not merely permitted.
+#
+# Distinct from naked_only, which quotes both rights and lets the forecast pick:
+# in the RSI-extreme run the oversold half still chose 6 puts out of 17, so
+# "oversold" and "bullish" are not the same restriction and are worth separating.
+[candidates]
+rights = ["call"]
+allow_debit = false
+allow_credit = false
+allow_naked_long = true
+max_relative_spread = 0.35
+max_loss = 500.0
+quantity = 1
+
+[ranking]
+metric = "expected_value"
+min_score = 0.02
+min_expected_pl = 0.0
+forecast_target_quantile = 0.85
+scorer_sample_per_bar = 20

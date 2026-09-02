@@ -1,0 +1,16 @@
+# Oversold entries only: max_entry_rsi = 30 with the default inside zone opens on RSI <= 30 and refuses everything above. Both rights quoted, so the forecast still picks direction — this isolates the *timing* half of naked_rsi_trailing from the direction half.
+name      = "naked-rsi-oversold"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "naked_only"
+portfolio = "shared_20k"
+exit      = "trailing"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+max_entry_rsi = 30.0
+
+[costs]
+commission_per_contract = 0.65
