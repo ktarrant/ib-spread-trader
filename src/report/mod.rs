@@ -635,17 +635,18 @@ pub fn write_csvs(
 
     let has_scorer = runs.iter().any(|r| !r.scorer_records.is_empty());
     if has_scorer {
-        let mut scorer = String::from("ts,symbol,score,expected_pl,realized_pl,max_loss\n");
+        let mut scorer = String::from("ts,symbol,score,expected_pl,realized_pl,max_loss,prob_profit\n");
         for run in runs {
             for s in &run.scorer_records {
                 scorer.push_str(&format!(
-                    "{},{},{:.6},{:.2},{:.2},{:.2}\n",
+                    "{},{},{:.6},{:.2},{:.2},{:.2},{:.6}\n",
                     s.ts.to_rfc3339(),
                     s.symbol,
                     s.score,
                     s.expected_pl,
                     s.realized_pl,
                     s.max_loss,
+                    s.prob_profit,
                 ));
             }
         }

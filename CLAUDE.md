@@ -457,6 +457,49 @@ Do not read the returns: 8 trades is not a sample. The drawdown and the
 identical-runs fact are structural rather than P&L noise, and those are the parts
 worth carrying forward.
 
+### `prob_profit` is calibrated where it does not matter and optimistic where it does
+
+`ScorerRecord` carries `prob_profit` beside the realized outcome, so the
+probability can be calibrated on the **dense counterfactual sample** rather than
+on the trade log. That distinction is the whole answer: 79 trades put the miss at
+−2.8 points, which reads like noise; 107 832 forward-priced candidates show it is
+structural and concentrated.
+
+| predicted | n | mean pred | actual | gap |
+|---|---|---|---|---|
+| 0–10 | 29 080 | 2.3 % | 3.4 % | +1.0 |
+| 10–20 | 12 768 | 14.6 % | 17.5 % | +2.9 |
+| 20–30 | 19 418 | 24.2 % | 28.6 % | +4.4 |
+| 30–40 | 29 968 | 34.6 % | 36.3 % | +1.7 |
+| 40–50 | 13 045 | 44.4 % | 41.7 % | −2.7 |
+| **50–60** | 2 629 | 53.6 % | **42.8 %** | **−10.8** |
+| **60–70** | 690 | 64.2 % | **43.6 %** | **−20.6** |
+| **70–80** | 182 | 75.2 % | **52.7 %** | **−22.4** |
+| 80–90 | 47 | 84.0 % | 72.3 % | −11.6 |
+| *all* | *107 832* | *23.6 %* | *24.7 %* | *+1.1* |
+
+Pooled it looks excellent — +1.1 points, and a Brier skill of **+0.112** against
+always predicting the base rate, so it genuinely carries information. The pooled
+number is also worthless for trading, because **every trade is drawn from the top
+of the distribution**, and above 50 % the estimate is optimistic by 11 to 22
+points. Two further facts pin the shape: the actual rate **flattens** at 42–44 %
+across the 50–70 band, so in the region where candidates are chosen the estimate
+has little discriminating power left as well as a bias; and the ordering below
+50 % is monotone and near-honest, which is why the same number works as a
+*ranker* and fails as a *probability*.
+
+**This retro-explains the 70 %-odds gate.** `min_prob_profit = 0.70` selected
+candidates the model called 77.3 % — realized **56.8 %** across the 234 such
+candidates in the dense sample, and 3 winners from 8 in the run that used it. The
+gate was not wrong to filter on odds; it was reading a number that is ~20 points
+optimistic exactly where it was thresholding.
+
+So: calibrate before gating on it, or gate on the empirical mapping rather than
+the raw model number. And note the caveat in the measurement itself — the dense
+sample's realized outcome closes at the forecast target or the horizon bar, which
+matches `prob_profit`'s definition (clears cost at the horizon) closely but not
+exactly.
+
 ### A trade records what the model concluded *and* what it saw
 
 `prediction` on a trade has always carried the conclusion — `expected_pl`,

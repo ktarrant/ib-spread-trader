@@ -1299,6 +1299,16 @@ fn scorer_sample(
         // not always the expected-P/L ratio.
         let (expected_pl, score) =
             ranking_key(candidate, dist, remaining_years, forward_scale, cfg);
+        // Recorded regardless of the metric: calibrating a probability needs the
+        // probability, not whichever number this ranker happened to order by.
+        let prob_profit = crate::model::prob_profit_of(
+            &candidate.spread,
+            candidate.cost_basis + candidate.exit_spread_cost,
+            &candidate.leg_vols,
+            dist,
+            remaining_years,
+            forward_scale,
+        );
         // Realized: close the way the strategy would — at the forecast target on
         // the first bar the underlying reaches it, else on the horizon bar. The
         // entry cost is already in `cost_basis`; a leg that stopped quoting falls
@@ -1322,6 +1332,7 @@ fn scorer_sample(
             expected_pl,
             realized_pl,
             max_loss: candidate.max_loss,
+            prob_profit,
         });
     }
 }

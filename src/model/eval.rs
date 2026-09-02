@@ -209,6 +209,10 @@ pub struct ScorerRecord {
     /// horizon later (or at intrinsic when a leg stopped quoting).
     pub realized_pl: f64,
     pub max_loss: f64,
+    /// The model's probability this candidate clears its round-trip cost at the
+    /// horizon. Recorded beside the realized outcome so the *probability* can be
+    /// calibrated, which the trade log cannot do on ~50 samples.
+    pub prob_profit: f64,
 }
 
 /// One score-decile's realized outcome.
@@ -404,6 +408,7 @@ mod tests {
                 expected_pl: i as f64,
                 realized_pl: realized(i),
                 max_loss: 100.0,
+                prob_profit: 0.5,
             })
             .collect()
     }
