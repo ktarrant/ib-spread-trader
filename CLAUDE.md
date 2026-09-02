@@ -876,23 +876,43 @@ Realized P/L per unit of risk, by tercile of *annualised realized vol ÷ ATM IV*
 **Long premium behaves as the theory says; short premium does not.** Debits
 improve monotonically as realized vol rises against implied (+0.074 of risk from
 low to high) and naked longs — the purest long-vol structure — move +0.25. Credit
-spreads are **flat**: 0.006 across the whole range. On the ATR measure credits do
-tilt the predicted way (−0.499 low vs −0.565 high) but by less than debits move,
-and the two vol measures disagree about them.
+spreads are **flat**: 0.006 across the whole range.
 
-Per symbol, high beats low on **8/12** for debits and **6/12** for credits — the
-debit effect clears the same robustness bar the model itself is held to; the
-credit half is a coin flip and should not be traded on.
+**But the ratio is mostly the IV level showing through, and the level is the
+better parameter.** Crossing the two for debits:
+
+| | ratio low | ratio mid | ratio high | high−low |
+|---|---|---|---|---|
+| low IV (<0.97×) | −0.395 | −0.321 | −0.344 | +0.051 |
+| mid IV | −0.232 | −0.183 | −0.106 | +0.127 |
+| high IV (≥1.03×) | −0.184 | −0.148 | −0.171 | +0.014 |
+| **IV effect within the band** | **+0.211** | **+0.173** | **+0.173** | |
+
+Within a ratio band the IV level separates by a consistent +0.17 to +0.21. Within
+an IV level the ratio separates by +0.05, +0.13, +0.01 — inconsistent and near
+zero at both ends. **Control for IV and the variance-premium effect mostly
+disappears; control for the ratio and the IV effect does not.**
+
+So the parameter worth sizing on is **ATM IV against the symbol's own median**,
+and unlike the ratio it works for *every* structure:
+
+| structure | low IV | high IV | diff | symbols positive |
+|---|---|---|---|---|
+| debit | −0.356 | −0.174 | +0.182 | **10/12** |
+| credit | −0.679 | −0.469 | **+0.210** | **11/12** |
+| naked | −0.068 | +0.064 | +0.131 | 1/2 (n too small) |
+
+11/12 and 10/12 are better per-symbol robustness than anything else measured
+here, the model's own 9/12 included. And it is the same variable that predicted
+*forecast* skill (IV 1.00–1.10× best, 10/12) — one regime variable moving both
+the forecast and the trade, which is what a real state variable should do.
 
 **Why this matters more than its size.** It is an *across-bar* discriminator,
 which is exactly what the score lacks (within-bar Spearman +0.358, across-bar
-+0.044). A structure-conditional adjustment to expected P/L would inject the
-missing across-bar signal into the number that drives sizing, rather than bolting
-on another binary gate. The honest form is narrow: **long premium only**, one
-parameter, fitted against the vol ratio and validated per symbol.
-
-Scale expectations accordingly: 0.074 of risk is about a third of what the RSI
-regime separates (0.24). It is a real edge to size by, not one to trade on alone.
++0.044). Scaling size by IV level injects the missing across-bar signal into
+sizing rather than bolting on another binary gate — and the effect (+0.18 to
++0.21 of risk) is comparable to the RSI regime's +0.24, on 100 000 samples rather
+than 24 trades.
 
 ### Why the score fails at sizing: it is a within-bar comparator, not an across-bar one
 
