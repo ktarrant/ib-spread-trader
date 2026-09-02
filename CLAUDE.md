@@ -857,6 +857,43 @@ improve the account, because capital freed by a good exit is redeployed (28 → 
 trades on `credit_pop`). That pointed at the **portfolio** axis, and pulling on it
 found the sharpest result in this whole line of work.
 
+### Realized-vs-implied vol splits long premium, not short — and it is an across-bar signal
+
+The variance-risk-premium hunch — sell premium when implied exceeds realized, buy
+it when realized exceeds implied — is testable now that `forecasts.csv` carries
+the feature vector and `scorer.csv` carries `entry_debit` and `legs`. Joining them
+gives 101 525 forward-priced candidates labelled by structure and by their bar's
+vol regime, with no new backtest.
+
+Realized P/L per unit of risk, by tercile of *annualised realized vol ÷ ATM IV*:
+
+| structure | low (implied rich) | mid | high (realized rich) |
+|---|---|---|---|
+| credit | −0.532 | −0.528 | −0.526 |
+| debit | −0.270 | −0.226 | **−0.196** |
+| naked long | −0.064 | +0.040 | **+0.188** |
+
+**Long premium behaves as the theory says; short premium does not.** Debits
+improve monotonically as realized vol rises against implied (+0.074 of risk from
+low to high) and naked longs — the purest long-vol structure — move +0.25. Credit
+spreads are **flat**: 0.006 across the whole range. On the ATR measure credits do
+tilt the predicted way (−0.499 low vs −0.565 high) but by less than debits move,
+and the two vol measures disagree about them.
+
+Per symbol, high beats low on **8/12** for debits and **6/12** for credits — the
+debit effect clears the same robustness bar the model itself is held to; the
+credit half is a coin flip and should not be traded on.
+
+**Why this matters more than its size.** It is an *across-bar* discriminator,
+which is exactly what the score lacks (within-bar Spearman +0.358, across-bar
++0.044). A structure-conditional adjustment to expected P/L would inject the
+missing across-bar signal into the number that drives sizing, rather than bolting
+on another binary gate. The honest form is narrow: **long premium only**, one
+parameter, fitted against the vol ratio and validated per symbol.
+
+Scale expectations accordingly: 0.074 of risk is about a third of what the RSI
+regime separates (0.24). It is a real edge to size by, not one to trade on alone.
+
 ### Why the score fails at sizing: it is a within-bar comparator, not an across-bar one
 
 The score does its job, and the earlier "it does not size" finding is not a

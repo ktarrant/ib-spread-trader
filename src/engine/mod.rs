@@ -1462,6 +1462,8 @@ fn scorer_sample(
             expected_pl,
             realized_pl,
             max_loss: candidate.max_loss,
+            entry_debit: candidate.entry_debit,
+            legs: candidate.spread.legs.len() as u8,
             prob_profit,
         });
     }
@@ -1512,6 +1514,7 @@ fn score_forecast(
         features.forward,
         features.atm_iv,
         horizon_years,
+        features.into(),
         dist,
         &null,
         realized,

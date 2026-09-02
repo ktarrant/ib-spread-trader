@@ -619,18 +619,26 @@ pub fn write_csvs(
     if has_forecasts {
         let mut forecasts = String::from(
             "ts,symbol,spot,forward,atm_iv,horizon_years,mean,stddev,\
-             q05,q10,q25,q50,q75,q90,q95,realized,model_crps,null_crps,pit\n",
+             q05,q10,q25,q50,q75,q90,q95,realized,model_crps,null_crps,pit,\
+             trend,vwap_distance,atr,realized_vol,skew,rsi,days_to_earnings\n",
         );
         for run in runs {
             for f in &run.forecasts {
                 let atm_iv = f.atm_iv.map(|v| format!("{v:.6}")).unwrap_or_default();
+                // An absent reading writes an empty cell, never a zero, which
+                // would read as a measurement.
+                let num = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_default();
+                let x = &f.features;
                 forecasts.push_str(&format!(
-                    "{},{},{:.4},{:.4},{},{:.6},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6}\n",
+                    "{},{},{:.4},{:.4},{},{:.6},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{},{},{},{},{},{},{}\n",
                     f.ts.to_rfc3339(), f.symbol, f.spot, f.forward, atm_iv, f.horizon_years,
                     f.mean, f.stddev,
                     f.quantiles[0], f.quantiles[1], f.quantiles[2], f.quantiles[3],
                     f.quantiles[4], f.quantiles[5], f.quantiles[6],
                     f.realized, f.model_crps, f.null_crps, f.pit,
+                    num(x.trend), num(x.vwap_distance), num(x.atr), num(x.realized_vol),
+                    num(x.skew), num(x.rsi),
+                    x.days_to_earnings.map(|d| d.to_string()).unwrap_or_default(),
                 ));
             }
         }
@@ -663,11 +671,11 @@ pub fn write_csvs(
 
     let has_scorer = runs.iter().any(|r| !r.scorer_records.is_empty());
     if has_scorer {
-        let mut scorer = String::from("ts,symbol,score,expected_pl,realized_pl,max_loss,prob_profit\n");
+        let mut scorer = String::from("ts,symbol,score,expected_pl,realized_pl,max_loss,prob_profit,entry_debit,legs\n");
         for run in runs {
             for s in &run.scorer_records {
                 scorer.push_str(&format!(
-                    "{},{},{:.6},{:.2},{:.2},{:.2},{:.6}\n",
+                    "{},{},{:.6},{:.2},{:.2},{:.2},{:.6},{:.2},{}\n",
                     s.ts.to_rfc3339(),
                     s.symbol,
                     s.score,
@@ -675,6 +683,8 @@ pub fn write_csvs(
                     s.realized_pl,
                     s.max_loss,
                     s.prob_profit,
+                    s.entry_debit,
+                    s.legs,
                 ));
             }
         }

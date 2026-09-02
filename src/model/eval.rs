@@ -40,6 +40,10 @@ pub struct ForecastRecord {
     /// CRPS of a random-walk null (driftless, vol = ATM IV) against `realized`.
     /// The model beats the null when `model_crps < null_crps`.
     pub null_crps: f64,
+    /// What the model saw on this bar. Carried so a candidate regime — realized
+    /// vol against implied, a trend state, an IV level — can be tested against
+    /// forecast quality on 6 000 bars instead of 50 trades, without a new run.
+    pub features: crate::model::EntryFeatures,
     /// Probability integral transform, `F_model(realized)`. Uniform(0,1) across
     /// bars iff the model is calibrated.
     pub pit: f64,
@@ -55,6 +59,7 @@ impl ForecastRecord {
         forward: f64,
         atm_iv: Option<f64>,
         horizon_years: f64,
+        features: crate::model::EntryFeatures,
         model: &PriceDistribution,
         null: &PriceDistribution,
         realized: f64,
@@ -70,6 +75,7 @@ impl ForecastRecord {
             forward,
             atm_iv,
             horizon_years,
+            features,
             mean: model.mean(),
             stddev: model.stddev(),
             quantiles,
@@ -209,6 +215,11 @@ pub struct ScorerRecord {
     /// horizon later (or at intrinsic when a leg stopped quoting).
     pub realized_pl: f64,
     pub max_loss: f64,
+    /// Signed entry cost and leg count — enough to name the structure
+    /// (`legs == 1` is a naked long, else the sign of `entry_debit` gives debit
+    /// or credit), so outcomes can be split by structure without re-running.
+    pub entry_debit: f64,
+    pub legs: u8,
     /// The model's probability this candidate clears its round-trip cost at the
     /// horizon. Recorded beside the realized outcome so the *probability* can be
     /// calibrated, which the trade log cannot do on ~50 samples.
@@ -349,6 +360,20 @@ mod tests {
         PriceDistribution::from_weights(prices, weights).unwrap()
     }
 
+    fn features(spot: f64) -> crate::model::EntryFeatures {
+        crate::model::EntryFeatures {
+            spot,
+            trend: None,
+            vwap_distance: None,
+            atr: None,
+            realized_vol: None,
+            atm_iv: None,
+            skew: None,
+            rsi: None,
+            days_to_earnings: None,
+        }
+    }
+
     #[test]
     fn a_record_scores_model_against_null_and_reads_pit() {
         // Model straddles the outcome symmetrically; null sits far below it.
@@ -361,6 +386,7 @@ mod tests {
             100.0,
             Some(0.2),
             0.02,
+            features(100.0),
             &model,
             &null,
             100.0,
@@ -386,6 +412,7 @@ mod tests {
                 100.0,
                 Some(0.2),
                 0.02,
+                features(100.0),
                 &model,
                 &null,
                 realized,
@@ -408,6 +435,8 @@ mod tests {
                 expected_pl: i as f64,
                 realized_pl: realized(i),
                 max_loss: 100.0,
+                entry_debit: 100.0,
+                legs: 2,
                 prob_profit: 0.5,
             })
             .collect()
@@ -451,6 +480,7 @@ mod tests {
                 100.0,
                 None,
                 0.02,
+                features(100.0),
                 &model,
                 &model,
                 realized,
