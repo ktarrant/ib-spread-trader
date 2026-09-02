@@ -1,0 +1,19 @@
+# Portfolio-axis variant: the main model sized by IV regime rather than by score.
+#
+# Compare against equal_weight.toml (flat one lot) rather than mean_reversion.toml
+# — the question is whether the regime carries sizing information, and flat is the
+# control that isolates it from leverage.
+name      = "mean-reversion-iv-sized-wide"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "ev"
+portfolio = "iv_scaled_wide"
+exit      = "base"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+
+[costs]
+commission_per_contract = 0.65

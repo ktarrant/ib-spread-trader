@@ -857,6 +857,49 @@ improve the account, because capital freed by a good exit is redeployed (28 → 
 trades on `credit_pop`). That pointed at the **portfolio** axis, and pulling on it
 found the sharpest result in this whole line of work.
 
+### Sizing by the IV regime: built, measured, and it does not work on the trades taken
+
+`IvScaledSizer` sizes by ATM IV against its **trailing** median (the feature is
+`iv_vs_median`, a rolling window read *before* the current bar is appended — the
+full-sample median my analysis used is look-ahead and must never reach the
+engine). Clamped 0.7–1.5, ignoring the score entirely, because the score is a
+within-bar comparator.
+
+Against a flat-one-lot control on the same strategy:
+
+| portfolio | trades | return | max DD | lots | **$ per lot** | lot mix |
+|---|---|---|---|---|---|---|
+| flat 1 lot | 51 | −5.7 % | 14.1 % | 51 | **−22.37** | all 1 |
+| IV-sized, $500 base | 47 | −7.3 % | 18.0 % | 57 | −25.69 | 42×1, 3×2, 1×4, 1×5 |
+| IV-sized, $1 500 base | 51 | −21.2 % | 40.6 % | 153 | **−27.72** | 15×2, 27×3, 3×4, 6×5 |
+
+The first arm did not test anything — 42 of 47 trades came out at one lot because
+a $500 base budget buys exactly one lot of a candidate at the $500 loss cap, so a
+1.5× multiplier cannot reach two. **Lot granularity, not the signal, decided the
+size.** The second arm gives the regime real range and is *worse*, with P&L per
+lot non-monotone in lot count (2 lots +$94, 3 lots −$97, 4 lots −$144, 5 lots
++$85).
+
+**The reason is the trap this file already diagnosed for the score, walked into
+again.** The +0.18 to +0.21 separation was measured over *all sampled candidates*.
+Among the 41 trades actually taken it inverts:
+
+| | n | mean IV ratio | total P&L |
+|---|---|---|---|
+| low-IV half | 20 | 0.84 | **+$69** |
+| high-IV half | 21 | 1.04 | **−$2 387** |
+
+A signal measured across the candidate population need not survive into the
+per-bar argmax that becomes a trade — which is exactly what was said of
+`scorer_eval`'s Spearman, and is just as true of any regime variable. **The
+counterfactual sample is the wrong place to validate a sizing rule**, however
+many observations it has; the right place is the selected set, and there 41
+trades cannot support a conclusion either way.
+
+So: the sizer stays, defaulted off, because the plumbing (a look-ahead-free
+regime feature reaching the allocator) is the reusable part. The signal is not
+adopted. What would settle it is more expiries, not more sampling.
+
 ### Realized-vs-implied vol splits long premium, not short — and it is an across-bar signal
 
 The variance-risk-premium hunch — sell premium when implied exceeds realized, buy

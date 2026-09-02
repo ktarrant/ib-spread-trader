@@ -165,6 +165,7 @@ mod tests {
     fn features(trend: Option<f64>) -> Features {
         Features {
             rsi: None,
+            iv_vs_median: None,
             bars_since_rsi_cross_up: None,
             spot: 100.0,
             forward: 100.0,

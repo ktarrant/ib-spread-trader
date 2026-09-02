@@ -16,7 +16,7 @@ use crate::spread::{CONTRACT_MULTIPLIER, Side, Spread};
 
 pub mod model;
 
-pub use model::{
+pub use model::{IvScaledSizer, 
     AllocationCandidate, EqualWeightSizer, PortfolioModel, PortfolioModelKind, PortfolioState,
     ScoreWeightedSizer,
 };

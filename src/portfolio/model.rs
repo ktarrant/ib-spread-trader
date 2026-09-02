@@ -7,6 +7,10 @@ use serde::Serialize;
 pub struct AllocationCandidate {
     pub score: f64,
     pub one_lot_max_loss: f64,
+    /// ATM IV over its trailing median — the regime the bar is in. `None` while
+    /// the feature is still warming, which every policy must treat as "no
+    /// opinion" rather than as a neutral 1.0 it did not measure.
+    pub iv_vs_median: Option<f64>,
 }
 
 /// Current account state at fill time. Ordering remains the engine's job; this
@@ -88,6 +92,50 @@ impl PortfolioModel for EqualWeightSizer {
     }
 }
 
+/// Size by the *regime* rather than by the score.
+///
+/// The score is a within-bar comparator (Spearman +0.36) and a poor across-bar
+/// one (+0.04), so sizing by it measured no better than flat. ATM IV against its
+/// own trailing median is the reverse: it separates realized P/L per unit of risk
+/// by +0.27 (debits) and +0.32 (credits) across bars, on 11/12 and 10/12 symbols.
+/// This policy therefore ignores the score entirely and scales the budget by the
+/// IV regime, clamped so one strange reading cannot take the account with it.
+///
+/// A bar with no reading gets the base budget — the honest response to "no
+/// opinion", and the reason `iv_vs_median` is an `Option` rather than a 1.0.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct IvScaledSizer {
+    pub risk_per_position: f64,
+    pub max_risk_per_position: f64,
+    pub max_lots: Option<u32>,
+    pub iv_floor: f64,
+    pub iv_cap: f64,
+}
+
+impl PortfolioModel for IvScaledSizer {
+    fn name(&self) -> &'static str {
+        "iv_scaled"
+    }
+
+    fn lots(&self, candidate: AllocationCandidate, state: PortfolioState) -> u32 {
+        if candidate.one_lot_max_loss <= 0.0 {
+            return 1;
+        }
+        let regime = candidate
+            .iv_vs_median
+            .map(|r| r.clamp(self.iv_floor, self.iv_cap))
+            .unwrap_or(1.0);
+        let budget = (state.initial_cash * self.risk_per_position * regime)
+            .min(state.initial_cash * self.max_risk_per_position)
+            .min(state.remaining_budget);
+        let lots = (budget / candidate.one_lot_max_loss).floor() as u32;
+        match self.max_lots {
+            Some(cap) => lots.min(cap),
+            None => lots,
+        }
+    }
+}
+
 /// Runtime dispatch over the built-in portfolio policies. The trait remains the
 /// extension seam; this enum keeps `RunConfig` cheap and serializable.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -95,6 +143,7 @@ impl PortfolioModel for EqualWeightSizer {
 pub enum PortfolioModelKind {
     ScoreWeighted(ScoreWeightedSizer),
     EqualWeight(EqualWeightSizer),
+    IvScaled(IvScaledSizer),
 }
 
 impl PortfolioModel for PortfolioModelKind {
@@ -102,6 +151,7 @@ impl PortfolioModel for PortfolioModelKind {
         match self {
             Self::ScoreWeighted(model) => model.name(),
             Self::EqualWeight(model) => model.name(),
+            Self::IvScaled(model) => model.name(),
         }
     }
 
@@ -109,6 +159,7 @@ impl PortfolioModel for PortfolioModelKind {
         match self {
             Self::ScoreWeighted(model) => model.lots(candidate, state),
             Self::EqualWeight(model) => model.lots(candidate, state),
+            Self::IvScaled(model) => model.lots(candidate, state),
         }
     }
 }
@@ -116,6 +167,34 @@ impl PortfolioModel for PortfolioModelKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regime scales the budget, a missing reading does not, and the clamp
+    /// stops one strange print from sizing the account.
+    #[test]
+    fn the_iv_sizer_scales_by_regime_and_declines_to_guess_without_one() {
+        let sizer = IvScaledSizer {
+            risk_per_position: 0.025,   // $500 of a $20k account: one lot
+            max_risk_per_position: 0.25,
+            max_lots: Some(5),
+            iv_floor: 0.7,
+            iv_cap: 1.5,
+        };
+        let state = PortfolioState::new(20_000.0, 0.0, 0);
+        let lots = |iv| {
+            sizer.lots(
+                AllocationCandidate { score: 0.05, one_lot_max_loss: 100.0, iv_vs_median: iv },
+                state,
+            )
+        };
+        assert_eq!(lots(Some(1.0)), 5, "at the median: $500 budget / $100 = 5 lots");
+        assert_eq!(lots(Some(0.7)), 3, "cheap regime sizes down");
+        assert_eq!(lots(Some(1.4)), 5, "rich regime sizes up, then meets the lot cap");
+        // Clamped: a 10x print cannot buy more than iv_cap allows.
+        assert_eq!(lots(Some(10.0)), lots(Some(1.5)));
+        // No reading is not a neutral 1.0 by accident — it is the base budget by
+        // decision, and it must equal the at-median size.
+        assert_eq!(lots(None), lots(Some(1.0)));
+    }
 
     #[test]
     fn score_weighted_sizing_preserves_the_original_budget_math() {
@@ -126,6 +205,7 @@ mod tests {
             max_lots: None,
         };
         let candidate = |score| AllocationCandidate {
+            iv_vs_median: None,
             score,
             one_lot_max_loss: 400.0,
         };
@@ -139,6 +219,7 @@ mod tests {
     fn equal_weight_is_fixed_but_capital_gated() {
         let model = EqualWeightSizer { lots: 3 };
         let candidate = AllocationCandidate {
+            iv_vs_median: None,
             score: 99.0,
             one_lot_max_loss: 400.0,
         };

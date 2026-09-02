@@ -34,6 +34,10 @@ pub struct FeatureConfig {
     pub rsi_period: usize,
     /// The level whose upward crossing `bars_since_rsi_cross_up` counts from.
     pub rsi_cross_level: f64,
+    /// Bars of ATM IV history behind the trailing median that `iv_vs_median` is
+    /// measured against. A **trailing** window, never the whole sample: the whole
+    /// sample includes the future, and a sizing rule that reads it is cheating.
+    pub iv_median_lookback: usize,
 }
 
 impl Default for FeatureConfig {
@@ -47,6 +51,7 @@ impl Default for FeatureConfig {
             skew_moneyness: 0.05,
             rsi_period: 14,
             rsi_cross_level: 30.0,
+            iv_median_lookback: 200,
         }
     }
 }
@@ -127,6 +132,11 @@ pub struct Features {
     /// RSI of the spot series, `None` until the indicator is warm. Read by the
     /// entry-timing gate; the price model ignores it.
     pub rsi: Option<f64>,
+    /// ATM IV over the median of the *previous* `iv_median_lookback` bars, so
+    /// above 1.0 means this name is priced richer than it has been lately.
+    /// `None` until half the window has been seen — a regime cannot be judged
+    /// against a handful of readings.
+    pub iv_vs_median: Option<f64>,
     /// Option bars since RSI last crossed **up** through `rsi_cross_level`, or
     /// `None` if it has not done so yet. Zero on the crossing bar itself.
     ///
@@ -151,6 +161,8 @@ pub struct FeatureEngine {
     vwap: Vwap,
     realized_vol: RealizedVol,
     rsi: Rsi,
+    iv_history: std::collections::VecDeque<f64>,
+    iv_median_lookback: usize,
     rsi_cross: CrossDetector,
     rsi_cross_level: f64,
     bars_since_rsi_cross_up: Option<u32>,
@@ -179,6 +191,8 @@ impl FeatureEngine {
                 config.realized_vol_winsor_k,
             )?,
             rsi: Rsi::new(config.rsi_period)?,
+            iv_history: std::collections::VecDeque::with_capacity(config.iv_median_lookback),
+            iv_median_lookback: config.iv_median_lookback.max(2),
             rsi_cross: CrossDetector::new(),
             rsi_cross_level: config.rsi_cross_level,
             bars_since_rsi_cross_up: None,
@@ -233,6 +247,31 @@ impl FeatureEngine {
         }
         let bars_since_rsi_cross_up = self.bars_since_rsi_cross_up;
 
+        // Read the median of prior bars, then append — so a bar is never
+        // compared against a window that already contains it.
+        let atm_iv = chain.atm_implied_vol();
+        let iv_vs_median = atm_iv.and_then(|iv| {
+            let ready = self.iv_history.len() >= self.iv_median_lookback / 2;
+            ready.then(|| {
+                let mut sorted: Vec<f64> = self.iv_history.iter().copied().collect();
+                sorted.sort_by(f64::total_cmp);
+                let mid = sorted.len() / 2;
+                let median = if sorted.len().is_multiple_of(2) {
+                    0.5 * (sorted[mid - 1] + sorted[mid])
+                } else {
+                    sorted[mid]
+                };
+                (median > 0.0).then(|| iv / median)
+            })
+            .flatten()
+        });
+        if let Some(iv) = atm_iv {
+            if self.iv_history.len() == self.iv_median_lookback {
+                self.iv_history.pop_front();
+            }
+            self.iv_history.push_back(iv);
+        }
+
         let minute_of_day = {
             let local = chain.ts.with_timezone(&New_York);
             (local.hour() * 60 + local.minute()) as u16
@@ -248,7 +287,8 @@ impl FeatureEngine {
             vwap_distance,
             atr,
             realized_vol,
-            atm_iv: chain.atm_implied_vol(),
+            atm_iv,
+            iv_vs_median,
             rsi,
             bars_since_rsi_cross_up,
             skew: chain.put_call_skew(self.skew_moneyness),
@@ -305,6 +345,7 @@ mod tests {
         FeatureConfig {
             rsi_period: 14,
             rsi_cross_level: 30.0,
+            iv_median_lookback: 200,
             trend_fast: 2,
             trend_slow: 3,
             atr_period: 2,

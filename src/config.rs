@@ -649,6 +649,26 @@ pub enum PortfolioModelConfig {
         #[serde(default = "default_equal_lots")]
         lots: u32,
     },
+    /// Size by the IV regime rather than the score. See `IvScaledSizer`.
+    IvScaled {
+        #[serde(default = "default_risk_per_position")]
+        risk_per_position: f64,
+        #[serde(default = "default_max_risk_per_position")]
+        max_risk_per_position: f64,
+        #[serde(default = "default_max_lots")]
+        max_lots: Option<u32>,
+        #[serde(default = "default_iv_floor")]
+        iv_floor: f64,
+        #[serde(default = "default_iv_cap")]
+        iv_cap: f64,
+    },
+}
+
+fn default_iv_floor() -> f64 {
+    0.7
+}
+fn default_iv_cap() -> f64 {
+    1.5
 }
 
 fn default_risk_per_position() -> f64 {
@@ -693,6 +713,29 @@ impl PortfolioModelConfig {
                 }
                 .to_runtime()?,
             )),
+            Self::IvScaled {
+                risk_per_position,
+                max_risk_per_position,
+                max_lots,
+                iv_floor,
+                iv_cap,
+            } => {
+                if !(0.0..=1.0).contains(risk_per_position) || *risk_per_position <= 0.0 {
+                    bail!("portfolio.model.risk_per_position must be in (0, 1]");
+                }
+                if iv_floor <= &0.0 || iv_cap < iv_floor {
+                    bail!("portfolio.model needs 0 < iv_floor <= iv_cap");
+                }
+                Ok(PortfolioModelKind::IvScaled(
+                    crate::portfolio::IvScaledSizer {
+                        risk_per_position: *risk_per_position,
+                        max_risk_per_position: *max_risk_per_position,
+                        max_lots: *max_lots,
+                        iv_floor: *iv_floor,
+                        iv_cap: *iv_cap,
+                    },
+                ))
+            }
             Self::EqualWeight { lots } => {
                 if *lots == 0 {
                     bail!("portfolio.model.lots must be at least 1");
@@ -787,6 +830,8 @@ pub struct FeaturesConfig {
     pub rsi_period: usize,
     /// The level whose upward crossing the recovery gate counts from.
     pub rsi_cross_level: f64,
+    /// Trailing window for the IV-regime feature. See `FeatureConfig`.
+    pub iv_median_lookback: usize,
 }
 
 impl Default for FeaturesConfig {
@@ -801,6 +846,7 @@ impl Default for FeaturesConfig {
             skew_moneyness: d.skew_moneyness,
             rsi_period: d.rsi_period,
             rsi_cross_level: d.rsi_cross_level,
+            iv_median_lookback: d.iv_median_lookback,
         }
     }
 }
@@ -816,6 +862,7 @@ impl FeaturesConfig {
             skew_moneyness: self.skew_moneyness,
             rsi_period: self.rsi_period,
             rsi_cross_level: self.rsi_cross_level,
+            iv_median_lookback: self.iv_median_lookback,
         }
     }
 }

@@ -355,6 +355,9 @@ enum Intent {
 struct AllocationHint {
     score: f64,
     one_lot_max_loss: f64,
+    /// The bar's IV regime, carried to fill time so the policy sizes against the
+    /// state the decision was made in, not the state at execution.
+    iv_vs_median: Option<f64>,
     /// The one-lot expected P/L, scaled by the filled lot count for the trade
     /// prediction so it stays consistent with the position's realised size.
     expected_pl: f64,
@@ -631,6 +634,7 @@ pub fn run_symbol(
                                         AllocationCandidate {
                                             score: choice.score,
                                             one_lot_max_loss: choice.candidate.max_loss,
+                                            iv_vs_median: ctx.iv_vs_median,
                                         },
                                         PortfolioState::new(
                                             config.initial_cash,
@@ -1022,6 +1026,7 @@ pub fn run_shared(
                                 let allocation = config.portfolio_model.map(|_| AllocationHint {
                                     score: choice.score,
                                     one_lot_max_loss: choice.candidate.max_loss,
+                                    iv_vs_median: ctx.iv_vs_median,
                                     expected_pl: choice.expected_pl,
                                 });
                                 let prediction = TradePrediction {
@@ -1255,6 +1260,8 @@ struct RankedContext {
     rsi: Option<f64>,
     /// Bars since RSI turned up through its level, for the recovery gate.
     bars_since_rsi_cross_up: Option<u32>,
+    /// ATM IV over its trailing median — the regime the allocator sizes by.
+    iv_vs_median: Option<f64>,
     /// What the model saw this bar, recorded onto any position opened from it.
     entry_features: crate::model::EntryFeatures,
 }
@@ -1323,6 +1330,7 @@ fn ranked_observe(
         trend: features.trend,
         rsi: features.rsi,
         bars_since_rsi_cross_up: features.bars_since_rsi_cross_up,
+        iv_vs_median: features.iv_vs_median,
         entry_features: (&features).into(),
     }
 }
@@ -1557,6 +1565,7 @@ fn execute(
                                 AllocationCandidate {
                                     score: hint.score,
                                     one_lot_max_loss: hint.one_lot_max_loss,
+                                    iv_vs_median: hint.iv_vs_median,
                                 },
                                 PortfolioState::new(
                                     config.initial_cash,

@@ -1,0 +1,31 @@
+# iv_scaled_20k with a base budget wide enough for the regime to move the lots.
+#
+# At risk_per_position = 0.025 the base budget is $500 — exactly one lot of a
+# candidate at the $500 max-loss cap — so a 0.7-1.5x multiplier could not reach
+# two lots and 42 of 47 trades came out at one lot regardless of regime. Lot
+# granularity, not the signal, decided the size. 0.075 is $1,500, so the same
+# multiplier spans roughly 2-4 lots and the regime can actually express itself.
+#
+# The score is a within-bar comparator (Spearman +0.36) and a poor across-bar one
+# (+0.04), which is why sizing by it measured no better than flat. ATM IV against
+# its own *trailing* median is the reverse: across bars it separates realized P/L
+# per unit of risk by +0.27 on debits and +0.32 on credits, positive on 10/12 and
+# 11/12 symbols.
+#
+# risk_per_position = 0.025 is $500 — one lot of a $500-max-loss candidate — so
+# the regime multiplier has somewhere to go in both directions rather than
+# starting already at the lot cap.
+#
+# The clamp is not decoration. A single strange IV print would otherwise size the
+# whole account, and the trailing median is thin early in a symbol's history.
+account = "shared"
+initial_cash = 20000.0
+max_positions_per_symbol = 1
+
+[model]
+kind = "iv_scaled"
+risk_per_position = 0.075
+max_risk_per_position = 0.25
+max_lots = 5
+iv_floor = 0.7
+iv_cap = 1.5
