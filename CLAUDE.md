@@ -857,6 +857,61 @@ improve the account, because capital freed by a good exit is redeployed (28 → 
 trades on `credit_pop`). That pointed at the **portfolio** axis, and pulling on it
 found the sharpest result in this whole line of work.
 
+### Why the score fails at sizing: it is a within-bar comparator, not an across-bar one
+
+The score does its job, and the earlier "it does not size" finding is not a
+contradiction — the two measurements are about different comparisons. On 107 832
+sampled candidates:
+
+**Within a bar it discriminates strongly.** Mean within-bar Spearman **+0.358**
+(positive on 84 % of bars), against +0.383 pooled — so the pooled number is not
+an artifact of ranking bars rather than candidates. Realized P/L per unit of risk
+by within-bar rank:
+
+| rank within the bar | n | realized/risk |
+|---|---|---|
+| top-ranked | 5 436 | **−0.040** |
+| top 25 % | 26 746 | −0.059 |
+| middle 50 % | 53 610 | −0.254 |
+| bottom 25 % | 26 872 | **−0.835** |
+
+Monotone, and the top is 21× better than the bottom quartile. **Choosing the best
+candidate on a bar is where the ranker earns its keep.**
+
+**Across bars it is nearly blind.** Take each bar's winner and ask whether its
+score predicts its own outcome: Spearman **+0.044** over 5 436 bars, and the
+quartile means are non-monotone. A score of +0.07 on one bar and −0.20 on another
+say almost nothing about which trade to prefer — they are computed against
+different distributions, so the scale is not comparable between bars.
+
+That is exactly the comparison sizing makes ("this bar's winner deserves more
+capital than that one's"), which is why score-weighted sizing measured worse per
+lot than flat, and why the top half of *taken* trades underperformed the bottom
+half — those trades come from different bars.
+
+**And a regime variable separates the same winners 4.2× better than the score:**
+
+| | n | winner's realized/risk |
+|---|---|---|
+| by score, highest quartile − lowest | | +0.057 |
+| RSI < 30 | 362 | **+0.096** |
+| RSI 30–45 | 1 456 | +0.007 |
+| RSI 45–70 | 2 905 | −0.058 |
+| RSI ≥ 70 | 460 | **−0.145** |
+
+So the division of labour is empirical, not stylistic: **the score decides *what*
+to trade on a bar; something else has to decide *whether* and *how much*.** The
+gate is not a patch over a broken score — it is the across-bar mechanism the
+score was never able to supply. Fixing the score would mean making it comparable
+between bars (normalising against that bar's own candidate distribution is the
+obvious first try, and is testable on `scorer.csv` without a backtest); until
+then, sizing and gating should read a reliability signal rather than the score.
+
+One thing this rules out: the optimizer's curse is *not* the explanation. The
+top-ranked candidate beats its own forecast by 0.019 of risk while the
+median-ranked beats it by 0.105 — the argmax is not selecting for estimation
+error.
+
 ### The score orders candidates and does not size them
 
 **`shared_20k` is nominally score-weighted and effectively flat at maximum
