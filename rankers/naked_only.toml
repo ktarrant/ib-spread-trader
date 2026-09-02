@@ -1,0 +1,25 @@
+# Single-leg long calls and puts only — no verticals of either orientation.
+#
+# A naked long is the one structure with uncapped upside, which is what a
+# trailing stop is for: cap the giveback and let the rest run. The measured
+# reason to pair them is the horizon experiment, where dropping the time cap took
+# the naked sleeve from -$707 to +$3,932 while debit spreads went the other way.
+#
+# min_score stays at the shipped 0.02. A naked long's risk denominator is its
+# whole premium, so its score is naturally lower than a spread's — a floor tuned
+# for verticals would quietly refuse the entire universe.
+[candidates]
+rights = ["call", "put"]
+allow_debit = false
+allow_credit = false
+allow_naked_long = true
+max_relative_spread = 0.35
+max_loss = 500.0
+quantity = 1
+
+[ranking]
+metric = "expected_value"
+min_score = 0.02
+min_expected_pl = 0.0
+forecast_target_quantile = 0.85
+scorer_sample_per_bar = 20

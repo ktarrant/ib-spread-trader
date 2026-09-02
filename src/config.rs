@@ -17,7 +17,7 @@ use std::path::Path;
 
 use crate::domain::OptionRight;
 use crate::engine::{
-    ExitRules, RankedStrategy, RunConfig, StagedStrategy, Strategy, Timing,
+    ExitRules, RankedStrategy, RsiZone, RunConfig, StagedStrategy, Strategy, Timing,
 };
 use crate::execution::{Costs, DeltaSelector};
 use crate::model::{
@@ -291,12 +291,18 @@ pub struct ExecutionConfig {
     #[serde(default = "default_min_entry_days_before_expiry")]
     pub min_entry_days_before_expiry: Option<u32>,
     /// Refuse new entries within this many calendar days of an earnings
-    /// Entry-timing band on RSI of the option-bar spot series: a bar outside it
-    /// opens nothing. Ranked mode only — the staged path has no feature engine.
+    /// Entry-timing band on RSI of the option-bar spot series. Ranked mode only
+    /// — the staged path has no feature engine.
     #[serde(default)]
     pub min_entry_rsi: Option<f64>,
     #[serde(default)]
     pub max_entry_rsi: Option<f64>,
+    /// Which side of the band opens trades. `inside` (the default) refuses the
+    /// extremes and trades the middle; `outside` refuses the middle and trades
+    /// only the extremes — a mean-reversion entry that waits for a stretched
+    /// tape in either direction rather than acting on every bar.
+    #[serde(default)]
+    pub entry_rsi_zone: RsiZone,
     /// announcement. Prevents opening positions that would be immediately
     /// closed by `close_before_earnings`.
     #[serde(default)]
@@ -329,6 +335,7 @@ impl Default for ExecutionConfig {
             min_entry_days_before_expiry: default_min_entry_days_before_expiry(),
             min_entry_rsi: None,
             max_entry_rsi: None,
+            entry_rsi_zone: RsiZone::default(),
             earnings_blackout_days: None,
         }
     }
@@ -1438,6 +1445,7 @@ impl StrategyConfig {
             earnings_blackout_days: self.execution.earnings_blackout_days,
             min_entry_rsi: self.execution.min_entry_rsi,
             max_entry_rsi: self.execution.max_entry_rsi,
+            entry_rsi_zone: self.execution.entry_rsi_zone,
             portfolio_model: portfolio.model,
         })
     }

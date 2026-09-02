@@ -1,0 +1,29 @@
+# Nakeds only, entered at RSI extremes in either direction, exited on a trailing
+# stop. Three axes off the base at once — a deliberate experiment rather than a
+# single-axis comparison, so read it against itself, not against mean_reversion.
+#
+# The entry is the mirror of mean_reversion_rsi: `entry_rsi_zone = "outside"`
+# refuses the middle and acts only on a stretched tape, below 30 or above 70.
+# Direction is not hard-coded — the mean-reversion forecast already leans against
+# the stretch, so the ranker picks calls when oversold and puts when overbought
+# on its own. The gate decides *when*, the model decides *which way*.
+#
+# positions.csv records the trailing level per bar, which is what makes it
+# drawable: the stop rides the peak, so it cannot be a horizontal line.
+name      = "naked-rsi-trailing"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "naked_only"
+portfolio = "shared_20k"
+exit      = "trailing"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+min_entry_rsi = 30.0
+max_entry_rsi = 70.0
+entry_rsi_zone = "outside"
+
+[costs]
+commission_per_contract = 0.65

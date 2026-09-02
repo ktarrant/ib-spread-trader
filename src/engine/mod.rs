@@ -88,6 +88,7 @@ pub struct RunConfig {
     /// Ranked mode only; the staged path has no feature engine to read.
     pub min_entry_rsi: Option<f64>,
     pub max_entry_rsi: Option<f64>,
+    pub entry_rsi_zone: RsiZone,
     /// Ranked allocation policy. `None` preserves fixed one-lot entries; shared
     /// ranked configs resolve to the score-weighted model by default.
     pub portfolio_model: Option<PortfolioModelKind>,
@@ -106,6 +107,7 @@ impl Default for RunConfig {
             earnings_blackout_days: None,
             min_entry_rsi: None,
             max_entry_rsi: None,
+            entry_rsi_zone: RsiZone::default(),
             portfolio_model: None,
         }
     }
@@ -178,6 +180,33 @@ enum EntryGate {
     RsiOutOfBand,
 }
 
+/// Record every open position's mark on this bar. Runs after `update_peaks`, so
+/// the peak it reports is the one the exit check will read on this same bar.
+fn record_marks(
+    portfolio: &Portfolio,
+    bar: &ChainSnapshot,
+    config: &RunConfig,
+    out: &mut Vec<PositionMark>,
+) {
+    for p in &portfolio.open {
+        if p.spread.symbol != bar.symbol {
+            continue;
+        }
+        let Ok(credit) = crate::execution::exit_credit(&p.spread, bar) else {
+            continue; // unquoted on this bar: no mark rather than a made-up one
+        };
+        out.push(PositionMark {
+            ts: bar.ts,
+            position_id: p.id,
+            symbol: p.spread.symbol.clone(),
+            gross_pnl: credit - p.entry_debit,
+            peak_value: p.peak_value,
+            trailing_stop: config.exits.trailing_stop_level(p),
+            underlying: bar.underlying.price(),
+        });
+    }
+}
+
 fn entry_gate(
     open_positions: usize,
     exiting: usize,
@@ -200,15 +229,70 @@ fn entry_gate(
         .is_some_and(|days| exits::in_earnings_blackout(bar_ts, next_earnings, days))
     {
         EntryGate::EarningsBlackout
-    } else if rsi.is_some_and(|v| {
-        config.min_entry_rsi.is_some_and(|lo| v < lo) || config.max_entry_rsi.is_some_and(|hi| v > hi)
-    }) {
+    } else if rsi.is_some_and(|v| config.entry_rsi_zone.refuses(v, config)) {
         // A missing reading cannot refuse: the gate asserts "RSI is outside the
         // band", and a warming indicator has not established that.
         EntryGate::RsiOutOfBand
     } else {
         EntryGate::Open
     }
+}
+
+/// Which side of the RSI band opens trades.
+///
+/// `Inside` trades the middle and refuses the extremes; `Outside` is its mirror,
+/// refusing the middle so entries wait for a stretched tape in either direction.
+/// The same two bounds describe both — only the sense of the comparison differs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RsiZone {
+    #[default]
+    Inside,
+    Outside,
+}
+
+impl RsiZone {
+    /// Whether this reading is refused. A bound that is not configured cannot
+    /// refuse anything, which is what makes a one-sided band meaningful.
+    fn refuses(self, v: f64, config: &RunConfig) -> bool {
+        let (lo, hi) = (config.min_entry_rsi, config.max_entry_rsi);
+        match self {
+            Self::Inside => lo.is_some_and(|lo| v < lo) || hi.is_some_and(|hi| v > hi),
+            // The exact complement of `Inside`, bounds included, so the two
+            // zones partition the axis and a reading is never open to both.
+            // Inside the band on *every* configured side, so a one-sided
+            // `Outside` band still refuses the half it names.
+            Self::Outside => {
+                lo.is_none_or(|lo| v >= lo)
+                    && hi.is_none_or(|hi| v <= hi)
+                    && (lo.is_some() || hi.is_some())
+            }
+        }
+    }
+}
+
+/// One open position, marked on one bar: what it is worth, the peak it has
+/// reached, and the level each *dynamic* exit would close it at.
+///
+/// Static bounds (strikes, the entry forecast target and stop) are already on the
+/// trade and do not need repeating per bar. What cannot be reconstructed after
+/// the fact is anything that moves with the position's own history — the peak,
+/// and the trailing stop that rides it — so that is what this records.
+///
+/// Purely observational: nothing in the engine reads it back. A decision that
+/// consumed its own audit trail would be a look-ahead risk.
+#[derive(Debug, Clone, Serialize)]
+pub struct PositionMark {
+    pub ts: DateTime<Utc>,
+    pub position_id: usize,
+    pub symbol: String,
+    pub gross_pnl: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trailing_stop: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underlying: Option<f64>,
 }
 
 /// The two prices the entry forecast set for a position: where it takes profit,
@@ -322,6 +406,9 @@ pub struct SymbolRun {
     /// Ranked mode only: one scored forecast per option bar, for model evaluation.
     /// Empty for the staged pipeline.
     pub forecasts: Vec<ForecastRecord>,
+    /// Per-bar state of each open position — the dynamic exit levels a static
+    /// trade record cannot carry.
+    pub position_marks: Vec<PositionMark>,
     /// Ranked mode only, and only when `scorer_sample_per_bar > 0`: sampled
     /// candidates priced forward, to test whether the score predicts realized P/L.
     pub scorer_records: Vec<ScorerRecord>,
@@ -351,6 +438,7 @@ pub fn run_symbol(
     let mut opened_at_index: BTreeMap<usize, usize> = BTreeMap::new();
     let mut carried_trigger: Option<crate::signal::Trigger> = None;
     let mut forecasts: Vec<ForecastRecord> = Vec::new();
+    let mut position_marks: Vec<PositionMark> = Vec::new();
     let mut scorer_records: Vec<ScorerRecord> = Vec::new();
 
     let timeline = series.merged_timeline();
@@ -397,6 +485,7 @@ pub fn run_symbol(
 
             // 3. Mark, updating each position's running peak for the trailing stop.
             portfolio.update_peaks(&bar, &config.costs);
+            record_marks(&portfolio, &bar, config, &mut position_marks);
             equity_curve.push(EquityPoint {
                 ts: bar.ts,
                 equity: portfolio.equity(&bar, &config.costs),
@@ -635,6 +724,7 @@ pub fn run_symbol(
         equity_curve,
         settlement_price: settlement,
         forecasts,
+        position_marks,
         scorer_records,
     })
 }
@@ -651,6 +741,7 @@ pub struct SymbolDiag {
     pub underlying_quality: Quality,
     pub forecasts: Vec<ForecastRecord>,
     pub scorer_records: Vec<ScorerRecord>,
+    pub position_marks: Vec<PositionMark>,
     pub settlement_price: Option<f64>,
 }
 
@@ -697,6 +788,7 @@ pub fn run_shared(
     let mut carried_trigger: Vec<Option<crate::signal::Trigger>> =
         (0..n).map(|_| None).collect();
     let mut forecasts: Vec<Vec<ForecastRecord>> = (0..n).map(|_| Vec::new()).collect();
+    let mut position_marks: Vec<Vec<PositionMark>> = (0..n).map(|_| Vec::new()).collect();
     let mut scorer_records: Vec<Vec<ScorerRecord>> = (0..n).map(|_| Vec::new()).collect();
     // pos id -> the opening symbol's own bar index, for a per-symbol held count.
     let mut opened_at_index: BTreeMap<usize, usize> = BTreeMap::new();
@@ -808,8 +900,9 @@ pub fn run_shared(
         // 2. Mark every symbol's positions against its bar (also updating each
         //    position's running peak for the trailing stop), then record one
         //    account equity point for this timestamp.
-        for (_, bar) in &option_bars {
+        for (si, bar) in &option_bars {
             portfolio.update_peaks(bar, &config.costs);
+            record_marks(&portfolio, bar, config, &mut position_marks[*si]);
         }
         for (si, bar) in &option_bars {
             let symbol = &all_series[*si].symbol;
@@ -1038,6 +1131,7 @@ pub fn run_shared(
             option_quality: all_series[si].option_quality,
             underlying_quality: all_series[si].underlying_quality,
             forecasts: std::mem::take(&mut forecasts[si]),
+            position_marks: std::mem::take(&mut position_marks[si]),
             scorer_records: std::mem::take(&mut scorer_records[si]),
             settlement_price: settlement[si],
         })
@@ -1761,6 +1855,39 @@ mod rsi_gate_tests {
         assert!(matches!(entry_gate(0, 0, &lo, expiry, ts, None, Some(20.0)), EntryGate::RsiOutOfBand));
         let off = cfg(None, None);
         assert!(matches!(entry_gate(0, 0, &off, expiry, ts, None, Some(99.0)), EntryGate::Open));
+    }
+
+    /// `Outside` is the mirror: it refuses the middle and trades the extremes,
+    /// which is the entry an RSI mean-reversion strategy actually wants.
+    #[test]
+    fn the_outside_zone_trades_the_extremes_and_refuses_the_middle() {
+        let ts = Utc.with_ymd_and_hms(2026, 7, 1, 15, 0, 0).unwrap();
+        let expiry = Utc.with_ymd_and_hms(2026, 8, 21, 20, 0, 0).unwrap();
+        let c = RunConfig {
+            min_entry_rsi: Some(30.0),
+            max_entry_rsi: Some(70.0),
+            entry_rsi_zone: RsiZone::Outside,
+            max_open_positions: 10,
+            min_entry_days_before_expiry: None,
+            ..RunConfig::default()
+        };
+        let gate = |rsi| entry_gate(0, 0, &c, expiry, ts, None, rsi);
+        assert!(matches!(gate(Some(20.0)), EntryGate::Open), "oversold trades");
+        assert!(matches!(gate(Some(85.0)), EntryGate::Open), "overbought trades");
+        assert!(matches!(gate(Some(50.0)), EntryGate::RsiOutOfBand), "the middle is refused");
+        // The bounds themselves are refused, so the two zones partition cleanly.
+        assert!(matches!(gate(Some(30.0)), EntryGate::RsiOutOfBand));
+        assert!(matches!(gate(Some(70.0)), EntryGate::RsiOutOfBand));
+        assert!(matches!(gate(None), EntryGate::Open), "no reading refuses nothing");
+
+        // An unconfigured band cannot refuse in either sense.
+        let empty = RunConfig {
+            entry_rsi_zone: RsiZone::Outside,
+            max_open_positions: 10,
+            min_entry_days_before_expiry: None,
+            ..RunConfig::default()
+        };
+        assert!(matches!(entry_gate(0, 0, &empty, expiry, ts, None, Some(50.0)), EntryGate::Open));
     }
 }
 

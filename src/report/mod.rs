@@ -328,6 +328,7 @@ pub fn shared_views(
                 equity_curve: Vec::new(),
                 settlement_price: d.settlement_price,
                 forecasts: d.forecasts.clone(),
+                position_marks: d.position_marks.clone(),
                 scorer_records: d.scorer_records.clone(),
             }
         })
@@ -633,6 +634,30 @@ pub fn write_csvs(
         std::fs::write(dir.join("forecasts.csv"), forecasts)?;
     }
 
+    // One row per open position per bar. The static bounds live on the trade;
+    // this carries what moves — the peak, and the trailing stop riding it.
+    let has_marks = runs.iter().any(|r| !r.position_marks.is_empty());
+    if has_marks {
+        let mut marks =
+            String::from("ts,position_id,symbol,gross_pnl,peak_value,trailing_stop,underlying\n");
+        let num = |v: Option<f64>| v.map(|x| format!("{x:.2}")).unwrap_or_default();
+        for run in runs {
+            for m in &run.position_marks {
+                marks.push_str(&format!(
+                    "{},{},{},{:.2},{},{},{}\n",
+                    m.ts.to_rfc3339(),
+                    m.position_id,
+                    m.symbol,
+                    m.gross_pnl,
+                    num(m.peak_value),
+                    num(m.trailing_stop),
+                    num(m.underlying),
+                ));
+            }
+        }
+        std::fs::write(dir.join("positions.csv"), marks)?;
+    }
+
     let has_scorer = runs.iter().any(|r| !r.scorer_records.is_empty());
     if has_scorer {
         let mut scorer = String::from("ts,symbol,score,expected_pl,realized_pl,max_loss,prob_profit\n");
@@ -753,6 +778,7 @@ mod tests {
             equity_curve: points,
             settlement_price: None,
             forecasts: Vec::new(),
+            position_marks: Vec::new(),
             scorer_records: Vec::new(),
         };
 

@@ -1,0 +1,16 @@
+# Trailing stop as the primary give-up, with the forecast-horizon cap removed so
+# a winner can actually run into it.
+#
+# Keeping the horizon cap would make the trailing stop mostly decorative: it is
+# 37 of 51 exits in the base bundle, so most positions would close on the clock
+# before the trail ever bound. The profit target goes too, for the same reason —
+# a hard 50%-of-max take-profit and a trailing stop are two answers to the same
+# question, and pairing them means the target always wins.
+#
+# What remains: the trail, the adverse-forecast stop for a thesis that breaks,
+# and the calendar guards that are not optional (earnings, the expiry blackout).
+forecast_target_quantile = 0.85
+forecast_stop_quantile = 0.85
+naked_trailing_stop_pct = 30.0
+close_before_earnings = true
+close_after_forecast_horizon = false

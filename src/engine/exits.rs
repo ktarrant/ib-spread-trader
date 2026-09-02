@@ -106,6 +106,19 @@ pub struct ExitContext<'a> {
 }
 
 impl ExitRules {
+    /// The gross P&L at which the trailing stop would close this position, or
+    /// `None` when the rule cannot apply — not configured, not a naked long, or
+    /// no peak established yet (a position that has never been in profit has
+    /// nothing to trail).
+    ///
+    /// `triggered` compares against this rather than recomputing it, so the level
+    /// a chart draws is the level the engine acts on.
+    pub fn trailing_stop_level(&self, position: &OpenPosition) -> Option<f64> {
+        let pct = self.naked_trailing_stop_pct?;
+        let peak = position.peak_value?;
+        (is_naked_long(position) && peak > 0.0).then(|| peak * (1.0 - pct / 100.0))
+    }
+
     pub fn triggered(&self, position: &OpenPosition, ctx: &ExitContext<'_>) -> Option<ExitReason> {
         // 1. Profit target — best outcome.
         if let Some(pct) = self.profit_target_pct
@@ -167,11 +180,8 @@ impl ExitRules {
         }
 
         // Naked long: trailing stop — give back too much of the peak gain.
-        if let Some(pct) = self.naked_trailing_stop_pct
-            && is_naked_long(position)
-            && let Some(peak) = position.peak_value
-            && peak > 0.0
-            && ctx.gross_pnl <= peak * (1.0 - pct / 100.0)
+        if let Some(level) = self.trailing_stop_level(position)
+            && ctx.gross_pnl <= level
         {
             return Some(ExitReason::TrailingStop);
         }
