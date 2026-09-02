@@ -227,6 +227,9 @@ enum Intent {
         spread: Spread,
         prediction: Option<TradePrediction>,
         bounds: ForecastBounds,
+        /// Boxed: the payload is a diagnostic, and inlining it would make every
+        /// `Intent` as large as the largest one.
+        entry_features: Option<Box<crate::model::EntryFeatures>>,
         /// Present when allocation is deferred to fill time (the shared-account
         /// path): `spread` is one lot and `execute` scales it against the
         /// portfolio's capital then. `None` means `spread` is already sized.
@@ -465,6 +468,7 @@ pub fn run_symbol(
                                             spread,
                                             prediction: None,
                                             bounds: ForecastBounds::default(),
+                                    entry_features: None,
                                             allocation: None,
                                             leg_vols: Vec::new(),
                                         })
@@ -539,6 +543,7 @@ pub fn run_symbol(
                                         spread,
                                         prediction: Some(prediction),
                                         bounds,
+                                    entry_features: Some(Box::new(ctx.entry_features)),
                                         allocation: None,
                                         leg_vols,
                                     });
@@ -904,6 +909,7 @@ pub fn run_shared(
                                     spread: choice.candidate.spread,
                                     prediction: Some(prediction),
                                     bounds,
+                                    entry_features: Some(Box::new(ctx.entry_features)),
                                     allocation,
                                 });
                             }
@@ -941,6 +947,7 @@ pub fn run_shared(
                                             spread,
                                             prediction: None,
                                             bounds: ForecastBounds::default(),
+                                    entry_features: None,
                                             allocation: None,
                                             leg_vols: Vec::new(),
                                         })
@@ -1119,6 +1126,8 @@ struct RankedContext {
     trend: Option<f64>,
     /// The current RSI reading, for the entry-timing gate.
     rsi: Option<f64>,
+    /// What the model saw this bar, recorded onto any position opened from it.
+    entry_features: crate::model::EntryFeatures,
 }
 
 impl RankedContext {
@@ -1184,6 +1193,7 @@ fn ranked_observe(
         full_horizon_years,
         trend: features.trend,
         rsi: features.rsi,
+        entry_features: (&features).into(),
     }
 }
 
@@ -1381,6 +1391,7 @@ fn execute(
             spread,
             prediction,
             bounds,
+            entry_features,
             allocation,
             leg_vols,
         } => {
@@ -1435,6 +1446,7 @@ fn execute(
                         position.prediction = prediction;
                         position.forecast_target = bounds.target;
                         position.forecast_stop = bounds.stop;
+                        position.entry_features = entry_features.as_deref().copied();
                         position.leg_vols = leg_vols.clone();
                     }
                 }

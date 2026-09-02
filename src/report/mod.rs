@@ -654,18 +654,39 @@ pub fn write_csvs(
 
     let has_predictions = report.trades.iter().any(|t| t.prediction.is_some());
     if has_predictions {
-        let mut predictions =
-            String::from("id,symbol,description,expected_pl,score,prob_profit,pnl,exit_reason\n");
+        // The entry columns answer "what did the model see", beside the
+        // prediction columns that answer "what did it conclude". An absent
+        // reading writes an empty cell rather than a zero, which would read as
+        // a measurement.
+        let mut predictions = String::from(
+            "id,symbol,description,opened_at,expected_pl,score,prob_profit,\
+             entry_spot,entry_trend,entry_vwap_distance,entry_atr,entry_realized_vol,\
+             entry_atm_iv,entry_skew,entry_rsi,entry_days_to_earnings,pnl,exit_reason\n",
+        );
+        let num = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_default();
         for t in &report.trades {
             if let Some(p) = t.prediction {
+                let f = t.entry_features;
                 predictions.push_str(&format!(
-                    "{},{},\"{}\",{:.2},{:.4},{:.4},{:.2},{}\n",
+                    "{},{},\"{}\",{},{:.2},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.2},{}\n",
                     t.id,
                     t.symbol,
                     t.description,
+                    t.opened_at.to_rfc3339(),
                     p.expected_pl,
                     p.score,
                     p.prob_profit,
+                    num(f.map(|f| f.spot)),
+                    num(f.and_then(|f| f.trend)),
+                    num(f.and_then(|f| f.vwap_distance)),
+                    num(f.and_then(|f| f.atr)),
+                    num(f.and_then(|f| f.realized_vol)),
+                    num(f.and_then(|f| f.atm_iv)),
+                    num(f.and_then(|f| f.skew)),
+                    num(f.and_then(|f| f.rsi)),
+                    f.and_then(|f| f.days_to_earnings)
+                        .map(|d| d.to_string())
+                        .unwrap_or_default(),
                     t.pnl,
                     reason_key(t.exit_reason),
                 ));

@@ -440,6 +440,7 @@ mod tests {
             prediction: None,
             forecast_target: None,
             forecast_stop: None,
+            entry_features: None,
             leg_vols: Vec::new(),
             peak_value: None,
         }
@@ -646,6 +647,7 @@ mod tests {
             prediction: None,
             forecast_target: None,
             forecast_stop: None,
+            entry_features: None,
             leg_vols: Vec::new(),
             peak_value: None,
         };
@@ -699,6 +701,7 @@ mod tests {
             prediction: None,
             forecast_target: None,
             forecast_stop: None,
+            entry_features: None,
             leg_vols: Vec::new(),
             peak_value: None,
         };

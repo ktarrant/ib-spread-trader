@@ -20,7 +20,18 @@ axis. An earlier `Signal -> Structure -> Selector` pipeline is retired but kept
 dormant behind `Strategy::Staged`. Live execution is **not** in scope yet; the
 seams exist so it can be added without rework.
 
-## Sibling repos — read, never modify
+## Sibling repos
+
+**`~/ib-option-calc` is read-only. `~/ib-option-viz` is writable.** The capture
+tool owns data this repo can never regenerate, so nothing here touches it. The
+viz is the read side for the reports this repo writes, and the two halves of a
+change — a new field and the panel that renders it — belong together.
+
+When changing the viz: it has its own `CLAUDE.md`, its own conventions and its own
+golden tests (`uv run pytest`, 60 of them, skipping cleanly without a snapshot).
+Run them. And note the dependency direction stays one-way: the viz reads this
+repo's `out/` artifacts, so a field must exist in the report **before** the page
+that renders it, and removing one breaks a consumer you now maintain.
 
 - **`~/ib-option-calc`** (Rust) — the capture tool that produced the snapshots.
   Its `CLAUDE.md` holds the IBKR constraints that will govern the live side
@@ -31,7 +42,8 @@ seams exist so it can be added without rework.
 - **`~/ib-option-viz`** (Python) — the mature read side, validated against the same
   snapshot. `src/optionviz/pricing.py` is the reference for the option maths here,
   and its `CLAUDE.md` explains *why* the median parity fit beat least squares.
-  Our pricing tests pin against it, so it is the arbiter when the two disagree.
+  Our pricing tests pin against it, so it is the arbiter when the two disagree —
+  being writable does not make it the place to fix a disagreement about the maths.
 
 ## Commands
 
@@ -444,6 +456,30 @@ inside its horizon. Selecting better dominated exiting better.
 Do not read the returns: 8 trades is not a sample. The drawdown and the
 identical-runs fact are structural rather than P&L noise, and those are the parts
 worth carrying forward.
+
+### A trade records what the model concluded *and* what it saw
+
+`prediction` on a trade has always carried the conclusion — `expected_pl`,
+`prob_profit`, and `score`, which **is** expected P/L per unit of risk, the
+ranker's own metric. `entry_features` now carries the other half: spot, trend,
+VWAP distance, ATR, realized vol, ATM IV, skew, RSI and days-to-earnings, as read
+on the bar the decision was made. Both land in `backtest.json` and as columns in
+`predictions.csv`.
+
+It rides the same path `ForecastBounds` does — `RankedContext` already holds the
+features at the decision bar, `Intent::Open` carries them to the fill, and
+`OpenPosition` to the close. Boxed inside the intent, because a diagnostic should
+not set the size of every `Intent` the engine moves. Nothing reads it back: a
+decision that consumed its own audit trail would be a look-ahead risk.
+
+**An absent reading is omitted, never zeroed** — `skip_serializing_if` on the
+struct, an empty cell in the CSV, "—" in the viz. A warming indicator reported as
+`0.0` would read as a measurement, which is the same reason `implied_vol` returns
+`Option`.
+
+This is what makes the RSI gate auditable rather than merely configured: with
+`max_entry_rsi` set, "what was RSI when this opened?" is now answerable from the
+report instead of being the one thing it could not say.
 
 ### The model's skill is regime-dependent, and RSI finds the regime
 

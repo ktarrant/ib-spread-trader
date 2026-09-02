@@ -99,6 +99,9 @@ pub struct OpenPosition {
     /// underlying has left the bounds this trade was underwritten inside.
     /// `None` unless the exit bundle enabled it.
     pub forecast_stop: Option<f64>,
+    /// What the model saw on the bar it decided on. `None` for the staged path,
+    /// which has no feature engine.
+    pub entry_features: Option<crate::model::EntryFeatures>,
     /// Each leg's entry implied vol (sticky-strike), carried from the chosen
     /// candidate. Empty for the staged path. Lets the live-POP exit re-score the
     /// spread against the current distribution with the vols it was priced at.
@@ -147,6 +150,9 @@ pub struct ClosedTrade {
     /// The adverse bound it was set to stop at, for the same chart.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forecast_stop: Option<f64>,
+    /// The feature vector the entry decision was made on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_features: Option<crate::model::EntryFeatures>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -235,6 +241,7 @@ impl Portfolio {
             prediction: None,
             forecast_target: None,
             forecast_stop: None,
+            entry_features: None,
             leg_vols: Vec::new(),
             peak_value: None,
         });
@@ -275,6 +282,7 @@ impl Portfolio {
             prediction: position.prediction,
             forecast_target: position.forecast_target,
             forecast_stop: position.forecast_stop,
+            entry_features: position.entry_features,
         };
         self.closed.push(trade.clone());
         Ok(Some(trade))
@@ -319,6 +327,7 @@ impl Portfolio {
             prediction: position.prediction,
             forecast_target: position.forecast_target,
             forecast_stop: position.forecast_stop,
+            entry_features: position.entry_features,
         };
         self.closed.push(trade.clone());
         Some(trade)
@@ -364,6 +373,7 @@ impl Portfolio {
             prediction: position.prediction,
             forecast_target: position.forecast_target,
             forecast_stop: position.forecast_stop,
+            entry_features: position.entry_features,
         };
         self.closed.push(trade.clone());
         Some(trade)

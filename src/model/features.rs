@@ -60,6 +60,47 @@ pub struct EarningsDistance {
 /// One option bar's inputs to the price model. Prices are in the underlying's
 /// units; `realized_vol`/`atm_iv`/`skew` are volatilities (per-bar for realized
 /// vol — annualisation is the model's to apply).
+/// A compact record of what the model *saw* at the bar it decided on, carried
+/// onto the trade so a report can answer "what triggered this" and not only
+/// "how confident was it". Serialization skips absent readings rather than
+/// writing nulls, so a warming indicator is visibly absent.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct EntryFeatures {
+    pub spot: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trend: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vwap_distance: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atr: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub realized_vol: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atm_iv: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skew: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rsi: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub days_to_earnings: Option<i64>,
+}
+
+impl From<&Features> for EntryFeatures {
+    fn from(f: &Features) -> Self {
+        Self {
+            spot: f.spot,
+            trend: f.trend,
+            vwap_distance: f.vwap_distance,
+            atr: f.atr,
+            realized_vol: f.realized_vol,
+            atm_iv: f.atm_iv,
+            skew: f.skew,
+            rsi: f.rsi,
+            days_to_earnings: f.days_to_earnings,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Features {
     /// Reference price (spot where quoted, else the parity forward).
