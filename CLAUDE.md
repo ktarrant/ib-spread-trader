@@ -445,6 +445,54 @@ Do not read the returns: 8 trades is not a sample. The drawdown and the
 identical-runs fact are structural rather than P&L noise, and those are the parts
 worth carrying forward.
 
+### ATM IV is already the whole vol input; what is missing is *elevation*
+
+Worth knowing before proposing IV as a model input, because it is not merely an
+input — with `realized_vol_weight = 0.0` in the shipped model, `annual_vol()`
+returns `1.0 × atm_iv` and **ATM IV is 100 % of the forecast's volatility**. The
+search that chose it is recorded above: IV-only calibrated best.
+
+So the model already widens its distribution when IV rises into an event. What it
+cannot do is tell *elevated* from *normally volatile*: it reads the IV **level**
+and never the level relative to that symbol's own recent IV. `Features` carries
+`days_to_earnings`, `days_since_earnings` and `residual_mad` (documented as "an
+earnings-stress proxy") — and `drift()` and `annual_vol()` use **none of them**.
+The earnings features are extracted for the engine's gates and ignored by the
+model.
+
+Measured on the snapshot's 9 in-window earnings events, ATM IV as a ratio to each
+symbol's own median:
+
+| | T−3 | T−1 | T+0 | T+1 | T+2 |
+|---|---|---|---|---|---|
+| META 07-29 | — | **1.27** | 1.27 | 0.93 | 0.91 |
+| AMZN 07-30 | 1.12 | **1.17** | 1.25 | **0.81** | — |
+| PLTR 08-03 | 1.20 | — | 1.29 | 0.94 | 0.85 |
+| AMD 08-04 | — | 1.06 | 1.09 | 0.90 | 0.84 |
+| COIN 07-30 | 1.08 | 1.09 | 1.06 | 0.91 | — |
+| MSTR 07-30 | 0.99 | 0.98 | 0.97 | 0.92 | — |
+
+Two things fall out. The **ramp** is small — T−1 against T−5 is a median 1.03× —
+so a rate-of-change trigger has little to read; the **level** is what carries the
+signal, up to 1.29× a symbol's own median, and MSTR shows it is not universal.
+And the **crush dwarfs the ramp**: META 1.27 → 0.93 and AMZN 1.25 → 0.81 in a
+single day.
+
+**Which means the current earnings policy takes the wrong half of the cycle for a
+credit seller.** `close_before_earnings = true` exits into the elevated IV and
+`earnings_blackout_days = 3` refuses entries during the ramp, so a short-premium
+position pays the run-up and never collects the collapse that pays for it.
+
+One correction to the intuition that motivates this: on the runs on disk **no
+credit spread has ever exited before earnings.** All 10 before-earnings exits were
+long premium — 7 debit spreads and 3 naked longs, −$5 835 pooled — and for long
+premium a rising IV is a *tailwind*, so those losses are directional, not vol.
+
+The gap worth closing is therefore an **IV-elevation feature** (ATM IV over a
+trailing median or percentile of its own history), which is what would let either
+the model or an entry gate say "this is not normal volatility, it is a pending
+event" — a distinction nothing in the pipeline can currently draw.
+
 ### A live forecast target is inert; the horizon cap is the real lever
 
 **Do not rebuild `forecast_target` to read the current forecast.** It sounds like
