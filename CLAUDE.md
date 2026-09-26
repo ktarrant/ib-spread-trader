@@ -1269,6 +1269,63 @@ average −55.6 bp (IB, 14) and −20.7 bp (value area, 167). The first hour, wh
 only value-area levels can trade, is *not* worse than the rest (breakout
 +3.1 bp, fade −3.9 bp).
 
+### Gating on context improves breakouts and does not make them pay
+
+`breakout_min_context = N` refuses a breakout with fewer than N of the three
+labels `with` it (`census.context_refused`). Split at 2026-07-27:
+
+| breakouts | all | May–Jul | Jul–Sep |
+|---|---|---|---|
+| no gate | 576, −9.9 bp | −3.0 | −16.8 |
+| ≥1 label | 482, −5.8 bp | +1.1 | −12.8 |
+| ≥2 labels | 248, −1.9 bp | +4.3 | −8.9 |
+
+The gradient holds in both halves; the sign does not. Dropping the target and
+riding strong-context breakouts to the close (tried at ≥1, ≥2, ≥3) never beat
+the fixed target, so it was removed. There is no profitable intraday model
+here on this data — what carried over is the execution work below.
+
+## Execution: crossing the spread is not the pessimistic assumption it looks
+
+`cargo run --release --example execution_profile` measures, over every
+tradeable chain and every quote at |delta| 0.15–0.65 (≈3 M limit-order
+simulations on the 2026-09-26 snapshot), what the time of day and a passive
+order would change about a fill. Slots are **quote** times — a bar's close,
+`ts` plus its size — because that is the price the engine fills at.
+
+**Spreads are widest at the open.** The median relative spread is 3.2–3.7 % in
+the first half hour against 2.1–2.2 % from 10:30 on (15-minute chains; 3.2 %
+against ~1.9 % at 30 minutes), and widens again on the 16:00 quote (3.0 %).
+**ATM IV is richest at the open**: +0.7–1.0 % of its session mean, drifting
+to −0.2–0.3 % after 13:00 — a morning premium roughly half a spread in size.
+
+**A resting limit at mid does not beat crossing.** It fills 50–87 % of the time
+within 1–4 bars, and saves −0.23 % to +0.08 % of mid against crossing at once
+once the unfilled orders chase. Fills pocket half the spread; the misses are
+orders the market moved away from, and chasing them costs as much. That is
+adverse selection, measured before counting what the filled positions then do.
+So the engine's "pay the ask, receive the bid" is close to what a naive
+passive policy would achieve, not a pessimistic bound on it. The exception is
+the open: resting at mid in the first half hour saves 0.3–0.8 % of mid (both
+sides), because that is where the spread is abnormally wide. Resting late
+(15:00–15:30) costs 0.5–0.6 %, chasing into the wide closing quote.
+
+**Deferring fills past the open was built, measured, and removed.** An
+`execution.fill_after_open_minutes` rule held queued orders until a later
+quote. On mean_reversion, credit_pop and vol_timing over both datasets:
+45 minutes was a wash (−$85 across six runs), 75 minutes +$1 280 — but only 31
+fills changed, 12 of the 22 long-premium exits improved, the median change was
++$7, and two trades (COIN +$975, PLTR +$590) were the whole total. Waiting
+45–75 minutes exposes a position to that much underlying movement, which
+swamps a spread saving of ~1 % of premium. One trap worth knowing if it is
+rebuilt: the engine queues an entry on every bar even when the symbol's slot
+is full (the fill-time cap refuses it), so a deferred queue must let the
+deferring bar's fresh decision supersede its entries — otherwise an entry
+decided before an earnings release fills after it.
+
+What this leaves for the live side: cross, or rest at mid only when trading in
+the first half hour. Execution will not rescue a strategy that loses crossing.
+
 ## Test fixtures generate their own options
 
 `engine::testing::snapshot_with` builds a real on-disk snapshot whose ladder is

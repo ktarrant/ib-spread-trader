@@ -72,6 +72,9 @@ pub struct IntradayConfig {
     pub commission_per_share: f64,
     /// Per order, as IBKR's fixed schedule charges it.
     pub min_commission: f64,
+    /// Refuse a breakout unless at least this many of its context labels
+    /// (open vs prior value area, SPY, the 10:30 reaction) are `with` it.
+    pub breakout_min_context: usize,
 }
 
 impl Default for IntradayConfig {
@@ -92,6 +95,7 @@ impl Default for IntradayConfig {
             notional: 10_000.0,
             commission_per_share: 0.005,
             min_commission: 1.0,
+            breakout_min_context: 0,
         }
     }
 }
@@ -219,6 +223,16 @@ pub struct Features {
     pub entry_window: &'static str,
 }
 
+impl Features {
+    /// How many of the three day-type labels agree with the trade.
+    pub fn context(&self) -> usize {
+        [self.open_vs_prior_va, self.spy, self.reaction_1030]
+            .iter()
+            .filter(|&&l| l == "with" || l == "self")
+            .count()
+    }
+}
+
 fn relative(x: Option<f64>, dir: f64) -> &'static str {
     match x {
         None => "unknown",
@@ -257,6 +271,8 @@ pub struct Census {
     pub fade_signals: usize,
     pub signal_while_positioned: usize,
     pub after_last_entry: usize,
+    /// Breakouts refused by `breakout_min_context`.
+    pub context_refused: usize,
     pub unfillable: usize,
     pub crossed_quotes: usize,
     pub flattened_unquoted: usize,
@@ -685,6 +701,12 @@ pub fn run_symbol(
                             reaction_1300: relative(reaction_1300, dir),
                             entry_window: entry_window(minute(bar.ts) + 5),
                         };
+                        if order.setup == Setup::Breakout
+                            && features.context() < cfg.breakout_min_context
+                        {
+                            census.context_refused += 1;
+                            continue;
+                        }
                         pending = Some((order, features));
                     }
                 }
@@ -996,6 +1018,17 @@ mod tests {
         assert!(t.net_pnl > 0.0);
         // Decided on the 10:40 bar's close: before the 10:30-11:00 reaction is known.
         assert_eq!((t.features.entry_window, t.features.reaction_1030), ("10:30-11:00", "unknown"));
+    }
+
+    #[test]
+    fn the_context_gate_refuses_a_breakout_nothing_supports() {
+        // No SPY tape, no prior session, decided before 11:00: every label unknown.
+        let cfg = IntradayConfig { breakout_min_context: 1, ..IntradayConfig::default() };
+        let mut census = Census::default();
+        let bars = day(&[101.3, 101.4, 101.1, 101.5, 101.9, 102.3]);
+        let trades = run_symbol(&cfg, "T", &bars, None, &mut census).unwrap();
+        assert!(trades.is_empty());
+        assert_eq!((census.breakout_signals, census.context_refused), (1, 1));
     }
 
     #[test]
