@@ -77,6 +77,11 @@ pub struct ExitRules {
     /// Close before earnings announcements. The position is closed on the last
     /// session before the earnings event would affect prices.
     pub close_before_earnings: bool,
+    /// Watch the price-level exits (`price_triggered`) on every stock-only bar
+    /// between option bars — the 5-minute tape — and queue the close for the
+    /// position's next option bar, so a stop crossed just after a chain snapshot
+    /// is not left until the one after. Shared-account ranked runs only.
+    pub stock_bar_exits: bool,
 }
 
 /// The current forecast, handed to the exit check so a model-driven exit (live
@@ -234,6 +239,24 @@ impl ExitRules {
     /// Called when `exit_credit` fails — the position's legs stopped quoting —
     /// but the underlying still prints. Higher priority than time-based rules,
     /// consistent with `triggered()`.
+    /// The exits that read only the underlying's price against levels fixed at
+    /// entry — the adverse-forecast stop, the forecast target, the short strike —
+    /// in `triggered`'s order. They need no option quote and no fresh forecast,
+    /// so `stock_bar_exits` checks them on every stock bar between option bars.
+    pub fn price_triggered(&self, position: &OpenPosition, spot: f64) -> Option<ExitReason> {
+        if let Some(stop) = position.forecast_stop
+            && forecast_stop_reached(&position.spread, spot, stop)
+        {
+            return Some(ExitReason::ForecastStop);
+        }
+        if let Some(target) = position.forecast_target
+            && forecast_target_reached(&position.spread, spot, target)
+        {
+            return Some(ExitReason::ForecastTarget);
+        }
+        self.underlying_price_triggered(position, spot)
+    }
+
     pub fn underlying_price_triggered(
         &self,
         position: &OpenPosition,

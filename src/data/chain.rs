@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::domain::{OptionRight, normalize_symbol};
 use crate::pricing::{self, PairedStrike};
 
-use super::catalog::BAR_SIZE;
+use super::catalog::OPTION_BAR_SIZES;
 use super::snapshot::Snapshot;
 
 /// What was dropped on the way to a clean two-sided series. Surfaced, never hidden.
@@ -243,8 +243,11 @@ pub struct ChainSeries {
     quotes: Vec<RawQuote>,
     /// Offsets into `quotes` delimiting each timestamp's block.
     blocks: Vec<(DateTime<Utc>, usize, usize)>,
-    /// 30-min underlying bars, contemporaneous with option bars. Used in
-    /// `snapshot()` so the underlying mid matches the option bar's window.
+    /// Underlying bars at the option tape's resolution, contemporaneous with
+    /// option bars. Used in `snapshot()` so the underlying mid matches the option
+    /// bar's window. The capture's own bars where they cover the chain; folded
+    /// from the 5-minute tape where they do not (a 15-minute chain whose capture
+    /// took no 15-minute stock bars).
     underlying: BTreeMap<DateTime<Utc>, UnderlyingBar>,
     /// Fine-grained underlying bars for the signal. 5-min if the snapshot has
     /// them, otherwise the same 30-min data. Only stock-only bars draw from
@@ -255,6 +258,9 @@ pub struct ChainSeries {
     pub underlying_quality: Quality,
     /// "5min" or "30min" — resolution of `signal_underlying`.
     pub underlying_bar_size: String,
+    /// Minutes per option bar: 15 or 30, whichever the capture took. The finest
+    /// wins when a chain has both. Execution runs at this resolution.
+    pub bar_minutes: i64,
     /// Earnings dates within the backtest window, sorted ascending.
     pub earnings: Vec<EarningsEvent>,
 }
@@ -264,17 +270,30 @@ impl ChainSeries {
         let symbol = normalize_symbol(symbol);
         let expiry_text = expiry.format("%Y-%m-%d").to_string();
 
-        let (quotes, option_quality) = load_option_quotes(snapshot, &symbol, &expiry_text)?;
-        let (underlying, underlying_quality) = load_underlying(snapshot, &symbol, BAR_SIZE)?;
+        let bar_size = option_bar_size(snapshot, &symbol, &expiry_text)?;
+        let bar_minutes: i64 = bar_size.trim_end_matches("min").parse()?;
+        let (quotes, option_quality) =
+            load_option_quotes(snapshot, &symbol, &expiry_text, bar_size)?;
+        let (native, native_quality) = load_underlying(snapshot, &symbol, bar_size)?;
+        let (five_minute, five_minute_quality) = load_underlying(snapshot, &symbol, "5min")?;
+        // Native stock bars when they reach the chain's last option bar; else the
+        // 5-minute tape folded to the chain's resolution.
+        let last_option = quotes.last().map(|q| q.ts);
+        let native_covers = native
+            .keys()
+            .next_back()
+            .is_some_and(|&last| last_option.is_none_or(|end| last >= end));
+        let (underlying, underlying_quality) = if native_covers || five_minute.is_empty() {
+            (native, native_quality)
+        } else {
+            (resample(&five_minute, bar_minutes), five_minute_quality)
+        };
         let sessions = underlying.keys().map(|ts| ts.date_naive()).collect();
         let earnings = load_earnings(snapshot, &symbol, &sessions)?;
-        let (signal_underlying, signal_quality, underlying_bar_size) = {
-            let (u, q) = load_underlying(snapshot, &symbol, "5min")?;
-            if !u.is_empty() {
-                (u, q, "5min".to_string())
-            } else {
-                (underlying.clone(), underlying_quality, BAR_SIZE.to_string())
-            }
+        let (signal_underlying, signal_quality, underlying_bar_size) = if !five_minute.is_empty() {
+            (five_minute, five_minute_quality, "5min".to_string())
+        } else {
+            (underlying.clone(), underlying_quality, bar_size.to_string())
         };
 
         let mut blocks = Vec::new();
@@ -300,8 +319,22 @@ impl ChainSeries {
             option_quality,
             underlying_quality: signal_quality,
             underlying_bar_size,
+            bar_minutes,
             earnings,
         })
+    }
+
+    /// The stock bar for the `minutes`-wide window ending at `end` — what a
+    /// feature cadence coarser than the option tape observes. The option tape's
+    /// own underlying bar when the window is one option bar; otherwise folded
+    /// from the 5-minute tape.
+    pub fn window_bar(&self, end: DateTime<Utc>, minutes: i64) -> Option<UnderlyingBar> {
+        let start = end - chrono::Duration::minutes(minutes);
+        if minutes == self.bar_minutes {
+            return self.underlying_at(start);
+        }
+        fold_bars(self.signal_underlying.range(start..end).map(|(_, bar)| bar))
+            .or_else(|| fold_bars(self.underlying.range(start..end).map(|(_, bar)| bar)))
     }
 
     /// Every timestamp with at least one clean two-sided option quote, ascending.
@@ -512,13 +545,71 @@ GROUP BY b.ts
 ORDER BY b.ts
 "#;
 
+/// The finest option bar size the capture took for this chain, or the coarsest
+/// when it took none (an empty chain loads empty either way).
+fn option_bar_size(snapshot: &Snapshot, symbol: &str, expiry: &str) -> Result<&'static str> {
+    let mut stmt = snapshot.conn().prepare(
+        "SELECT 1 FROM bars b JOIN contracts c ON c.id = b.contract_id
+         WHERE c.kind = 'option' AND c.symbol = ?1 AND c.expiry = ?2
+           AND b.bar_size = ?3 AND b.data_type = 'bid'
+         LIMIT 1",
+    )?;
+    for size in OPTION_BAR_SIZES {
+        if stmt.exists((symbol, expiry, size))? {
+            return Ok(size);
+        }
+    }
+    Ok(OPTION_BAR_SIZES[OPTION_BAR_SIZES.len() - 1])
+}
+
+/// Fold consecutive stock bars into one: first open, extreme high and low, last
+/// close, summed volume, and the last bar's mid — the quote at the window's end.
+fn fold_bars<'a>(bars: impl IntoIterator<Item = &'a UnderlyingBar>) -> Option<UnderlyingBar> {
+    let mut bars = bars.into_iter();
+    let mut out = *bars.next()?;
+    let pick = |a: Option<f64>, b: Option<f64>, f: fn(f64, f64) -> f64| match (a, b) {
+        (Some(a), Some(b)) => Some(f(a, b)),
+        (a, b) => a.or(b),
+    };
+    for bar in bars {
+        out.open = out.open.or(bar.open);
+        out.high = pick(out.high, bar.high, f64::max);
+        out.low = pick(out.low, bar.low, f64::min);
+        out.close = bar.close.or(out.close);
+        out.volume = pick(out.volume, bar.volume, |a, b| a + b);
+        out.mid = bar.mid;
+    }
+    Some(out)
+}
+
+/// Bucket a stock tape into `minutes`-wide bars keyed by their start, the way
+/// the capture keys its own.
+fn resample(
+    tape: &BTreeMap<DateTime<Utc>, UnderlyingBar>,
+    minutes: i64,
+) -> BTreeMap<DateTime<Utc>, UnderlyingBar> {
+    let width = minutes * 60;
+    let mut buckets: BTreeMap<DateTime<Utc>, Vec<&UnderlyingBar>> = BTreeMap::new();
+    for (ts, bar) in tape {
+        let secs = ts.timestamp();
+        let start = DateTime::from_timestamp(secs - secs.rem_euclid(width), 0)
+            .expect("a bucket start is a valid instant");
+        buckets.entry(start).or_default().push(bar);
+    }
+    buckets
+        .into_iter()
+        .filter_map(|(start, bars)| Some((start, fold_bars(bars)?)))
+        .collect()
+}
+
 fn load_option_quotes(
     snapshot: &Snapshot,
     symbol: &str,
     expiry: &str,
+    bar_size: &str,
 ) -> Result<(Vec<RawQuote>, Quality)> {
     let mut stmt = snapshot.conn().prepare(OPTION_SQL)?;
-    let rows = stmt.query_map((BAR_SIZE, symbol, expiry), |row| {
+    let rows = stmt.query_map((bar_size, symbol, expiry), |row| {
         Ok((
             row.get::<_, String>("ts")?,
             row.get::<_, i64>("contract_id")?,
@@ -675,6 +766,7 @@ fn parse_ts(text: &str) -> Result<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn quality_accounts_for_every_row_it_read() {
@@ -701,6 +793,37 @@ mod tests {
         // Past the tape: the previous weekday, never the tape's last session.
         assert_eq!(session_before(d(9, 21), &tape), d(9, 18), "a Monday past the data");
         assert_eq!(session_before(d(9, 16), &tape), d(9, 15));
+    }
+
+    /// A 15-minute bar folded from the 5-minute tape reads like one the capture
+    /// took: first open, extreme high and low, last close, summed volume, and
+    /// the quote at the window's end.
+    #[test]
+    fn five_minute_bars_fold_into_the_bar_they_make_up() {
+        let at = |m| Utc.with_ymd_and_hms(2026, 9, 1, 13, m, 0).unwrap();
+        let bar = |open, high, low, close, mid| UnderlyingBar {
+            mid: Some(mid),
+            open: Some(open),
+            high: Some(high),
+            low: Some(low),
+            close: Some(close),
+            volume: Some(10.0),
+        };
+        let tape: BTreeMap<_, _> = [
+            (at(30), bar(100.0, 101.0, 99.5, 100.5, 100.4)),
+            (at(35), bar(100.5, 102.0, 100.0, 101.5, 101.4)),
+            (at(40), bar(101.5, 101.8, 98.0, 99.0, 99.1)),
+            (at(45), bar(99.0, 99.5, 98.5, 99.2, 99.3)),
+        ]
+        .into();
+        let fifteen = resample(&tape, 15);
+        assert_eq!(fifteen.len(), 2);
+        let first = fifteen[&at(30)];
+        assert_eq!(
+            (first.open, first.high, first.low, first.close, first.volume, first.mid),
+            (Some(100.0), Some(102.0), Some(98.0), Some(99.0), Some(30.0), Some(99.1))
+        );
+        assert_eq!(fifteen[&at(45)].close, Some(99.2));
     }
 
     #[test]

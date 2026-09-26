@@ -104,6 +104,7 @@ fn main() -> Result<()> {
                 "expiry": series.expiry,
                 "expiry_instant": series.expiry_instant(),
                 "bars_in_chain": series.len(),
+                "bar_minutes": series.bar_minutes,
                 "option_quality": series.option_quality,
                 "underlying_quality": series.underlying_quality,
                 "snapshot": resolved,
@@ -143,6 +144,19 @@ fn main() -> Result<()> {
             if symbols.is_empty() {
                 bail!(
                     "no symbol in the config has two-sided option bars for {expiries:?}; try `catalog`"
+                );
+            }
+            // One timeline needs one bar grid: a 15-minute and a 30-minute bar
+            // starting together do not close together, so they cannot be marked
+            // as one instant.
+            let mut bar_minutes: Vec<i64> =
+                symbols.iter().flatten().map(|s| s.bar_minutes).collect();
+            bar_minutes.sort();
+            bar_minutes.dedup();
+            if bar_minutes.len() > 1 {
+                bail!(
+                    "these chains were captured at different bar sizes ({bar_minutes:?} minutes) \
+                     and cannot share a timeline; run them as separate datasets"
                 );
             }
 
@@ -188,6 +202,7 @@ fn main() -> Result<()> {
                     partial.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ")
                 ));
             }
+            built.bar_minutes = bar_minutes[0];
             if !skipped.is_empty() {
                 built.caveats.push(format!(
                     "{} symbol(s) had no two-sided option bars and were not run: {}.",

@@ -86,7 +86,7 @@ number is there to stop you assuming:
 
 | | |
 |---|---|
-| 12 chains, **all expiry `2026-08-21`** | Multi-expiry runs are built (see *Several expiries*) but only fixture-tested until a snapshot holds more than one chain. |
+| 12 chains, **all expiry `2026-08-21`**, 30-minute bars | The 2026-09-26 capture adds 15 October chains at 15 minutes (see *Three cadences*). |
 | ~2 months, 42–45 sessions, 543–619 timestamps | Thin. Per-trade logs mean more than Sharpe here. |
 | `strikes` > `paired_strikes` on AAPL/AMZN/COIN/NVDA (36 vs 24 on AMZN) | The parity fit only sees paired strikes. |
 | `stock_ts_overlap` < `timestamps` on SPY/QQQ/IWM only | Those options trade to 20:00 UTC, 15 min past the equity close. That bar has no spot — fall back to the parity forward. |
@@ -334,6 +334,42 @@ The 30-min underlying stays in `ChainSnapshot.underlying` for option bars so the
 parity forward comparison against spot remains contemporaneous. Stock-only
 snapshots use the 5-min bar and carry no option quotes — `atm_implied_vol()`
 returns None and no strikes are selectable.
+
+### Three cadences: 5-min watch, 15-min execution, 30-min forecast
+
+Captures from 2026-09 on take **15-minute option bars** and 5-minute stock bars
+(no 15- or 30-minute stock). Each chain reads its own bar size
+(`ChainSeries::bar_minutes`, the finest the capture took); where native stock bars
+do not reach the chain's last option bar, its underlying is **folded from the
+5-minute tape** (first open, extreme high/low, last close, summed volume, the last
+bar's mid). `catalog` lists each chain with its `bar_size`. A run whose chains
+differ in bar size is refused — a 15- and a 30-minute bar starting together do not
+close together.
+
+- **Execution runs on every option bar**: fills, marks, P&L exits. A decision
+  fills 15 minutes later instead of 30. `bars_held` counts option bars, so it
+  doubles on a 15-minute tape for the same holding time.
+- **The forecast runs at `features.cadence_minutes`** (default 30, what every
+  shipped model was validated at). The feature engine advances only on the option
+  bar that closes a cadence window, reading that **window's** stock bar
+  (`ChainSeries::window_bar`) — an ATR over 15-minute ranges is a different
+  indicator. Entries are decided only there; between, exits read the last
+  forecast (`RankedContext` is keyed by expiry for that reason). On 30-minute data
+  every bar closes a window, so August runs exactly as before. A 15-minute model
+  is a new model label with rescaled periods and its own validation — expected
+  once 15-minute captures accumulate.
+- **`exit.stock_bar_exits`** (bundle `base_stock_watch`) watches the price-level
+  exits — forecast target, adverse stop, short strike — on the 5-minute tape and
+  queues the close for the position's next option bar. It barely fires with the
+  horizon cap on (one extra target exit on August, −$6 on October's return), so
+  it is off in `base`.
+
+**The first out-of-period test failed.** On the October chain (15 symbols,
+2026-07-20 → 09-25, 7 225 forecasts) `mean-reversion` scores CRPS skill
+**−0.0095** and a 50.7 % hit-rate, positive on only **5 of 15** symbols — below
+the gate's 10. The driftless null scores exactly 0.0000 with 53/83/93 coverage, so
+the evaluation itself is sound on 15-minute data; the August edge did not carry.
+PIT mean 0.55 again: a rising sample the model sits below.
 
 ### Several expiries: one forecast, a position per chain, never rolled
 
@@ -1501,6 +1537,9 @@ bar, the quality account, and the full runs of the ranked variants
 (`driftless`, `mean_reversion`, `exit_pop_trailing`) down to the cent — funnel counts,
 P&L, structure mix, and the forecast-eval sign (driftless ~0 skill,
 mean-reversion > 0). They are deterministic.
+
+They read the **reference file by name** (`ib-option-calc-snapshot-2026-08-28`),
+not the newest snapshot: every later capture is a superset that moves some count.
 
 So decide which happened before touching one: a regression, or a deliberate
 change to the model. Only the second is a reason to edit the expected value, and

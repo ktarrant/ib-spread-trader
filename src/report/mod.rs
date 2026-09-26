@@ -132,6 +132,8 @@ pub struct Report {
     /// when a run had exactly one.
     pub expiry: chrono::NaiveDate,
     pub expiries: Vec<chrono::NaiveDate>,
+    /// Minutes per option bar — the execution grid. `bars_held` counts these.
+    pub bar_minutes: i64,
     pub totals: Totals,
     pub symbols: Vec<SymbolSummary>,
     pub trades: Vec<ClosedTrade>,
@@ -276,6 +278,7 @@ fn assemble(
         strategy: strategy.to_string(),
         expiry,
         expiries: vec![expiry],
+        bar_minutes: 30,
         totals,
         symbols,
         trades,

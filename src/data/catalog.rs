@@ -15,13 +15,22 @@ use serde::Serialize;
 
 use super::snapshot::Snapshot;
 
-/// The capture's storage string for the bar size this crate trades on.
-pub const BAR_SIZE: &str = "30min";
+/// The option bar sizes this crate trades on, finest first. Captures from
+/// 2026-09 on take 15-minute option bars; the reference snapshot is 30-minute.
+pub const OPTION_BAR_SIZES: [&str; 2] = ["15min", "30min"];
+
+/// The stock bars an option bar size is checked against for `stock_ts_overlap`:
+/// its own size where the capture took it, the 5-minute tape for 15-minute
+/// chains, which were captured without 15-minute stock bars.
+const STOCK_BAR_SIZE: [(&str, &str); 2] = [("15min", "5min"), ("30min", "30min")];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChainCoverage {
     pub symbol: String,
     pub expiry: String,
+    /// The option bar size this row counts. A chain captured at both sizes is
+    /// listed once per size; the backtester trades the finest.
+    pub bar_size: String,
     /// Strikes with a two-sided quote at some timestamp.
     pub strikes: i64,
     /// Strikes quoted on **both** call and put sides — what the parity fit needs.
@@ -48,11 +57,21 @@ impl ChainCoverage {
 
 /// Coverage for every symbol/expiry that has at least one two-sided option bar.
 pub fn chain_coverage(snapshot: &Snapshot) -> Result<Vec<ChainCoverage>> {
+    let mut chains = Vec::new();
+    for (option_size, stock_size) in STOCK_BAR_SIZE {
+        chains.extend(coverage_at(snapshot, option_size, stock_size)?);
+    }
+    chains.sort_by(|a, b| (&a.symbol, &a.expiry, &a.bar_size).cmp(&(&b.symbol, &b.expiry, &b.bar_size)));
+    Ok(chains)
+}
+
+fn coverage_at(snapshot: &Snapshot, option_size: &str, stock_size: &str) -> Result<Vec<ChainCoverage>> {
     let mut stmt = snapshot.conn().prepare(SQL)?;
-    let rows = stmt.query_map([BAR_SIZE], |row| {
+    let rows = stmt.query_map([option_size, stock_size], |row| {
         Ok(ChainCoverage {
             symbol: row.get("symbol")?,
             expiry: row.get("expiry")?,
+            bar_size: option_size.to_string(),
             strikes: row.get("strikes")?,
             paired_strikes: row.get("paired_strikes")?,
             timestamps: row.get("timestamps")?,
@@ -109,7 +128,7 @@ stock AS (
     SELECT c.symbol, b.ts
     FROM bars b
     JOIN contracts c ON c.id = b.contract_id
-    WHERE c.kind = 'stock' AND b.bar_size = ?1 AND b.data_type = 'trades'
+    WHERE c.kind = 'stock' AND b.bar_size = ?2 AND b.data_type = 'trades'
 ),
 overlap AS (
     SELECT q.symbol, q.expiry, COUNT(*) AS stock_ts_overlap

@@ -398,6 +398,10 @@ pub struct ExitConfig {
     /// Close at least this many calendar days before expiration.
     #[serde(default = "default_min_days_before_expiry")]
     pub min_days_before_expiry: Option<u32>,
+    /// Watch the forecast target, adverse stop and short strike on the 5-minute
+    /// stock tape between option bars. See `ExitRules::stock_bar_exits`.
+    #[serde(default)]
+    pub stock_bar_exits: bool,
 }
 
 impl Default for ExitConfig {
@@ -413,6 +417,7 @@ impl Default for ExitConfig {
             live_pop_floor: None,
             naked_trailing_stop_pct: None,
             naked_momentum_exit: false,
+            stock_bar_exits: false,
             close_after_forecast_horizon: false,
             min_days_before_expiry: default_min_days_before_expiry(),
         }
@@ -847,6 +852,8 @@ pub struct FeaturesConfig {
     pub rsi_cross_level: f64,
     /// Trailing window for the IV-regime feature. See `FeatureConfig`.
     pub iv_median_lookback: usize,
+    /// Minutes per feature observation. See `FeatureConfig`.
+    pub cadence_minutes: u32,
 }
 
 impl Default for FeaturesConfig {
@@ -862,6 +869,7 @@ impl Default for FeaturesConfig {
             rsi_period: d.rsi_period,
             rsi_cross_level: d.rsi_cross_level,
             iv_median_lookback: d.iv_median_lookback,
+            cadence_minutes: d.cadence_minutes,
         }
     }
 }
@@ -878,6 +886,7 @@ impl FeaturesConfig {
             rsi_period: self.rsi_period,
             rsi_cross_level: self.rsi_cross_level,
             iv_median_lookback: self.iv_median_lookback,
+            cadence_minutes: self.cadence_minutes,
         }
     }
 }
@@ -1198,10 +1207,13 @@ impl StrategyConfig {
         // Several chains need one account to weigh them against each other and a
         // forecast to rank them by; the per-symbol loop and the staged pipeline
         // each read exactly one chain.
-        if chains.len() > 1
-            && (self.mode != StrategyMode::Ranked || self.account_mode()? != AccountMode::Shared)
-        {
+        let shared_ranked =
+            self.mode == StrategyMode::Ranked && self.account_mode()? == AccountMode::Shared;
+        if chains.len() > 1 && !shared_ranked {
             bail!("several `expiries` need `mode = \"ranked\"` and the shared account");
+        }
+        if self.exit.resolve()?.stock_bar_exits && !shared_ranked {
+            bail!("`stock_bar_exits` needs `mode = \"ranked\"` and the shared account");
         }
         if self.portfolio.is_some() && self.sizing.is_some() {
             bail!("use either `portfolio` or legacy `[sizing]`, not both");
@@ -1558,6 +1570,7 @@ impl StrategyConfig {
                 max_time_pct: exit.max_time_pct,
                 close_before_earnings: exit.close_before_earnings,
                 min_days_before_expiry: exit.min_days_before_expiry,
+                stock_bar_exits: exit.stock_bar_exits,
             },
             max_open_positions: portfolio.max_open_positions,
             max_positions_per_symbol: portfolio.max_positions_per_symbol,

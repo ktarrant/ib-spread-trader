@@ -1,0 +1,5 @@
+# The first 15-minute capture: the new cohort's October monthly, 2026-07-20
+# through 2026-09-25. The chain is still live at the end of the data, so
+# nothing here settles; positions open at the end are reported marked.
+symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "COIN", "PLTR", "XOM", "GS", "BA", "UBER", "NFLX"]
+expiry = "2026-10-16"

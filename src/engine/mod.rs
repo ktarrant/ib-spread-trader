@@ -474,6 +474,7 @@ pub fn run_symbol(
     let mut scorer_records: Vec<ScorerRecord> = Vec::new();
 
     let timeline = series.merged_timeline();
+    let mut last_ctx: Option<RankedContext> = None;
 
     for (seq, &(ts, option_index)) in timeline.iter().enumerate() {
         if let Some(index) = option_index {
@@ -504,15 +505,25 @@ pub fn run_symbol(
             //    it (live POP, momentum). The feature engine still advances once
             //    per bar, in order.
             let next_earnings = series.next_earnings_from(bar.ts.date_naive());
-            let ranked_ctx = match strategy {
-                Strategy::Ranked(ranked) => Some(ranked_observe(
+            // The features advance only when a cadence window closes; between,
+            // exits read the last forecast and no entry is decided.
+            let forecast_bar = match strategy {
+                Strategy::Ranked(ranked) => closes_cadence_window(
+                    bar.ts,
+                    series.bar_minutes,
+                    i64::from(ranked.features.cadence_minutes()),
+                ),
+                Strategy::Staged(_) => true,
+            };
+            if forecast_bar && let Strategy::Ranked(ranked) = strategy {
+                last_ctx = Some(ranked_observe(
                     ranked,
                     &[(series, &bar)],
                     next_earnings,
                     &mut forecasts,
-                )),
-                Strategy::Staged(_) => None,
-            };
+                ));
+            }
+            let ranked_ctx = last_ctx.as_ref();
 
             // 3. Mark, updating each position's running peak for the trailing stop.
             portfolio.update_peaks(&bar, &config.costs);
@@ -530,7 +541,7 @@ pub fn run_symbol(
                 series.expiry_instant(),
                 next_earnings,
                 &config.exits,
-                ranked_ctx.as_ref().map(|ctx| (ctx, 0)),
+                ranked_ctx,
             );
 
             for (id, reason) in &synthetic_exiting {
@@ -600,9 +611,10 @@ pub fn run_symbol(
                         }
                     }
                 }
+                Strategy::Ranked(_) if !forecast_bar => {}
                 Strategy::Ranked(ranked) => {
                     // The forecast was computed in step 2; reuse it.
-                    let ctx = ranked_ctx.as_ref().expect("ranked bar computed a ctx");
+                    let ctx = ranked_ctx.expect("a forecast bar computed a ctx");
 
                     match entry_gate(
                         portfolio.open.len(),
@@ -625,7 +637,7 @@ pub fn run_symbol(
                             if let Some((choice, bounds, expiry)) = ranked_choose(
                                 ranked,
                                 ctx,
-                                &[(0, series, &bar)],
+                                &[(series, &bar)],
                                 config,
                                 &mut census,
                                 &mut scorer_records,
@@ -842,6 +854,8 @@ pub fn run_shared(
     let mut marks: BTreeMap<usize, f64> = BTreeMap::new();
     let mut sym_bars: Vec<usize> = vec![0; n];
     let mut equity_curve: Vec<EquityPoint> = Vec::new();
+    // Each symbol's forecast from its last closed cadence window.
+    let mut last_ctx: Vec<Option<RankedContext>> = (0..n).map(|_| None).collect();
 
     // Merged, ordered global timeline: (ts, symbol, chain, option_index?). The
     // stock-only bars are one tape per symbol, so they come from its first chain.
@@ -1010,25 +1024,35 @@ pub fn run_shared(
                 .map(|(_, ci, bar)| (&symbols[si][*ci], bar))
                 .collect();
             let next_earnings = symbols[si][0].next_earnings_from(ts.date_naive());
-            // Advance the forecast first so exits can read it (live POP, momentum).
-            let ranked_ctx = match &mut strategies[si] {
-                Strategy::Ranked(ranked) => Some(ranked_observe(
+            // Advance the forecast first so exits can read it (live POP,
+            // momentum) — but only when a cadence window closes. Between, exits
+            // read the last forecast and no entry is decided.
+            let forecast_bar = match &strategies[si] {
+                Strategy::Ranked(ranked) => closes_cadence_window(
+                    ts,
+                    chains[0].0.bar_minutes,
+                    i64::from(ranked.features.cadence_minutes()),
+                ),
+                Strategy::Staged(_) => true,
+            };
+            if forecast_bar && let Strategy::Ranked(ranked) = &mut strategies[si] {
+                last_ctx[si] = Some(ranked_observe(
                     ranked,
                     &chains,
                     next_earnings,
                     &mut forecasts[si],
-                )),
-                Strategy::Staged(_) => None,
-            };
+                ));
+            }
+            let ranked_ctx = last_ctx[si].as_ref();
             let mut exiting = Vec::new();
-            for (index, &(series, bar)) in chains.iter().enumerate() {
+            for &(series, bar) in &chains {
                 let (queued, synthetic) = compute_exits(
                     &portfolio,
                     bar,
                     series.expiry_instant(),
                     next_earnings,
                     &config.exits,
-                    ranked_ctx.as_ref().map(|ctx| (ctx, index)),
+                    ranked_ctx,
                 );
                 for (id, reason) in &synthetic {
                     if let Some(spot) = bar.underlying.price() {
@@ -1044,8 +1068,9 @@ pub fn run_shared(
 
             let mut entering: Option<Intent> = None;
             match &mut strategies[si] {
+                Strategy::Ranked(_) if !forecast_bar => {}
                 Strategy::Ranked(ranked) => {
-                    let ctx = ranked_ctx.as_ref().expect("ranked bar computed a ctx");
+                    let ctx = ranked_ctx.expect("a forecast bar computed a ctx");
                     // The gate asks whether *any* chain is still open to entry;
                     // which ones are is decided chain by chain below.
                     let farthest = chains.last().expect("a quoting symbol has a chain").0;
@@ -1067,13 +1092,12 @@ pub fn run_shared(
                         EntryGate::RsiOutOfBand => census[si].rsi_out_of_band += 1,
                         EntryGate::NoRecentRsiCross => census[si].no_recent_rsi_cross += 1,
                         EntryGate::Open => {
-                            let open: Vec<(usize, &ChainSeries, &ChainSnapshot)> = chains
+                            let open: Vec<(&ChainSeries, &ChainSnapshot)> = chains
                                 .iter()
-                                .enumerate()
-                                .filter(|(_, (series, _))| {
+                                .filter(|(series, _)| {
                                     !too_close_to_expiry(config, series.expiry_instant(), ts)
                                 })
-                                .map(|(index, &(series, bar))| (index, series, bar))
+                                .copied()
                                 .collect();
                             if let Some((choice, bounds, expiry)) = ranked_choose(
                                 ranked,
@@ -1160,8 +1184,17 @@ pub fn run_shared(
             pending[si] = exiting;
         }
 
-        // 4. Stock-only bars (staged only): advance the signal, carry any trigger.
+        // 4. Stock-only bars. A ranked run with `stock_bar_exits` watches the
+        //    price-level exits on them, closing on the next option bar; the
+        //    staged path advances its signal and carries any trigger.
         for &(_, si, ci, oi) in &global[idx..end] {
+            if oi.is_none()
+                && config.exits.stock_bar_exits
+                && matches!(strategies[si], Strategy::Ranked(_))
+                && let Some(spot) = symbols[si][ci].underlying_asof(ts).and_then(|b| b.price())
+            {
+                watch_stock_bar(&portfolio, &symbols[si][ci].symbol, spot, &config.exits, &mut pending[si]);
+            }
             if oi.is_none()
                 && let Strategy::Staged(staged) = &mut strategies[si]
                 && let Some(bar) = symbols[si][ci].stock_only_snapshot(ts)
@@ -1242,6 +1275,30 @@ pub fn run_shared(
     })
 }
 
+/// Queue a close for each open position of `symbol` whose price-level exit this
+/// stock bar has crossed, unless one is already queued. It fills on the
+/// position's next option bar — the first quote after the crossing, up to one
+/// option bar sooner than waiting to see the crossing on an option bar itself.
+fn watch_stock_bar(
+    portfolio: &Portfolio,
+    symbol: &str,
+    spot: f64,
+    exits: &ExitRules,
+    pending: &mut Vec<Intent>,
+) {
+    for position in portfolio.open.iter().filter(|p| p.spread.symbol == symbol) {
+        let queued = pending
+            .iter()
+            .any(|intent| matches!(intent, Intent::Close { id, .. } if *id == position.id));
+        if !queued && let Some(reason) = exits.price_triggered(position, spot) {
+            pending.push(Intent::Close {
+                id: position.id,
+                reason,
+            });
+        }
+    }
+}
+
 /// Settle every open position whose chain expired before `before` (all of them
 /// when `None`) at that chain's expiry-day print, and record the account at the
 /// settlement instant. A chain whose tape never reached expiry day — one still
@@ -1299,7 +1356,7 @@ fn compute_exits(
     expiry_instant: DateTime<Utc>,
     next_earnings: Option<&EarningsEvent>,
     exits: &ExitRules,
-    model: Option<(&RankedContext, usize)>,
+    model: Option<&RankedContext>,
 ) -> (Vec<Intent>, Vec<(usize, ExitReason)>) {
     let mut exiting = Vec::new();
     let mut synthetic = Vec::new();
@@ -1314,7 +1371,7 @@ fn compute_exits(
                     bar_ts: bar.ts,
                     expiry_instant,
                     next_earnings,
-                    model: model.map(|(ctx, chain)| ctx.exit_model(chain)),
+                    model: model.and_then(|ctx| ctx.exit_model(bar.expiry)),
                 };
                 if let Some(reason) = exits.triggered(position, &ctx) {
                     exiting.push(Intent::Close {
@@ -1351,8 +1408,9 @@ fn compute_exits(
 /// or no gate, in both the per-symbol and shared-account loops.
 struct RankedContext {
     features: Features,
-    /// One per chain passed to [`ranked_observe`], in the same order.
-    chains: Vec<ChainForecast>,
+    /// One per chain quoting the bar it was computed on, keyed by expiry, so a
+    /// later option bar inside the same cadence window can still find its own.
+    chains: Vec<(NaiveDate, ChainForecast)>,
     full_horizon_years: f64,
     /// What the model saw this bar, recorded onto any position opened from it.
     entry_features: crate::model::EntryFeatures,
@@ -1371,16 +1429,29 @@ struct ChainForecast {
 }
 
 impl RankedContext {
-    /// Chain `index`'s forecast, packaged for the exit check.
-    fn exit_model(&self, index: usize) -> exits::ExitModel<'_> {
-        let chain = &self.chains[index];
-        exits::ExitModel {
+    fn forecast(&self, expiry: NaiveDate) -> Option<&ChainForecast> {
+        self.chains.iter().find(|(e, _)| *e == expiry).map(|(_, f)| f)
+    }
+
+    /// The forecast for the chain expiring `expiry`, packaged for the exit check.
+    fn exit_model(&self, expiry: NaiveDate) -> Option<exits::ExitModel<'_>> {
+        let chain = self.forecast(expiry)?;
+        Some(exits::ExitModel {
             dist: &chain.dist,
             remaining_years: chain.remaining_years,
             forward_scale: chain.forward_scale,
             trend: self.features.trend,
-        }
+        })
     }
+}
+
+/// Whether the option bar starting at `ts` closes a feature-cadence window —
+/// its end falls on a `cadence`-minute boundary. Every bar does when the tape is
+/// no finer than the cadence, which is what keeps a 30-minute model on 30-minute
+/// data exactly as it was.
+fn closes_cadence_window(ts: DateTime<Utc>, bar_minutes: i64, cadence: i64) -> bool {
+    let end_minute = (ts + Duration::minutes(bar_minutes)).timestamp() / 60;
+    bar_minutes >= cadence || end_minute % cadence == 0
 }
 
 /// Which chain feeds the features: the nearest expiry that still covers the
@@ -1403,6 +1474,24 @@ fn ranked_observe(
     let full_horizon_years = ranked.model.horizon_days() / 365.25;
     let feature = feature_chain(chains, full_horizon_years);
     let (series, bar) = chains[feature];
+    // On a tape finer than the cadence the indicators read the whole window's
+    // stock bar, not the last option bar's slice of it — an ATR over 15-minute
+    // ranges is a different indicator from the one validated on 30.
+    let cadence = i64::from(ranked.features.cadence_minutes());
+    let windowed;
+    let bar = match (series.bar_minutes < cadence)
+        .then(|| series.window_bar(bar.ts + Duration::minutes(series.bar_minutes), cadence))
+        .flatten()
+    {
+        Some(underlying) => {
+            windowed = ChainSnapshot {
+                underlying,
+                ..bar.clone()
+            };
+            &windowed
+        }
+        None => bar,
+    };
     let bar_date = bar.ts.date_naive();
     let earnings = EarningsDistance {
         days_to: next_earnings.map(|e| (e.date - bar_date).num_days()),
@@ -1412,11 +1501,11 @@ fn ranked_observe(
     };
     let features = ranked.features.observe(bar, earnings);
 
-    let forecasts_by_chain: Vec<ChainForecast> = chains
+    let forecasts_by_chain: Vec<(NaiveDate, ChainForecast)> = chains
         .iter()
         .map(|(_, chain)| {
             let horizon_years = full_horizon_years.min(chain.year_fraction).max(0.0);
-            ChainForecast {
+            let forecast = ChainForecast {
                 dist: ranked.model.forecast(&features, horizon_years),
                 remaining_years: (chain.year_fraction - horizon_years).max(0.0),
                 forward_scale: if features.spot > 0.0 {
@@ -1424,7 +1513,8 @@ fn ranked_observe(
                 } else {
                     1.0
                 },
-            }
+            };
+            (chain.expiry, forecast)
         })
         .collect();
 
@@ -1435,7 +1525,7 @@ fn ranked_observe(
         series,
         bar,
         &features,
-        &forecasts_by_chain[feature].dist,
+        &forecasts_by_chain[feature].1.dist,
         full_horizon_years,
         ranked.model.as_ref(),
     ) {
@@ -1451,8 +1541,8 @@ fn ranked_observe(
 }
 
 /// Candidate enumeration, scorer sampling, and ranking for one symbol-bar, once
-/// the entry gate has said Open. Each chain in `open` — `(index into
-/// ctx.chains, series, bar)` — is ranked against its own forecast, and the best
+/// the entry gate has said Open. Each chain in `open` is ranked against its own
+/// forecast, and the best
 /// candidate across them wins by the ranker's own key, so a position opens in
 /// whichever expiry offers the best trade. Returns the best **one-lot** choice,
 /// its forecast bounds and its expiry; allocation is the caller's, so it can
@@ -1460,16 +1550,18 @@ fn ranked_observe(
 fn ranked_choose(
     ranked: &RankedStrategy,
     ctx: &RankedContext,
-    open: &[(usize, &ChainSeries, &ChainSnapshot)],
+    open: &[(&ChainSeries, &ChainSnapshot)],
     config: &RunConfig,
     census: &mut Census,
     scorer_records: &mut Vec<ScorerRecord>,
 ) -> Option<(crate::model::RankedChoice, ForecastBounds, NaiveDate)> {
     let cfg = &ranked.ranking;
     let mut funnel = RankingFunnel::default();
-    let mut best: Option<(crate::model::RankedChoice, usize, NaiveDate)> = None;
-    for &(index, series, bar) in open {
-        let forecast = &ctx.chains[index];
+    let mut best: Option<(crate::model::RankedChoice, NaiveDate)> = None;
+    for &(series, bar) in open {
+        let Some(forecast) = ctx.forecast(bar.expiry) else {
+            continue;
+        };
         let mut chain_funnel = RankingFunnel::default();
         let candidates =
             enumerate_verticals(bar, &config.costs, &ranked.candidates, &mut chain_funnel);
@@ -1498,18 +1590,18 @@ fn ranked_choose(
                 .as_ref()
                 .is_none_or(|(held, ..)| choice_key(&choice, cfg) > choice_key(held, cfg))
         {
-            best = Some((choice, index, bar.expiry));
+            best = Some((choice, bar.expiry));
         }
     }
     // A bar takes at most one candidate, however many chains offered one.
     funnel.chosen = usize::from(best.is_some());
     census.ranking.merge(&funnel);
 
-    let (choice, index, expiry) = best?;
+    let (choice, expiry) = best?;
     // Both bounds of the entry distribution, read in the trade's direction: the
     // favourable quantile it takes profit at, and the adverse one past which the
     // forecast no longer covers it. Prices, so lot count never touches either.
-    let dist = &ctx.chains[index].dist;
+    let dist = &ctx.forecast(expiry).expect("the choice came from a forecast chain").dist;
     let rises = choice.candidate.spread.profits_from_a_rise();
     let quantile_toward = |q: f64| dist.quantile(if rises { q } else { 1.0 - q });
     let bounds = ForecastBounds {
@@ -1792,16 +1884,18 @@ pub mod testing {
     /// model, the parity fit recovers the path exactly and every delta is
     /// analytic — so a test failure is the engine's, not the fixture's.
     pub fn snapshot_with(name: &str, path: &[f64], settlement: f64) -> PathBuf {
-        snapshot_with_chains(name, path, settlement, &[expiry()])
+        snapshot_with_chains(name, path, settlement, &[expiry()], 30)
     }
 
     /// `snapshot_with`, but with a full ladder for every expiry in `expiries`,
-    /// each priced to its own time to expiry and settling at `settlement`.
+    /// each priced to its own time to expiry and settling at `settlement`, on
+    /// `bar_minutes`-wide bars (stock and options alike).
     pub fn snapshot_with_chains(
         name: &str,
         path: &[f64],
         settlement: f64,
         expiries: &[NaiveDate],
+        bar_minutes: i64,
     ) -> PathBuf {
         let dir = std::env::temp_dir().join("ib-spread-trader-engine-fixtures");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1844,33 +1938,34 @@ pub mod testing {
         }
 
         let start = Utc.with_ymd_and_hms(2026, 7, 1, 13, 30, 0).unwrap();
+        let bar_size = format!("{bar_minutes}min");
         conn.execute_batch("BEGIN").unwrap();
         let mut insert = conn
             .prepare(
                 "INSERT INTO bars (contract_id, ts, bar_size, data_type, open, high, low, close, volume)
-                 VALUES (?1, ?2, '30min', ?3, ?4, ?4, ?4, ?4, 0)",
+                 VALUES (?1, ?2, ?5, ?3, ?4, ?4, ?4, ?4, 0)",
             )
             .unwrap();
 
         for (bar, &spot) in path.iter().enumerate() {
-            let ts = (start + Duration::minutes(30 * bar as i64))
+            let ts = (start + Duration::minutes(bar_minutes * bar as i64))
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
             for (kind, price) in [("trades", spot), ("bid", spot - 0.01), ("ask", spot + 0.01)] {
                 insert
-                    .execute(rusqlite::params![1i64, &ts, kind, price])
+                    .execute(rusqlite::params![1i64, &ts, kind, price, bar_size])
                     .unwrap();
             }
-            let now = start + Duration::minutes(30 * bar as i64);
+            let now = start + Duration::minutes(bar_minutes * bar as i64);
             for &(id, strike, is_call, expiry_instant) in &ids {
                 let t = pricing::year_fraction(now, expiry_instant);
                 // Floor the mid so a deep wing still quotes a positive book,
                 // as a real one does.
                 let mid = pricing::black76(spot, strike, t, VOL, is_call).max(0.06);
                 insert
-                    .execute(rusqlite::params![id, &ts, "bid", mid - 0.05])
+                    .execute(rusqlite::params![id, &ts, "bid", mid - 0.05, bar_size])
                     .unwrap();
                 insert
-                    .execute(rusqlite::params![id, &ts, "ask", mid + 0.05])
+                    .execute(rusqlite::params![id, &ts, "ask", mid + 0.05, bar_size])
                     .unwrap();
             }
         }
@@ -1883,7 +1978,7 @@ pub mod testing {
                 .and_utc()
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
             insert
-                .execute(rusqlite::params![1i64, &settle_ts, "trades", settlement])
+                .execute(rusqlite::params![1i64, &settle_ts, "trades", settlement, bar_size])
                 .unwrap();
         }
 
@@ -2139,6 +2234,100 @@ mod tests {
     use crate::portfolio::ExitReason;
     use crate::signal::{MarketView, Signal, Trigger};
 
+    /// On a 15-minute tape a 30-minute model advances once per window, at the
+    /// close of the window's second bar, and decides only there — so every
+    /// entry fills on the bar after, which starts on a 30-minute boundary.
+    #[test]
+    fn a_30_minute_model_on_a_15_minute_tape_decides_once_per_window() {
+        let file = snapshot_with_chains("fifteen", &v_shaped_path(), 100.0, &[expiry()], 15);
+        let snapshot = crate::data::Snapshot::open(&file).unwrap();
+        let series = ChainSeries::load(&snapshot, "TEST", expiry()).unwrap();
+        assert_eq!(series.bar_minutes, 15);
+
+        let strategy_config: crate::config::StrategyConfig = toml::from_str(
+            r#"
+symbols = ["TEST"]
+expiry = "2026-08-21"
+model = "mean-reversion"
+[candidates]
+max_loss = 5000.0
+[ranking]
+min_score = -10.0
+min_expected_pl = -1.0e9
+[exit]
+min_days_before_expiry = 0
+"#,
+        )
+        .unwrap();
+        strategy_config.validate().unwrap();
+        let mut strategies = vec![strategy_config.strategy().unwrap()];
+        let run_config = strategy_config.run_config().unwrap();
+        let run = run_shared(&[vec![series]], &mut strategies, &run_config).unwrap();
+
+        let opened: Vec<DateTime<Utc>> = run
+            .portfolio
+            .closed
+            .iter()
+            .map(|t| t.opened_at)
+            .chain(run.portfolio.open.iter().map(|p| p.opened_at))
+            .collect();
+        assert!(!opened.is_empty(), "the floors are off, so something opens");
+        assert!(
+            opened.iter().all(|ts| (ts.timestamp() / 60) % 30 == 0),
+            "{opened:?}"
+        );
+    }
+
+    #[test]
+    fn the_cadence_window_closes_on_its_boundary_only() {
+        let at = |h, m| chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 9, 1, h, m, 0).unwrap();
+        // 15-minute bars under a 30-minute model: the second bar of each window.
+        assert!(!closes_cadence_window(at(13, 30), 15, 30));
+        assert!(closes_cadence_window(at(13, 45), 15, 30));
+        assert!(closes_cadence_window(at(19, 45), 15, 30), "the session's last window");
+        // A tape no finer than the cadence observes every bar, as it always did.
+        assert!(closes_cadence_window(at(13, 30), 30, 30));
+        assert!(closes_cadence_window(at(20, 0), 30, 30));
+        assert!(closes_cadence_window(at(13, 30), 15, 15));
+    }
+
+    /// A stock bar that crosses a position's adverse bound queues exactly one
+    /// close, for the next option bar; one that does not queues nothing.
+    #[test]
+    fn a_stock_bar_across_the_stop_queues_one_close() {
+        let (_snapshot, series) = series("watch", &v_shaped_path(), 100.0);
+        let bar = series.snapshot(0).unwrap();
+        let call = bar
+            .quotes
+            .iter()
+            .find(|q| q.right.is_call() && q.strike == 100.0)
+            .unwrap();
+        let spread = Spread::new(
+            "TEST",
+            vec![crate::spread::Leg {
+                contract_id: call.contract_id,
+                strike: call.strike,
+                right: call.right,
+                side: crate::spread::Side::Long,
+                quantity: 1,
+            }],
+        );
+        let mut portfolio = Portfolio::new(10_000.0);
+        portfolio.open(spread, &bar, &Costs::default()).unwrap();
+        portfolio.open[0].forecast_stop = Some(95.0);
+
+        let exits = ExitRules::default();
+        let mut pending = Vec::new();
+        watch_stock_bar(&portfolio, "TEST", 96.0, &exits, &mut pending);
+        assert!(pending.is_empty(), "above the stop");
+        watch_stock_bar(&portfolio, "TEST", 94.0, &exits, &mut pending);
+        watch_stock_bar(&portfolio, "TEST", 93.0, &exits, &mut pending);
+        assert!(matches!(
+            pending.as_slice(),
+            [Intent::Close { reason: ExitReason::ForecastStop, .. }]
+        ));
+    }
+
     /// Two chains, one symbol: the near one is inside the entry blackout, so
     /// every position must open in the far one — and be marked, exited and
     /// closed only there. Floors are off so the ranker always picks something.
@@ -2146,7 +2335,7 @@ mod tests {
     fn a_position_opens_in_the_chain_that_is_open_and_stays_there() {
         let near = expiry();
         let far = NaiveDate::from_ymd_opt(2026, 9, 18).unwrap();
-        let file = snapshot_with_chains("two-chains", &v_shaped_path(), 100.0, &[near, far]);
+        let file = snapshot_with_chains("two-chains", &v_shaped_path(), 100.0, &[near, far], 30);
         let snapshot = crate::data::Snapshot::open(&file).unwrap();
         let chains: Vec<ChainSeries> = [near, far]
             .iter()

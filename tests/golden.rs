@@ -5,8 +5,11 @@
 //! is present** — following `~/ib-option-viz/tests/test_golden.py`, since the
 //! snapshot is a 213 MB file that lives outside the repo and cannot be checked in.
 //!
-//! Set `$IB_SNAPSHOT` to test against a specific file; otherwise the newest in
-//! `~/Documents/Options Database` is used.
+//! They read the **reference** capture by name, not the CLI's newest snapshot:
+//! every later capture is a superset that moves some count (the 5-minute tape
+//! alone grew 4 836 → 6 396 SPY rows by 2026-09-26), and a pinned value is only
+//! meaningful against the file it was confirmed on. Set `$IB_SNAPSHOT` to point
+//! them at a copy of that file elsewhere.
 //!
 //! When one of these fails, decide which happened before touching it:
 //! a regression, or a deliberate change to the model. Only the second is a
@@ -32,11 +35,16 @@ fn pinned_ts() -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
+/// The capture every value below was confirmed on.
+const REFERENCE_SNAPSHOT: &str = "ib-option-calc-snapshot-2026-08-28.sqlite3";
+
 /// `None` means "no snapshot here" — the caller returns and the test passes.
 fn snapshot() -> Option<Snapshot> {
     let path = match std::env::var_os("IB_SNAPSHOT") {
         Some(path) => std::path::PathBuf::from(path),
-        None => ib_spread_trader::data::snapshot::default_snapshot_path().ok()?,
+        None => std::path::PathBuf::from(std::env::var_os("HOME")?)
+            .join("Documents/Options Database")
+            .join(REFERENCE_SNAPSHOT),
     };
     match Snapshot::open(&path) {
         Ok(snapshot) => Some(snapshot),

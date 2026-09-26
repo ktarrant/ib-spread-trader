@@ -6,22 +6,22 @@ this file when it lands, and the commit says so.
 
 Each item: what, why, and anything already known that shapes it.
 
-## Next — when the October snapshot lands
+## Next — October is in (2026-09-26 capture)
 
-- **Pin the golden tests to the reference snapshot by name**, separately from the
-  CLI's "newest" default. Once a larger snapshot that includes October becomes
-  the default, `the_catalog_reports_one_expiry_across_twelve_symbols` fails and
-  the ranked goldens likely drift (more stock bars past expiry means more
-  forecasts scored; the events table grows).
-- **A dataset for October, with the new cohort.** `datasets/2026-08-21.toml` names
-  AMD and MSTR, which calc no longer captures; XOM, GS, BA, UBER, NFLX are new,
-  and calc's plan grows the cohort to ~36. Use `expiries = [...]` to trade
-  several chains together.
-- **Check the capture's option bar size.** calc's `--bar-size` still defaults to
-  `15min`; the weekly script passes `30min`, but a manual/backfill run with the
-  default produces chains this repo and the viz both ignore (both read `30min`).
-  Fix belongs in calc (its default), or at least `catalog` should say when it
-  sees option bars at another size.
+- **The model failed out of period** (CLAUDE.md, *Three cadences*): skill
+  −0.0095, 5/15 symbols. Before tuning anything, look at *why* — the regime
+  (another rising sample), the new cohort (XOM, GS, BA, UBER, NFLX are not the
+  names it was validated on), or the edge itself. Compare on the 9 symbols
+  common to both months first.
+- **A 15-minute model.** All future captures are 15-minute, so re-validation at
+  that cadence is inevitable: a model label with `cadence_minutes = 15`, periods
+  doubled (trend 20/60, RSI 28, ATR 28, `iv_median_lookback` 400,
+  `bars_per_year` 6552) as the like-for-like starting point, then the sweep.
+- **The viz cannot see 15-minute chains**: `catalog.py`, `frames.BAR_SIZE` and
+  `backtest.underlying_bars` all read `30min`. The report's new `bar_minutes`
+  tells it which grid a run used.
+- **calc's `--bar-size` default is `15min`** — fine now that 15 is the intended
+  grid, but the weekly script passes `30min`; they should agree.
 - **Scripts do not understand `expiries`.** `validate_model.py` and
   `validate_ranker.py` read `expiry` with a regex and fail on a list;
   `sweep_model.py` hard-codes `dataset = "2026-08-21"`. Parse TOML with
@@ -49,7 +49,8 @@ show up the moment there are two:
   chains. With rolling weekly captures, a date window ("every chain expiring in
   Q4") may be the more natural unit, and out-of-period validation wants windows
   that do not overlap in time — weekly chains overlap heavily, so a second
-  expiry over the same weeks is not independent evidence.
+  expiry over the same weeks is not independent evidence. (Aug-21 and Oct-16
+  overlap 2026-07-20 → 08-20.)
 - Orphaned outputs: `out/mean_reversion_calibrated` has no strategy; four
   strategies have no `out/` run.
 

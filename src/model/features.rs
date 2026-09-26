@@ -38,6 +38,13 @@ pub struct FeatureConfig {
     /// measured against. A **trailing** window, never the whole sample: the whole
     /// sample includes the future, and a sizing rule that reads it is cheating.
     pub iv_median_lookback: usize,
+    /// Minutes of market time per feature observation. The indicator periods
+    /// above count *these* steps, and the shipped models were validated at 30.
+    /// On a finer option tape the engine executes every option bar but advances
+    /// the features only when a cadence window closes, on that window's
+    /// aggregated stock bar — so a 30-minute model means the same thing on 15-
+    /// and 30-minute data. A finer cadence is a new model, validated anew.
+    pub cadence_minutes: u32,
 }
 
 impl Default for FeatureConfig {
@@ -52,6 +59,7 @@ impl Default for FeatureConfig {
             rsi_period: 14,
             rsi_cross_level: 30.0,
             iv_median_lookback: 200,
+            cadence_minutes: 30,
         }
     }
 }
@@ -167,9 +175,15 @@ pub struct FeatureEngine {
     rsi_cross_level: f64,
     bars_since_rsi_cross_up: Option<u32>,
     skew_moneyness: f64,
+    cadence_minutes: u32,
 }
 
 impl FeatureEngine {
+    /// Minutes of market time per observation; see `FeatureConfig`.
+    pub fn cadence_minutes(&self) -> u32 {
+        self.cadence_minutes
+    }
+
     pub fn new(config: FeatureConfig) -> Result<Self> {
         if config.trend_fast >= config.trend_slow {
             bail!(
@@ -197,6 +211,7 @@ impl FeatureEngine {
             rsi_cross_level: config.rsi_cross_level,
             bars_since_rsi_cross_up: None,
             skew_moneyness: config.skew_moneyness,
+            cadence_minutes: config.cadence_minutes.max(1),
         })
     }
 
@@ -353,6 +368,7 @@ mod tests {
             realized_vol_period: 2,
             realized_vol_winsor_k: 3.0,
             skew_moneyness: 0.05,
+            cadence_minutes: 30,
         }
     }
 
