@@ -329,6 +329,11 @@ fn the_mean_reversion_model_reproduces_its_recorded_run() {
     assert!((totals.total_pnl - -5510.10).abs() < 0.01, "{}", totals.total_pnl);
     let pooled = &built.model_eval.as_ref().unwrap().pooled;
     assert!(pooled.crps_skill > 0.0, "skill {}", pooled.crps_skill);
+    // ...and within noise of zero. Ten weekly blocks put the interval across it,
+    // which is why the model registry no longer labels this model.
+    assert_eq!(pooled.weeks, 10);
+    let [lo, hi] = pooled.crps_skill_interval;
+    assert!((lo - -0.0087).abs() < 1e-4 && (hi - 0.0313).abs() < 1e-4, "[{lo}, {hi}]");
     assert!(pooled.directional_hit_rate > 0.5, "dir {}", pooled.directional_hit_rate);
     let naked = built.trades.iter().filter(|t| !t.description.contains('-')).count();
     let debit = built

@@ -1,0 +1,21 @@
+{
+  "label": "driftless",
+  "dataset": "2026-10-16",
+  "horizon_days": 7.0,
+  "crps_skill": 0.0,
+  "crps_skill_interval": [
+    0.0,
+    0.0
+  ],
+  "weeks": 9,
+  "pit_error": 0.09280276816608994,
+  "coverage_50": 0.529688581314879,
+  "coverage_80": 0.8326643598615917,
+  "coverage_90": 0.9262283737024222,
+  "directional_hit_rate": 0.46173010380622836,
+  "loso_min_dir_hit": 0.1544885177453027,
+  "loso_symbols_passing": 5,
+  "loso_symbols_total": 15,
+  "passed": false,
+  "evaluated_at": "2026-09-26T19:05:53.278922Z"
+}

@@ -8,7 +8,8 @@
 //! the realized price from the already-loaded series precisely because that read
 //! is safe here and nowhere near the decision path.
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
+use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::distribution::PriceDistribution;
@@ -115,8 +116,18 @@ pub struct ModelEval {
     pub crps_model: f64,
     pub crps_null: f64,
     /// `1 − crps_model/crps_null`: positive iff the model beats the null. The
-    /// headline number — the null-beating gate the tuning is judged against.
+    /// headline number — read it with its interval.
     pub crps_skill: f64,
+    /// 95 % interval on `crps_skill` from a bootstrap over **weekly blocks**.
+    /// Forecasts inside one week share most of a seven-day horizon, so they are
+    /// nearly one bet; resampling them one by one reports an interval several
+    /// times too narrow. The validation gate reads the lower bound: a skill whose
+    /// interval includes zero has not been shown to beat the null. (August's
+    /// +0.0133, once taken as validated, was [−0.009, +0.031].)
+    pub crps_skill_interval: [f64; 2],
+    /// Weekly blocks the interval resamples — its effective sample size, far
+    /// smaller than `forecasts`.
+    pub weeks: usize,
     /// Fraction of outcomes that fell inside the central 50/80/90% intervals. A
     /// calibrated model matches the nominal level (0.50/0.80/0.90).
     pub coverage_50: f64,
@@ -134,6 +145,45 @@ pub struct ModelEval {
     pub directional_hit_rate: f64,
 }
 
+/// Bootstrap resamples behind `crps_skill_interval`. The generator is seeded, so
+/// a report reproduces to the digit.
+const BOOTSTRAP_REPS: usize = 2000;
+
+/// Resample whole weeks (Monday-start, UTC) with replacement and read the 2.5th
+/// and 97.5th percentiles of the resampled skill.
+fn skill_interval(records: &[ForecastRecord]) -> ([f64; 2], usize) {
+    let mut weeks: BTreeMap<NaiveDate, (f64, f64)> = BTreeMap::new();
+    for r in records {
+        let day = r.ts.date_naive();
+        let monday = day - Duration::days(i64::from(day.weekday().num_days_from_monday()));
+        let week = weeks.entry(monday).or_default();
+        week.0 += r.model_crps;
+        week.1 += r.null_crps;
+    }
+    let blocks: Vec<(f64, f64)> = weeks.into_values().collect();
+    // splitmix64: a few lines, and no dependency for a resampling index.
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut next = || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    let mut skills: Vec<f64> = (0..BOOTSTRAP_REPS)
+        .map(|_| {
+            let (model, null) = (0..blocks.len()).fold((0.0, 0.0), |(m, n), _| {
+                let (bm, bn) = blocks[(next() % blocks.len() as u64) as usize];
+                (m + bm, n + bn)
+            });
+            if null > 0.0 { 1.0 - model / null } else { 0.0 }
+        })
+        .collect();
+    skills.sort_by(f64::total_cmp);
+    let at = |q: f64| skills[((BOOTSTRAP_REPS - 1) as f64 * q).round() as usize];
+    ([at(0.025), at(0.975)], blocks.len())
+}
+
 impl ModelEval {
     /// `None` for an empty set (no scored forecasts, e.g. a staged run).
     pub fn from_records(records: &[ForecastRecord]) -> Option<Self> {
@@ -149,6 +199,8 @@ impl ModelEval {
         } else {
             0.0
         };
+
+        let (crps_skill_interval, weeks) = skill_interval(records);
 
         let coverage = |level: f64| {
             records.iter().filter(|r| r.covers(level) == Some(true)).count() as f64 / n
@@ -191,6 +243,8 @@ impl ModelEval {
             crps_model,
             crps_null,
             crps_skill,
+            crps_skill_interval,
+            weeks,
             coverage_50: coverage(0.50),
             coverage_80: coverage(0.80),
             coverage_90: coverage(0.90),
@@ -474,6 +528,45 @@ mod tests {
     #[test]
     fn scorer_eval_needs_enough_records_to_fill_deciles() {
         assert!(ScorerEval::from_records(&scorer_records(|i| i as f64)[..9]).is_none());
+    }
+
+    /// Forecasts in one week are one block: a skill that is strong in one week
+    /// and reversed in another has an interval spanning zero however many
+    /// forecasts each week holds, and a steady one does not.
+    #[test]
+    fn the_skill_interval_resamples_weeks_not_forecasts() {
+        let record = |day: u32, model: f64, null: f64| {
+            let mut r = ForecastRecord::score(
+                Utc.with_ymd_and_hms(2026, 8, day, 15, 0, 0).unwrap(),
+                "T",
+                NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
+                100.0,
+                100.0,
+                None,
+                0.02,
+                features(100.0),
+                &dist(vec![99.0, 101.0], vec![1.0, 1.0]),
+                &dist(vec![99.0, 101.0], vec![1.0, 1.0]),
+                100.0,
+            );
+            r.model_crps = model;
+            r.null_crps = null;
+            r
+        };
+        // Weeks of Aug 3 and Aug 10, 500 forecasts each, opposite verdicts.
+        let split: Vec<_> = (0..500)
+            .map(|_| record(4, 0.8, 1.0))
+            .chain((0..500).map(|_| record(11, 1.2, 1.0)))
+            .collect();
+        let eval = ModelEval::from_records(&split).unwrap();
+        assert_eq!(eval.weeks, 2);
+        assert!(eval.crps_skill.abs() < 1e-9);
+        let [lo, hi] = eval.crps_skill_interval;
+        assert!(lo < -0.1 && hi > 0.1, "[{lo}, {hi}]");
+
+        let steady: Vec<_> = [4, 11, 18].iter().map(|&d| record(d, 0.9, 1.0)).collect();
+        let [lo, hi] = ModelEval::from_records(&steady).unwrap().crps_skill_interval;
+        assert!((lo - 0.1).abs() < 1e-9 && (hi - 0.1).abs() < 1e-9, "[{lo}, {hi}]");
     }
 
     #[test]

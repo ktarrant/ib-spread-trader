@@ -3,6 +3,11 @@
   "dataset": "2026-08-21",
   "horizon_days": 7.0,
   "crps_skill": 0.013303194053246203,
+  "crps_skill_interval": [
+    -0.008681299696446043,
+    0.03130951391084924
+  ],
+  "weeks": 10,
   "pit_error": 0.10173717226958341,
   "coverage_50": 0.531928582917806,
   "coverage_80": 0.8100369953353708,
@@ -11,6 +16,6 @@
   "loso_min_dir_hit": 0.4709193245778612,
   "loso_symbols_passing": 9,
   "loso_symbols_total": 12,
-  "passed": true,
-  "evaluated_at": "2026-09-01T05:32:42.086699Z"
+  "passed": false,
+  "evaluated_at": "2026-09-26T19:05:18.297599Z"
 }

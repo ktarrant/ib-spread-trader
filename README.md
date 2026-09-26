@@ -26,7 +26,7 @@ cargo run -- chain --symbol SPY --expiry 2026-08-21 \
                    --at 2026-08-19T15:00:00+00:00          # one resolved ladder
 cargo run -- backtest --config strategies/mean_reversion.toml --out out/
 python3 scripts/compare_strategies.py
-python3 scripts/validate_model.py strategies/mean_reversion.toml
+python3 scripts/validate_model.py mean-reversion --dataset 2026-10-16
 ```
 
 Every subcommand prints JSON to stdout and nothing else, so it pipes into `jq`.

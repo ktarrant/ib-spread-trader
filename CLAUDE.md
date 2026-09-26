@@ -1244,10 +1244,14 @@ inside an inline block still names the misspelled key instead of the enum.
 Labels resolve under `CARGO_MANIFEST_DIR`, so they follow the **source tree**, not
 the working directory — a binary copied elsewhere still reads this repo's blocks.
 
-`models/<label>.json` records the forecast gate (CRPS skill, PIT calibration,
-coverage, direction, and per-symbol robustness). `rankers/<label>.json` records
-candidate Spearman and decile monotonicity paired with a model label. Regenerate
-them with `scripts/validate_model.py` and `scripts/validate_ranker.py`. The gate
+`models/<label>/<dataset>.json` records the forecast gate (CRPS skill **and its
+weekly-block interval**, PIT calibration, coverage, direction, and per-symbol
+robustness) — one record per dataset, so a second dataset adds evidence rather
+than overwriting the first. `rankers/<label>/<dataset>.json` records candidate
+Spearman and decile monotonicity paired with a model label. Regenerate them with
+`scripts/validate_model.py <label> --dataset <dataset>` (no strategy file: one
+rendered run gives the pooled and per-symbol evals) and
+`scripts/validate_ranker.py <strategy> --dataset <dataset>`. The gate
 lives in `src/model/validation.rs` and the drivers repeat its thresholds, so
 `every_checked_in_record_still_earns_its_verdict` recomputes every record's
 verdict in `cargo test` — a record whose thresholds have drifted fails there
@@ -1393,6 +1397,21 @@ are the reversion regime, momentum needs weeks-to-months. Two companion findings
 horizon is deliberately short and, via the guard in `validate()`, must stay ≤ the
 entry blackout so a scored entry always gets the full horizon.
 
+**Correction, 2026-09-26: that edge was never established.** The gate then read
+the point estimate. Forecasts inside one week share most of a seven-day horizon,
+so they are nearly one bet, and `model_eval` now carries a **weekly-block
+bootstrap interval** (`crps_skill_interval`, over `weeks` blocks). Read that way,
++0.013 is [−0.009, +0.031] over 10 weeks; it came mostly from AMD and MSTR
+(−0.0017 on the ten symbols common to August and October); and October scores
+−0.0095 [−0.026, +0.006]. The gate now requires the interval's **lower bound**
+above zero, and **no model in the registry passes on either month** —
+`mean-reversion-14d` on October is significantly *worse* than the null. The
+ranker records, by contrast, hold (Spearman 0.38–0.45 August, 0.52–0.56
+October): ordering candidates within a bar works even where direction does not.
+BACKLOG.md records the resulting reframe — forecast move *size* against the
+option market's price for it, not direction. Every directional finding in this
+file predates the interval; re-check it against the gate before relying on it.
+
 The null-beating gate is the floor: a config that cannot beat a random walk
 out-of-sample is not a better forecaster, whatever P&L it posted. And the converse
 holds too — mean-reversion is adopted on its **forecast** merit, not its backtest
@@ -1437,10 +1456,11 @@ validation records. Re-running any of them is a four-line strategy file.
 **14-day credit spreads are on hold.** Not because the idea failed — the vol
 scaling held and a model cleared the gate — but because the pass rested on a
 single held-out symbol from a search over one snapshot, which is a question about
-data rather than about modelling. `models/mean-reversion-14d-slow.json` and
-`mean-reversion-14d.json` are kept exactly so a second expiry can re-run
-`scripts/validate_model.py` against the same labels and see whether the result
-survives out of period.
+data rather than about modelling. The second expiry answered it: re-run under
+the interval gate, `mean-reversion-14d-slow` is −0.0065 [−0.016, +0.003] on
+October and `mean-reversion-14d` −0.0048 [−0.009, −0.0003] — worse than the
+null. Neither survives out of period, and neither passes on August either once
+the interval is read.
 
 `scripts/compare_strategies.py` runs them all and tabulates the forecast headline
 (CRPS skill, directional hit-rate) beside the trade guardrail (return, drawdown,

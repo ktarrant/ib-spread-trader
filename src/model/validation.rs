@@ -3,7 +3,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// A forecast must beat its random-walk null, not merely match it.
+/// A forecast must beat its random-walk null, not merely match it — and the gate
+/// applies this to the **lower bound** of the weekly-block interval, not the
+/// point estimate, so a skill within noise of zero does not pass.
 pub const MIN_CRPS_SKILL: f64 = 0.0;
 /// Direction must beat a coin flip on the dense forecast sample.
 pub const MIN_DIRECTIONAL_HIT_RATE: f64 = 0.5;
@@ -16,7 +18,9 @@ pub const MIN_LOSO_PASS_FRACTION: f64 = 0.66;
 /// adjacent reversals in this short dataset.
 pub const MIN_DECILE_MONOTONICITY: f64 = 0.5;
 
-/// The evidence attached to a labeled price model on one dataset.
+/// The evidence attached to a labeled price model on one dataset. Checked in at
+/// `models/<label>/<dataset>.json`, one per dataset, so a second dataset adds
+/// evidence rather than overwriting the first.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidationRecord {
@@ -24,6 +28,10 @@ pub struct ValidationRecord {
     pub dataset: String,
     pub horizon_days: f64,
     pub crps_skill: f64,
+    /// 95 % weekly-block bootstrap interval on `crps_skill`; see `ModelEval`.
+    pub crps_skill_interval: [f64; 2],
+    /// Weekly blocks behind the interval.
+    pub weeks: usize,
     pub pit_error: f64,
     pub coverage_50: f64,
     pub coverage_80: f64,
@@ -42,7 +50,7 @@ impl ValidationRecord {
     pub fn passes_gate(&self) -> bool {
         let required_loso =
             (MIN_LOSO_PASS_FRACTION * self.loso_symbols_total as f64).ceil() as usize;
-        self.crps_skill > MIN_CRPS_SKILL
+        self.crps_skill_interval[0] > MIN_CRPS_SKILL
             && self.directional_hit_rate > MIN_DIRECTIONAL_HIT_RATE
             && self.pit_error < MAX_PIT_CALIBRATION_ERROR
             && self.loso_symbols_total > 0
@@ -55,7 +63,8 @@ impl ValidationRecord {
 }
 
 /// Scorer discrimination is meaningful only for the model whose forecast it
-/// ranked, so every ranker record names that model explicitly.
+/// ranked, so every ranker record names that model explicitly. Checked in at
+/// `rankers/<label>/<dataset>.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RankerValidationRecord {
@@ -88,6 +97,8 @@ mod tests {
             dataset: "2026-08-21".into(),
             horizon_days: 7.0,
             crps_skill: 0.01,
+            crps_skill_interval: [0.002, 0.018],
+            weeks: 10,
             pit_error: 0.10,
             coverage_50: 0.50,
             coverage_80: 0.80,
@@ -107,8 +118,8 @@ mod tests {
         assert!(record.passes_gate(), "8/12 clears ceil(0.66 * 12)");
 
         let mut failed = record.clone();
-        failed.crps_skill = 0.0;
-        assert!(!failed.passes_gate(), "matching the null is not enough");
+        failed.crps_skill_interval[0] = -0.001;
+        assert!(!failed.passes_gate(), "a skill within noise of zero is not enough");
 
         let mut failed = record.clone();
         failed.directional_hit_rate = 0.5;
@@ -130,56 +141,71 @@ mod tests {
     #[test]
     fn every_checked_in_record_still_earns_its_verdict() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut models = 0;
-        for entry in std::fs::read_dir(root.join("models")).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_none_or(|ext| ext != "json") {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).unwrap();
-            let record: ValidationRecord = serde_json::from_str(&text)
-                .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
-            assert_eq!(
-                record.passed,
-                record.passes_gate(),
-                "{} records a verdict the gate does not reproduce",
-                path.display()
-            );
-            models += 1;
-        }
+        let models: usize = records(&root.join("models"))
+            .map(|(label, dataset, text)| {
+                let record: ValidationRecord = serde_json::from_str(&text)
+                    .unwrap_or_else(|err| panic!("{label}/{dataset}: {err}"));
+                assert_eq!((record.label.as_str(), record.dataset.as_str()), (&*label, &*dataset));
+                assert_eq!(
+                    record.passed,
+                    record.passes_gate(),
+                    "{label}/{dataset} records a verdict the gate does not reproduce"
+                );
+            })
+            .count();
         assert!(models >= 2, "expected the model registry, found {models}");
 
-        let mut rankers = 0;
-        for entry in std::fs::read_dir(root.join("rankers")).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_none_or(|ext| ext != "json") {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).unwrap();
-            let record: RankerValidationRecord = serde_json::from_str(&text)
-                .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
-            assert_eq!(
-                record.passed,
-                record.passes_gate(),
-                "{} records a verdict the gate does not reproduce",
-                path.display()
-            );
-            rankers += 1;
-        }
+        let rankers: usize = records(&root.join("rankers"))
+            .map(|(label, dataset, text)| {
+                let record: RankerValidationRecord = serde_json::from_str(&text)
+                    .unwrap_or_else(|err| panic!("{label}/{dataset}: {err}"));
+                assert_eq!((record.label.as_str(), record.dataset.as_str()), (&*label, &*dataset));
+                assert_eq!(
+                    record.passed,
+                    record.passes_gate(),
+                    "{label}/{dataset} records a verdict the gate does not reproduce"
+                );
+            })
+            .count();
         assert!(rankers >= 1, "expected the ranker registry, found {rankers}");
     }
 
-    /// The two labeled models are the gate's worked example in both directions:
-    /// the mean-reversion drift clears it, the random-walk null does not.
+    /// Every `<registry>/<label>/<dataset>.json`, as (label, dataset, text).
+    fn records(registry: &std::path::Path) -> impl Iterator<Item = (String, String, String)> {
+        let dirs = std::fs::read_dir(registry).unwrap().map(|e| e.unwrap().path());
+        dirs.filter(|dir| dir.is_dir()).flat_map(|dir| {
+            let label = dir.file_name().unwrap().to_string_lossy().into_owned();
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
+                .map(move |p| {
+                    let dataset = p.file_stem().unwrap().to_string_lossy().into_owned();
+                    (label.clone(), dataset, std::fs::read_to_string(&p).unwrap())
+                })
+                .collect::<Vec<_>>()
+        })
+    }
+
+    /// The mean-reversion drift was labeled on a point estimate of +0.0133. Read
+    /// with its weekly-block interval it does not pass on either month, and the
+    /// random-walk null never could — the gate's worked example, both ways.
     #[test]
-    fn the_shipped_model_registry_records_a_pass_and_the_null_a_fail() {
+    fn the_directional_model_does_not_clear_the_interval_gate() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("models");
-        for (label, expected) in [("mean-reversion", true), ("driftless", false)] {
-            let text = std::fs::read_to_string(root.join(format!("{label}.json"))).unwrap();
+        for (label, dataset) in [
+            ("mean-reversion", "2026-08-21"),
+            ("mean-reversion", "2026-10-16"),
+            ("driftless", "2026-08-21"),
+        ] {
+            let path = root.join(label).join(format!("{dataset}.json"));
+            let text = std::fs::read_to_string(&path).unwrap();
             let record: ValidationRecord = serde_json::from_str(&text).unwrap();
-            assert_eq!(record.label, label);
-            assert_eq!(record.passes_gate(), expected, "{label}");
+            assert!(!record.passes_gate(), "{label}/{dataset}");
         }
+        let august = std::fs::read_to_string(root.join("mean-reversion/2026-08-21.json")).unwrap();
+        let august: ValidationRecord = serde_json::from_str(&august).unwrap();
+        assert!(august.crps_skill > 0.0 && august.crps_skill_interval[0] < 0.0);
     }
 
     #[test]

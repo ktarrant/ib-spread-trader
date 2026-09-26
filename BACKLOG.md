@@ -6,38 +6,66 @@ this file when it lands, and the commit says so.
 
 Each item: what, why, and anything already known that shapes it.
 
-## Next — October is in (2026-09-26 capture)
+## Direction: a vol-timing model, not a direction model (decided 2026-09-26)
 
-- **The model failed out of period** (CLAUDE.md, *Three cadences*): skill
-  −0.0095, 5/15 symbols. Before tuning anything, look at *why* — the regime
-  (another rising sample), the new cohort (XOM, GS, BA, UBER, NFLX are not the
-  names it was validated on), or the edge itself. Compare on the 9 symbols
-  common to both months first.
-- **A 15-minute model.** All future captures are 15-minute, so re-validation at
-  that cadence is inevitable: a model label with `cadence_minutes = 15`, periods
-  doubled (trend 20/60, RSI 28, ATR 28, `iv_median_lookback` 400,
-  `bars_per_year` 6552) as the like-for-like starting point, then the sweep.
+The directional drift has no demonstrated edge: August's +0.0133 CRPS skill had a
+95 % weekly-block interval of [−0.009, +0.031], came from AMD and MSTR (−0.0017 on
+the ten symbols common to both months), and October scores −0.0095. What *is*
+consistent across both months is about move **size relative to the option
+market's price for it**: moves beat the ATM-IV-implied move when earnings fall
+inside the horizon (+0.13 / +0.14 correlation), and index ETFs move less than
+implied (realized ÷ implied 0.58–0.92). So the model's job becomes forecasting
+**realized ÷ implied move** — when the market underprices a move, buy premium;
+when it overprices one, sell defined-risk premium — with no view on direction.
+
+The calc side now captures **several expiries per symbol every week**, which is
+what this needs: the market's own event-implied move lives in the IV *difference*
+between a near weekly and the monthly, and the earnings effect above is partly
+our crude benchmark (monthly IV scaled to 7 days) rather than a mispricing.
+
+- **Phase 0 — an honest yardstick.** Done: `model_eval` carries a weekly-block
+  interval, the gate reads its lower bound, records live at
+  `models/<label>/<dataset>.json`. No model passes on either month. Left open:
+  the ranker gate has no interval yet (its Spearman is pooled over candidates,
+  and holds at 0.38–0.56 on both months), and a rule for what "labeled" means
+  across several datasets (every record passes? the latest?).
+- **Phase 1 — the vol-timing model.** A driftless `PriceModel` whose width is
+  ATM IV × a forecast realized ÷ implied ratio. Inputs to test, each on both
+  months with intervals: earnings inside the horizon, index-ETF flag, realized
+  vol from the 5-minute tape over 1/5/22 days (the logged `realized_vol` is only
+  ~10 hours of 30-minute bars), and the **IV term structure** across the weekly
+  expiries — near-over-far ATM IV, and the event-implied move it implies. CRPS
+  skill against the IV null measures this directly once the width differs from
+  IV. Validate at the 15-minute cadence from the start (all captures are 15-min
+  now): trend 20/60, RSI 28, ATR 28, `iv_median_lookback` 400, `bars_per_year`
+  6552 as the like-for-like periods.
+- **Phase 2 — direction-neutral structures.** Straddles and strangles (long
+  vol), iron condors and butterflies (short vol) in `enumerate_verticals`' place
+  or beside it. `payoff_bounds` already handles any same-expiry legs; the fill
+  model crosses every leg, and a condor's four crossings are the hurdle the
+  forecast has to clear.
+- **Phase 3 — vol-aware exits.** Long vol closes after the event or once the
+  move has happened; short vol holds to its horizon. The directional give-ups
+  (forecast target/stop) do not transfer.
+- The existing directional work (RSI gates, 14-day models, trend sweeps) stays
+  in git and CLAUDE.md as history; re-check any of it against the Phase 0 gate
+  before relying on it.
+
+## Also next
+
 - **The viz cannot see 15-minute chains**: `catalog.py`, `frames.BAR_SIZE` and
   `backtest.underlying_bars` all read `30min`. The report's new `bar_minutes`
   tells it which grid a run used.
-- **calc's `--bar-size` default is `15min`** — fine now that 15 is the intended
-  grid, but the weekly script passes `30min`; they should agree.
-- **Scripts do not understand `expiries`.** `validate_model.py` and
-  `validate_ranker.py` read `expiry` with a regex and fail on a list;
-  `sweep_model.py` hard-codes `dataset = "2026-08-21"`. Parse TOML with
-  `tomllib` (stdlib) rather than regex while there. Default them to the release
-  binary (a full backtest is ~12 s release).
+- **calc's weekly script passes `--bar-size 30min`**, while 15 is now the grid;
+  they should agree.
+- **The validation scripts read a dataset's `expiry`** and fail on an
+  `expiries` list.
 
 ## Record keeping for models, rankers and backtests (to examine)
 
 The registry and the run outputs were designed for one dataset, and several gaps
 show up the moment there are two:
 
-- **Validation records are one per label** (`models/<label>.json`), so validating
-  on October overwrites the August evidence — the exact out-of-period comparison
-  the 14-day models were kept for. Records likely want to be keyed by
-  (label, dataset), with the gate applied per record and a rule for what
-  "labeled" means across several (all pass? the most recent?).
 - **A backtest does not say what it ran on.** `backtest.json` has no snapshot path
   or date, no git commit, and `out/<name>/` is overwritten each run. With weekly
   snapshots, two runs of the same strategy can differ silently. Candidates:

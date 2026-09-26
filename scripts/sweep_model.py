@@ -32,7 +32,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BINARY = ROOT / "target" / "debug" / "ib-spread-trader"
+DEFAULT_BINARY = ROOT / "target" / "release" / "ib-spread-trader"
 
 # Held fixed across the grid: the vol blend and grid that the shipped models use.
 BASE_MODEL = {
@@ -64,12 +64,13 @@ def parse_args() -> argparse.Namespace:
         metavar="FIELD=V1,V2",
         help="a model or feature field and the values to try; repeat to build a grid",
     )
+    parser.add_argument("--dataset", default="2026-08-21", help="a label under datasets/")
     parser.add_argument("--db", type=Path)
     parser.add_argument("--binary", type=Path, default=DEFAULT_BINARY)
     return parser.parse_args()
 
 
-def render(model: dict, features: dict, horizon: float) -> str:
+def render(model: dict, features: dict, horizon: float, dataset: str) -> str:
     def table(name: str, fields: dict) -> str:
         body = "\n".join(f"{k} = {json.dumps(v)}" for k, v in fields.items())
         return f"[{name}]\n{body}\n"
@@ -78,7 +79,7 @@ def render(model: dict, features: dict, horizon: float) -> str:
     blackout = max(8, int(horizon + 0.999))
     return (
         'name = "sweep"\nmode = "ranked"\n'
-        'portfolio = "equal_weight_1"\nexit = "base"\ndataset = "2026-08-21"\n\n'
+        f'portfolio = "equal_weight_1"\nexit = "base"\ndataset = "{dataset}"\n\n'
         "[execution]\ntiming = \"next_bar\"\nearnings_blackout_days = 3\n"
         f"min_entry_days_before_expiry = {blackout}\n\n"
         + table("features", features)
@@ -129,7 +130,7 @@ def main() -> None:
                     model[field] = value
             label = " ".join(f"{k}={v:g}" for k, v in assignment.items())
             config = temp / (label.replace(" ", "_").replace("=", "") + ".toml")
-            config.write_text(render(model, features, args.horizon))
+            config.write_text(render(model, features, args.horizon, args.dataset))
             print(f"  {label}", file=sys.stderr)
             pooled = run(args.binary, config, args.db)
             if pooled:
@@ -143,7 +144,7 @@ def main() -> None:
         f"{'cell':<{width}}{'crps skill':>12}{'dir%':>7}{'cov 50/80/90':>16}"
         f"{'PIT err':>9}{'PIT mean':>10}{'trades':>8}"
     )
-    print(f"\nhorizon {args.horizon:g}d, sorted by CRPS skill vs the random-walk null")
+    print(f"\n{args.dataset}, horizon {args.horizon:g}d, sorted by CRPS skill vs the random-walk null")
     print(header)
     print("-" * len(header))
     for label, p in rows:

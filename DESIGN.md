@@ -34,14 +34,17 @@ the seam: a richer model drops in without the ranker or portfolio changing.
 
 The validated main model is **mean-reversion** (`trend_weight = -0.5`, ATM-IV vol,
 one-week horizon): it beats a random-walk null (CRPS skill +0.013, 57% directional
-hit-rate, robust across 9/12 symbols under leave-one-symbol-out). `driftless`
+hit-rate, robust across 9/12 symbols under leave-one-symbol-out) — a claim
+since withdrawn: its weekly-block interval spans zero and it fails on October
+(see CLAUDE.md). `driftless`
 (`trend_weight = 0`) is the honest null it must beat.
 
 **Implemented.** The forecast horizon is owned and exposed by `PriceModel`, so a
 model label is `{features, weights, horizon}` and is evaluated at that exact
-horizon. `scripts/validate_model.py` writes `models/<label>.json`; a model is
-labeled only after it clears the forecast eval on a stated dataset:
-- **CRPS skill > 0** vs the random-walk null (the null-beating gate), and
+horizon. `scripts/validate_model.py` writes `models/<label>/<dataset>.json`; a
+model is labeled only after it clears the forecast eval on a stated dataset:
+- the **lower bound** of the weekly-block interval on CRPS skill > 0 vs the
+  random-walk null (the null-beating gate), and
 - calibration (PIT, 50/80/90 coverage) near nominal, and
 - a directional hit-rate materially above 50%, **and**
 - consistency under **leave-one-symbol-out** (not one or two lucky symbols).
@@ -80,7 +83,7 @@ monotonicity, via forward-priced counterfactual candidates). A labeled Ranker
 clears a scorer gate (e.g. Spearman > 0 and roughly monotone deciles) on a stated
 model + dataset. A Ranker label is only meaningful *paired with* a model — it
 scores that model's distribution. `scripts/validate_ranker.py` writes this paired
-record under `rankers/<label>.json`.
+record under `rankers/<label>/<dataset>.json`.
 
 ---
 
