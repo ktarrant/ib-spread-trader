@@ -118,22 +118,31 @@ fn main() -> Result<()> {
             let strategy_config = StrategyConfig::load(&config)?;
             let run_config = strategy_config.run_config()?;
 
-            // Load every symbol's series once, skipping those with no two-sided
+            // Load every symbol's chains once, skipping those with no two-sided
             // option bars (a zero-return run would dilute every real result).
-            let mut all_series = Vec::new();
+            let expiries = strategy_config.expiries()?;
+            let mut symbols: Vec<Vec<ChainSeries>> = Vec::new();
             let mut skipped = Vec::new();
+            let mut missing_chains = Vec::new();
             for symbol in &strategy_config.symbols {
-                let series = ChainSeries::load(&snapshot, symbol, strategy_config.expiry)?;
-                if series.is_empty() {
+                let mut chains = Vec::new();
+                for &expiry in &expiries {
+                    let series = ChainSeries::load(&snapshot, symbol, expiry)?;
+                    if series.is_empty() {
+                        missing_chains.push(format!("{symbol} {expiry}"));
+                    } else {
+                        chains.push(series);
+                    }
+                }
+                if chains.is_empty() {
                     skipped.push(symbol.clone());
                 } else {
-                    all_series.push(series);
+                    symbols.push(chains);
                 }
             }
-            if all_series.is_empty() {
+            if symbols.is_empty() {
                 bail!(
-                    "no symbol in the config has two-sided option bars for {}; try `catalog`",
-                    strategy_config.expiry
+                    "no symbol in the config has two-sided option bars for {expiries:?}; try `catalog`"
                 );
             }
 
@@ -142,11 +151,11 @@ fn main() -> Result<()> {
             // Both yield: the report, per-symbol runs (for the CSV logs), and the
             // equity curve to write.
             let (mut built, runs, curve) = if strategy_config.account_mode()? == AccountMode::Shared {
-                let mut strategies: Vec<engine::Strategy> = all_series
+                let mut strategies: Vec<engine::Strategy> = symbols
                     .iter()
                     .map(|_| strategy_config.strategy())
                     .collect::<anyhow::Result<_>>()?;
-                let shared = engine::run_shared(&all_series, &mut strategies, &run_config)?;
+                let shared = engine::run_shared(&symbols, &mut strategies, &run_config)?;
                 let built =
                     report::build_shared(&strategy_config.name, strategy_config.expiry, &shared);
                 let views = report::shared_views(
@@ -156,8 +165,9 @@ fn main() -> Result<()> {
                 );
                 (built, views, shared.equity_curve)
             } else {
+                // Single-expiry by validation: one chain per symbol.
                 let mut runs = Vec::new();
-                for series in &all_series {
+                for series in symbols.iter().flatten() {
                     // A fresh strategy per symbol: signals carry indicator state.
                     let mut strategy = strategy_config.strategy()?;
                     runs.push(engine::run_symbol(series, &mut strategy, &run_config)?);
@@ -166,6 +176,18 @@ fn main() -> Result<()> {
                 let curve = report::combined_curve(&runs);
                 (built, runs, curve)
             };
+            // A symbol with some chains but not all ran on what it had; say which.
+            let partial: Vec<&String> = missing_chains
+                .iter()
+                .filter(|chain| !skipped.iter().any(|s| chain.starts_with(&format!("{s} "))))
+                .collect();
+            if !partial.is_empty() {
+                built.caveats.push(format!(
+                    "{} chain(s) had no two-sided option bars and were not run: {}.",
+                    partial.len(),
+                    partial.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ")
+                ));
+            }
             if !skipped.is_empty() {
                 built.caveats.push(format!(
                     "{} symbol(s) had no two-sided option bars and were not run: {}.",

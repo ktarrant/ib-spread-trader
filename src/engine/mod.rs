@@ -19,7 +19,7 @@
 //! print. That P&L is reported apart from everything that closed on a quote.
 
 use anyhow::Result;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -27,8 +27,8 @@ use crate::data::{ChainSeries, ChainSnapshot, EarningsEvent, Quality};
 use crate::execution::{Costs, Reject, Selector};
 use crate::model::{
     Candidate, CandidateConfig, EarningsDistance, FeatureEngine, Features, ForecastRecord,
-    PriceDistribution, PriceModel, RankingConfig, RankingFunnel, ScorerRecord, enumerate_verticals,
-    rank, ranking_key,
+    PriceDistribution, PriceModel, RankingConfig, RankingFunnel, ScorerRecord, choice_key,
+    enumerate_verticals, rank, ranking_key,
 };
 use crate::portfolio::{
     AllocationCandidate, ExitReason, OpenPosition, Portfolio, PortfolioModel, PortfolioModelKind,
@@ -194,7 +194,7 @@ fn record_marks(
     out: &mut Vec<PositionMark>,
 ) {
     for p in &portfolio.open {
-        if p.spread.symbol != bar.symbol {
+        if p.spread.symbol != bar.symbol || p.expiry != bar.expiry {
             continue;
         }
         let Ok(credit) = crate::execution::exit_credit(&p.spread, bar) else {
@@ -225,10 +225,7 @@ fn entry_gate(
     let open_after_exits = open_positions - exiting;
     if open_after_exits >= config.max_open_positions {
         EntryGate::PositionLimit
-    } else if config
-        .min_entry_days_before_expiry
-        .is_some_and(|min_days| (expiry_instant - bar_ts).num_days() < min_days as i64)
-    {
+    } else if too_close_to_expiry(config, expiry_instant, bar_ts) {
         EntryGate::TooCloseToExpiry
     } else if config
         .earnings_blackout_days
@@ -248,6 +245,13 @@ fn entry_gate(
     } else {
         EntryGate::Open
     }
+}
+
+/// Whether a chain expiring at `expiry_instant` is too near to open a position in.
+fn too_close_to_expiry(config: &RunConfig, expiry_instant: DateTime<Utc>, ts: DateTime<Utc>) -> bool {
+    config
+        .min_entry_days_before_expiry
+        .is_some_and(|min_days| (expiry_instant - ts).num_days() < min_days as i64)
 }
 
 /// The feature readings the entry-timing gates consult. Grouped because they are
@@ -330,6 +334,8 @@ pub struct ForecastBounds {
 enum Intent {
     Open {
         spread: Spread,
+        /// The chain to fill in. Only that chain's bar quotes the legs.
+        expiry: NaiveDate,
         prediction: Option<TradePrediction>,
         bounds: ForecastBounds,
         /// Boxed: the payload is a diagnostic, and inlining it would make every
@@ -501,8 +507,7 @@ pub fn run_symbol(
             let ranked_ctx = match strategy {
                 Strategy::Ranked(ranked) => Some(ranked_observe(
                     ranked,
-                    series,
-                    &bar,
+                    &[(series, &bar)],
                     next_earnings,
                     &mut forecasts,
                 )),
@@ -521,12 +526,11 @@ pub fn run_symbol(
             // 4. Exits, with the forecast available to model-driven rules.
             let (exiting, synthetic_exiting) = compute_exits(
                 &portfolio,
-                &series.symbol,
                 &bar,
                 series.expiry_instant(),
                 next_earnings,
                 &config.exits,
-                ranked_ctx.as_ref(),
+                ranked_ctx.as_ref().map(|ctx| (ctx, 0)),
             );
 
             for (id, reason) in &synthetic_exiting {
@@ -582,6 +586,7 @@ pub fn run_symbol(
                                     Ok(spread) => {
                                         entering = Some(Intent::Open {
                                             spread,
+                                            expiry: bar.expiry,
                                             prediction: None,
                                             bounds: ForecastBounds::default(),
                                     entry_features: None,
@@ -607,8 +612,8 @@ pub fn run_symbol(
                         bar.ts,
                         next_earnings,
                         EntryTiming {
-                            rsi: ctx.rsi,
-                            bars_since_rsi_cross_up: ctx.bars_since_rsi_cross_up,
+                            rsi: ctx.features.rsi,
+                            bars_since_rsi_cross_up: ctx.features.bars_since_rsi_cross_up,
                         },
                     ) {
                         EntryGate::PositionLimit => census.at_position_limit += 1,
@@ -617,12 +622,11 @@ pub fn run_symbol(
                                 EntryGate::RsiOutOfBand => census.rsi_out_of_band += 1,
                                 EntryGate::NoRecentRsiCross => census.no_recent_rsi_cross += 1,
                         EntryGate::Open => {
-                            if let Some((choice, bounds)) = ranked_choose(
+                            if let Some((choice, bounds, expiry)) = ranked_choose(
                                 ranked,
-                                series,
-                                &bar,
-                                config,
                                 ctx,
+                                &[(0, series, &bar)],
+                                config,
                                 &mut census,
                                 &mut scorer_records,
                             ) {
@@ -634,7 +638,7 @@ pub fn run_symbol(
                                         AllocationCandidate {
                                             score: choice.score,
                                             one_lot_max_loss: choice.candidate.max_loss,
-                                            iv_vs_median: ctx.iv_vs_median,
+                                            iv_vs_median: ctx.features.iv_vs_median,
                                         },
                                         PortfolioState::new(
                                             config.initial_cash,
@@ -662,6 +666,7 @@ pub fn run_symbol(
                                     };
                                     entering = Some(Intent::Open {
                                         spread,
+                                        expiry,
                                         prediction: Some(prediction),
                                         bounds,
                                     entry_features: Some(Box::new(ctx.entry_features)),
@@ -781,7 +786,8 @@ pub struct SymbolDiag {
 /// for the whole account, with per-symbol diagnostics beside them.
 pub struct SharedRun {
     pub strategy: String,
-    pub expiry: chrono::NaiveDate,
+    /// Every expiry any symbol traded, ascending.
+    pub expiries: Vec<NaiveDate>,
     pub initial_cash: f64,
     pub final_equity: f64,
     pub portfolio: Portfolio,
@@ -808,12 +814,19 @@ fn open_score(intent: &Intent) -> f64 {
 /// **best-score-first** and sized at fill against the capital still free, so the
 /// whole account — not each symbol — is what `initial_cash` bounds. A per-symbol
 /// cap keeps it from piling into one name. Next-bar timing throughout.
+///
+/// `symbols[i]` is every chain of one symbol, ascending by expiry. The symbol's
+/// features are read once per bar, each chain is ranked against the forecast
+/// capped at its own expiry, and the best candidate across them opens — so
+/// different positions sit in different expiries. A position is never rolled:
+/// it is marked, exited and closed only in its own chain, and settles at its
+/// own expiry while the run carries on.
 pub fn run_shared(
-    all_series: &[ChainSeries],
+    symbols: &[Vec<ChainSeries>],
     strategies: &mut [Strategy],
     config: &RunConfig,
 ) -> Result<SharedRun> {
-    let n = all_series.len();
+    let n = symbols.len();
     let mut portfolio = Portfolio::new(config.initial_cash);
     let mut census: Vec<Census> = (0..n).map(|_| Census::default()).collect();
     let mut pending: Vec<Vec<Intent>> = (0..n).map(|_| Vec::new()).collect();
@@ -825,19 +838,24 @@ pub fn run_shared(
     // pos id -> the opening symbol's own bar index, for a per-symbol held count.
     let mut opened_at_index: BTreeMap<usize, usize> = BTreeMap::new();
     // pos id -> last mark, so the account curve can value a position between the
-    // sparse bars of its own symbol.
+    // sparse bars of its own chain.
     let mut marks: BTreeMap<usize, f64> = BTreeMap::new();
     let mut sym_bars: Vec<usize> = vec![0; n];
     let mut equity_curve: Vec<EquityPoint> = Vec::new();
 
-    // Merged, ordered global timeline: (ts, symbol_idx, option_index?).
-    let mut global: Vec<(DateTime<Utc>, usize, Option<usize>)> = Vec::new();
-    for (si, series) in all_series.iter().enumerate() {
-        for &(ts, oi) in series.merged_timeline().iter() {
-            global.push((ts, si, oi));
+    // Merged, ordered global timeline: (ts, symbol, chain, option_index?). The
+    // stock-only bars are one tape per symbol, so they come from its first chain.
+    let mut global: Vec<(DateTime<Utc>, usize, usize, Option<usize>)> = Vec::new();
+    for (si, chains) in symbols.iter().enumerate() {
+        for (ci, series) in chains.iter().enumerate() {
+            for (ts, oi) in series.merged_timeline() {
+                if ci == 0 || oi.is_some() {
+                    global.push((ts, si, ci, oi));
+                }
+            }
         }
     }
-    global.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    global.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
 
     // One position's mark: exit credit net of commission, else held at entry
     // cost — the same rule as `Portfolio::equity`, applied per position.
@@ -856,37 +874,62 @@ pub fn run_shared(
             end += 1;
         }
 
-        // Option bars at this timestamp, each with its snapshot; advance the
-        // per-symbol bar counter so held/bars are measured in that symbol's own
-        // bars, not global steps.
-        let mut option_bars: Vec<(usize, ChainSnapshot)> = Vec::new();
-        for &(_, si, oi) in &global[idx..end] {
+        // 0. A chain that expired before this instant settles its survivors
+        //    first, freeing their capital for anything that fills now.
+        settle_expired(
+            symbols,
+            &mut portfolio,
+            &mut marks,
+            &mut equity_curve,
+            &sym_bars,
+            &opened_at_index,
+            Some(ts),
+        );
+
+        // Option bars at this timestamp, by symbol then expiry. A symbol's bar
+        // counter advances once per timestamp however many of its chains quote,
+        // so held/bars are measured in that symbol's own bars.
+        let mut option_bars: Vec<(usize, usize, ChainSnapshot)> = Vec::new();
+        for &(_, si, ci, oi) in &global[idx..end] {
             if let Some(index) = oi
-                && let Some(bar) = all_series[si].snapshot(index)
+                && let Some(bar) = symbols[si][ci].snapshot(index)
             {
-                sym_bars[si] += 1;
-                option_bars.push((si, bar));
+                if option_bars.last().is_none_or(|(s, ..)| *s != si) {
+                    sym_bars[si] += 1;
+                }
+                option_bars.push((si, ci, bar));
             }
         }
+        // The bar a position or an order trades against: its own chain's.
+        let bar_in = |si: usize, expiry: NaiveDate| {
+            option_bars
+                .iter()
+                .find(|(s, _, bar)| *s == si && bar.expiry == expiry)
+                .map(|(.., bar)| bar)
+        };
+        let mut quoting: Vec<usize> = option_bars.iter().map(|&(si, ..)| si).collect();
+        quoting.dedup();
 
         // 1a. Execute due CLOSES per symbol (frees capital), and collect the due
         //     OPENS across symbols for best-first funding.
         let mut open_queue: Vec<(usize, Intent)> = Vec::new();
-        for (si, bar) in &option_bars {
-            for intent in std::mem::take(&mut pending[*si]) {
+        for &si in &quoting {
+            for intent in std::mem::take(&mut pending[si]) {
                 match intent {
                     Intent::Close { id, reason } => {
-                        let held = sym_bars[*si]
-                            .saturating_sub(opened_at_index.get(&id).copied().unwrap_or(sym_bars[*si]));
-                        if portfolio
-                            .close(id, bar, &config.costs, reason, held)
-                            .is_err()
-                        {
-                            census[*si].unfillable_intents += 1;
+                        let Some(expiry) = portfolio.position(id).map(|p| p.expiry) else {
+                            continue; // already closed
+                        };
+                        let held = sym_bars[si]
+                            .saturating_sub(opened_at_index.get(&id).copied().unwrap_or(sym_bars[si]));
+                        match bar_in(si, expiry) {
+                            Some(bar) if portfolio.close(id, bar, &config.costs, reason, held).is_ok() => {
+                                marks.remove(&id);
+                            }
+                            _ => census[si].unfillable_intents += 1,
                         }
-                        marks.remove(&id);
                     }
-                    open => open_queue.push((*si, open)),
+                    open => open_queue.push((si, open)),
                 }
             }
         }
@@ -898,10 +941,14 @@ pub fn run_shared(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         for (si, intent) in open_queue {
-            let Some((_, bar)) = option_bars.iter().find(|(s, _)| *s == si) else {
+            let Intent::Open { expiry, .. } = &intent else {
+                unreachable!("closes were executed above");
+            };
+            let Some(bar) = bar_in(si, *expiry) else {
+                census[si].unfillable_intents += 1;
                 continue;
             };
-            let symbol = &all_series[si].symbol;
+            let symbol = &bar.symbol;
             let in_symbol = portfolio
                 .open
                 .iter()
@@ -929,25 +976,20 @@ pub fn run_shared(
             }
         }
 
-        // 2. Mark every symbol's positions against its bar (also updating each
+        // 2. Mark every chain's positions against its bar (also updating each
         //    position's running peak for the trailing stop), then record one
         //    account equity point for this timestamp.
-        for (si, bar) in &option_bars {
+        for (si, _, bar) in &option_bars {
             portfolio.update_peaks(bar, &config.costs);
             record_marks(&portfolio, bar, config, &mut position_marks[*si]);
         }
-        for (si, bar) in &option_bars {
-            let symbol = &all_series[*si].symbol;
-            let ids: Vec<usize> = portfolio
+        for (.., bar) in &option_bars {
+            for pos in portfolio
                 .open
                 .iter()
-                .filter(|p| &p.spread.symbol == symbol)
-                .map(|p| p.id)
-                .collect();
-            for id in ids {
-                if let Some(pos) = portfolio.open.iter().find(|p| p.id == id) {
-                    marks.insert(id, mark_of(pos, bar));
-                }
+                .filter(|p| p.spread.symbol == bar.symbol && p.expiry == bar.expiry)
+            {
+                marks.insert(pos.id, mark_of(pos, bar));
             }
         }
         if !option_bars.is_empty() {
@@ -961,72 +1003,92 @@ pub fn run_shared(
 
         // 3. Decide per symbol: exits (queue real closes, execute synthetic) then
         //    the entry, queued for that symbol's next option bar.
-        for (si, bar) in &option_bars {
-            let series = &all_series[*si];
-            let next_earnings = series.next_earnings_from(bar.ts.date_naive());
+        for &si in &quoting {
+            let chains: Vec<(&ChainSeries, &ChainSnapshot)> = option_bars
+                .iter()
+                .filter(|(s, ..)| *s == si)
+                .map(|(_, ci, bar)| (&symbols[si][*ci], bar))
+                .collect();
+            let next_earnings = symbols[si][0].next_earnings_from(ts.date_naive());
             // Advance the forecast first so exits can read it (live POP, momentum).
-            let ranked_ctx = match &mut strategies[*si] {
-                Strategy::Ranked(ranked) => {
-                    Some(ranked_observe(ranked, series, bar, next_earnings, &mut forecasts[*si]))
-                }
+            let ranked_ctx = match &mut strategies[si] {
+                Strategy::Ranked(ranked) => Some(ranked_observe(
+                    ranked,
+                    &chains,
+                    next_earnings,
+                    &mut forecasts[si],
+                )),
                 Strategy::Staged(_) => None,
             };
-            let (mut exiting, synthetic) = compute_exits(
-                &portfolio,
-                &series.symbol,
-                bar,
-                series.expiry_instant(),
-                next_earnings,
-                &config.exits,
-                ranked_ctx.as_ref(),
-            );
-            for (id, reason) in &synthetic {
-                if let Some(spot) = bar.underlying.price() {
-                    let held = sym_bars[*si]
-                        .saturating_sub(opened_at_index.get(id).copied().unwrap_or(sym_bars[*si]));
-                    portfolio.close_at_intrinsic(*id, spot, bar.ts, &config.costs, *reason, held);
-                    census[*si].synthetic_exits += 1;
-                    marks.remove(id);
+            let mut exiting = Vec::new();
+            for (index, &(series, bar)) in chains.iter().enumerate() {
+                let (queued, synthetic) = compute_exits(
+                    &portfolio,
+                    bar,
+                    series.expiry_instant(),
+                    next_earnings,
+                    &config.exits,
+                    ranked_ctx.as_ref().map(|ctx| (ctx, index)),
+                );
+                for (id, reason) in &synthetic {
+                    if let Some(spot) = bar.underlying.price() {
+                        let held = sym_bars[si]
+                            .saturating_sub(opened_at_index.get(id).copied().unwrap_or(sym_bars[si]));
+                        portfolio.close_at_intrinsic(*id, spot, bar.ts, &config.costs, *reason, held);
+                        census[si].synthetic_exits += 1;
+                        marks.remove(id);
+                    }
                 }
+                exiting.extend(queued);
             }
 
             let mut entering: Option<Intent> = None;
-            match &mut strategies[*si] {
+            match &mut strategies[si] {
                 Strategy::Ranked(ranked) => {
                     let ctx = ranked_ctx.as_ref().expect("ranked bar computed a ctx");
+                    // The gate asks whether *any* chain is still open to entry;
+                    // which ones are is decided chain by chain below.
+                    let farthest = chains.last().expect("a quoting symbol has a chain").0;
                     match entry_gate(
                         portfolio.open.len(),
                         exiting.len(),
                         config,
-                        series.expiry_instant(),
-                        bar.ts,
+                        farthest.expiry_instant(),
+                        ts,
                         next_earnings,
                         EntryTiming {
-                            rsi: ctx.rsi,
-                            bars_since_rsi_cross_up: ctx.bars_since_rsi_cross_up,
+                            rsi: ctx.features.rsi,
+                            bars_since_rsi_cross_up: ctx.features.bars_since_rsi_cross_up,
                         },
                     ) {
-                        EntryGate::PositionLimit => census[*si].at_position_limit += 1,
-                        EntryGate::TooCloseToExpiry => census[*si].too_close_to_expiry += 1,
-                        EntryGate::EarningsBlackout => census[*si].earnings_blackout += 1,
-                        EntryGate::RsiOutOfBand => census[*si].rsi_out_of_band += 1,
-                        EntryGate::NoRecentRsiCross => census[*si].no_recent_rsi_cross += 1,
+                        EntryGate::PositionLimit => census[si].at_position_limit += 1,
+                        EntryGate::TooCloseToExpiry => census[si].too_close_to_expiry += 1,
+                        EntryGate::EarningsBlackout => census[si].earnings_blackout += 1,
+                        EntryGate::RsiOutOfBand => census[si].rsi_out_of_band += 1,
+                        EntryGate::NoRecentRsiCross => census[si].no_recent_rsi_cross += 1,
                         EntryGate::Open => {
-                            if let Some((choice, bounds)) = ranked_choose(
+                            let open: Vec<(usize, &ChainSeries, &ChainSnapshot)> = chains
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, (series, _))| {
+                                    !too_close_to_expiry(config, series.expiry_instant(), ts)
+                                })
+                                .map(|(index, &(series, bar))| (index, series, bar))
+                                .collect();
+                            if let Some((choice, bounds, expiry)) = ranked_choose(
                                 ranked,
-                                series,
-                                bar,
-                                config,
                                 ctx,
-                                &mut census[*si],
-                                &mut scorer_records[*si],
+                                &open,
+                                config,
+                                &mut census[si],
+                                &mut scorer_records[si],
                             ) {
                                 // Defer allocation to fill only when a portfolio
                                 // model is configured; otherwise use one lot.
                                 let allocation = config.portfolio_model.map(|_| AllocationHint {
                                     score: choice.score,
                                     one_lot_max_loss: choice.candidate.max_loss,
-                                    iv_vs_median: ctx.iv_vs_median,
+                                    iv_vs_median: ctx.features.iv_vs_median,
                                     expected_pl: choice.expected_pl,
                                 });
                                 let prediction = TradePrediction {
@@ -1037,6 +1099,7 @@ pub fn run_shared(
                                 entering = Some(Intent::Open {
                                     leg_vols: choice.candidate.leg_vols.clone(),
                                     spread: choice.candidate.spread,
+                                    expiry,
                                     prediction: Some(prediction),
                                     bounds,
                                     entry_features: Some(Box::new(ctx.entry_features)),
@@ -1047,17 +1110,19 @@ pub fn run_shared(
                     }
                 }
                 Strategy::Staged(staged) => {
+                    // Staged runs are single-expiry (`validate` refuses more).
+                    let (series, bar) = chains[0];
                     let view = MarketView {
                         symbol: &series.symbol,
                         chain: bar,
                     };
                     let current = staged.signal.evaluate(&view);
-                    let trigger = current.or(carried_trigger[*si].take());
-                    carried_trigger[*si] = None;
+                    let trigger = current.or(carried_trigger[si].take());
+                    carried_trigger[si] = None;
                     if let Some(trigger) = trigger {
-                        census[*si].triggers += 1;
+                        census[si].triggers += 1;
                         match staged.structure.build(&trigger, &view) {
-                            None => census[*si].declined += 1,
+                            None => census[si].declined += 1,
                             Some(spec) => match entry_gate(
                                 portfolio.open.len(),
                                 exiting.len(),
@@ -1067,23 +1132,24 @@ pub fn run_shared(
                                 next_earnings,
                                 EntryTiming::default(),
                             ) {
-                                EntryGate::PositionLimit => census[*si].at_position_limit += 1,
-                                EntryGate::TooCloseToExpiry => census[*si].too_close_to_expiry += 1,
-                                EntryGate::EarningsBlackout => census[*si].earnings_blackout += 1,
-                        EntryGate::RsiOutOfBand => census[*si].rsi_out_of_band += 1,
-                        EntryGate::NoRecentRsiCross => census[*si].no_recent_rsi_cross += 1,
+                                EntryGate::PositionLimit => census[si].at_position_limit += 1,
+                                EntryGate::TooCloseToExpiry => census[si].too_close_to_expiry += 1,
+                                EntryGate::EarningsBlackout => census[si].earnings_blackout += 1,
+                                EntryGate::RsiOutOfBand => census[si].rsi_out_of_band += 1,
+                                EntryGate::NoRecentRsiCross => census[si].no_recent_rsi_cross += 1,
                                 EntryGate::Open => match staged.selector.resolve(&spec, bar) {
                                     Ok(spread) => {
                                         entering = Some(Intent::Open {
                                             spread,
+                                            expiry: bar.expiry,
                                             prediction: None,
                                             bounds: ForecastBounds::default(),
-                                    entry_features: None,
+                                            entry_features: None,
                                             allocation: None,
                                             leg_vols: Vec::new(),
                                         })
                                     }
-                                    Err(reject) => census[*si].reject(&reject),
+                                    Err(reject) => census[si].reject(&reject),
                                 },
                             },
                         }
@@ -1091,17 +1157,17 @@ pub fn run_shared(
                 }
             }
             exiting.extend(entering);
-            pending[*si] = exiting;
+            pending[si] = exiting;
         }
 
         // 4. Stock-only bars (staged only): advance the signal, carry any trigger.
-        for &(_, si, oi) in &global[idx..end] {
+        for &(_, si, ci, oi) in &global[idx..end] {
             if oi.is_none()
                 && let Strategy::Staged(staged) = &mut strategies[si]
-                && let Some(bar) = all_series[si].stock_only_snapshot(ts)
+                && let Some(bar) = symbols[si][ci].stock_only_snapshot(ts)
             {
                 let view = MarketView {
-                    symbol: &all_series[si].symbol,
+                    symbol: &symbols[si][ci].symbol,
                     chain: &bar,
                 };
                 let trigger = staged.signal.evaluate(&view);
@@ -1114,97 +1180,131 @@ pub fn run_shared(
         idx = end;
     }
 
-    // Settlement: whatever survived the tape settles at intrinsic against its own
-    // symbol's expiry print, against the one shared portfolio.
-    let settlement: Vec<Option<f64>> = all_series
-        .iter()
-        .map(|s| {
-            s.underlying_asof(s.expiry_instant())
-                .and_then(|b| b.price())
-        })
-        .collect();
-    let had_open = !portfolio.open.is_empty();
-    let open_ids: Vec<(usize, usize)> = portfolio
-        .open
-        .iter()
-        .map(|p| {
-            let si = all_series
-                .iter()
-                .position(|s| s.symbol == p.spread.symbol)
-                .expect("position's symbol is in the run");
-            (p.id, si)
-        })
-        .collect();
-    for (id, si) in open_ids {
-        if let Some(price) = settlement[si] {
-            let held = sym_bars[si].saturating_sub(opened_at_index.get(&id).copied().unwrap_or(0));
-            portfolio.settle_at_expiry(id, price, all_series[si].expiry_instant(), held);
-            marks.remove(&id);
-        }
-    }
+    // Whatever survived its tape settles at intrinsic against its own chain's
+    // expiry print. A chain still live when the data ends stays open, marked.
+    settle_expired(
+        symbols,
+        &mut portfolio,
+        &mut marks,
+        &mut equity_curve,
+        &sym_bars,
+        &opened_at_index,
+        None,
+    );
     let final_equity = portfolio.cash
         + portfolio
             .open
             .iter()
             .filter_map(|p| marks.get(&p.id))
             .sum::<f64>();
-    if had_open && let Some(last_expiry) = all_series.iter().map(|s| s.expiry_instant()).max() {
-        equity_curve.push(EquityPoint {
-            ts: last_expiry,
-            equity: final_equity,
-            invested: portfolio.capital_at_risk(),
-        });
-    }
 
     let strategy_name = strategies
         .first()
         .map(|s| s.name().to_string())
         .unwrap_or_default();
     let per_symbol: Vec<SymbolDiag> = (0..n)
-        .map(|si| SymbolDiag {
-            symbol: all_series[si].symbol.clone(),
-            bars: all_series[si].merged_timeline().len(),
-            census: std::mem::take(&mut census[si]),
-            signal_diagnostics: strategies[si].signal_diagnostics(),
-            option_quality: all_series[si].option_quality,
-            underlying_quality: all_series[si].underlying_quality,
-            forecasts: std::mem::take(&mut forecasts[si]),
-            position_marks: std::mem::take(&mut position_marks[si]),
-            scorer_records: std::mem::take(&mut scorer_records[si]),
-            settlement_price: settlement[si],
+        .map(|si| {
+            let chains = &symbols[si];
+            let mut option_quality = Quality::default();
+            for chain in chains {
+                option_quality.add(&chain.option_quality);
+            }
+            SymbolDiag {
+                symbol: chains[0].symbol.clone(),
+                bars: global.iter().filter(|e| e.1 == si).count(),
+                census: std::mem::take(&mut census[si]),
+                signal_diagnostics: strategies[si].signal_diagnostics(),
+                option_quality,
+                underlying_quality: chains[0].underlying_quality,
+                forecasts: std::mem::take(&mut forecasts[si]),
+                position_marks: std::mem::take(&mut position_marks[si]),
+                scorer_records: std::mem::take(&mut scorer_records[si]),
+                settlement_price: chains[0]
+                    .underlying_asof(chains[0].expiry_instant())
+                    .and_then(|b| b.price()),
+            }
         })
         .collect();
+    let mut expiries: Vec<NaiveDate> = symbols.iter().flatten().map(|s| s.expiry).collect();
+    expiries.sort();
+    expiries.dedup();
 
     Ok(SharedRun {
         strategy: strategy_name,
-        expiry: all_series.first().map(|s| s.expiry).unwrap_or_default(),
+        expiries,
         initial_cash: config.initial_cash,
         final_equity,
         portfolio,
         equity_curve,
         per_symbol,
-        first_ts: global.first().map(|&(ts, _, _)| ts),
-        last_ts: global.last().map(|&(ts, _, _)| ts),
+        first_ts: global.first().map(|&(ts, ..)| ts),
+        last_ts: global.last().map(|&(ts, ..)| ts),
     })
 }
 
-/// Exits for the open positions of one `symbol`, evaluated against `bar`.
-/// Returns the closes to queue (priced on a real quote) and the intrinsic closes
-/// to execute immediately (the position's legs stopped quoting). The symbol
-/// filter is what lets the shared account evaluate one name's positions against
-/// that name's bar; for the per-symbol loop every position matches.
+/// Settle every open position whose chain expired before `before` (all of them
+/// when `None`) at that chain's expiry-day print, and record the account at the
+/// settlement instant. A chain whose tape never reached expiry day — one still
+/// live when the capture ended — has no print, and its positions stay open.
+fn settle_expired(
+    symbols: &[Vec<ChainSeries>],
+    portfolio: &mut Portfolio,
+    marks: &mut BTreeMap<usize, f64>,
+    equity_curve: &mut Vec<EquityPoint>,
+    sym_bars: &[usize],
+    opened_at_index: &BTreeMap<usize, usize>,
+    before: Option<DateTime<Utc>>,
+) {
+    let due: Vec<(usize, usize, f64, DateTime<Utc>)> = portfolio
+        .open
+        .iter()
+        .filter_map(|p| {
+            let (si, chain) = symbols.iter().enumerate().find_map(|(si, chains)| {
+                chains
+                    .iter()
+                    .find(|c| c.symbol == p.spread.symbol && c.expiry == p.expiry)
+                    .map(|c| (si, c))
+            })?;
+            let at = chain.expiry_instant();
+            if before.is_some_and(|b| at >= b) {
+                return None;
+            }
+            Some((p.id, si, chain.settlement_price()?, at))
+        })
+        .collect();
+    let mut last = None;
+    for (id, si, price, at) in due {
+        let held = sym_bars[si].saturating_sub(opened_at_index.get(&id).copied().unwrap_or(0));
+        portfolio.settle_at_expiry(id, price, at, held);
+        marks.remove(&id);
+        last = last.max(Some(at));
+    }
+    if let Some(at) = last {
+        equity_curve.push(EquityPoint {
+            ts: at,
+            equity: portfolio.cash + marks.values().sum::<f64>(),
+            invested: portfolio.capital_at_risk(),
+        });
+    }
+}
+
+/// Exits for the open positions in `bar`'s chain — same symbol, same expiry —
+/// evaluated against `bar`. Returns the closes to queue (priced on a real quote)
+/// and the intrinsic closes to execute immediately (the position's legs stopped
+/// quoting). A position is only ever read against its own chain: another
+/// expiry's bar does not quote its legs, and would look like a tape that stopped.
 fn compute_exits(
     portfolio: &Portfolio,
-    symbol: &str,
     bar: &ChainSnapshot,
     expiry_instant: DateTime<Utc>,
     next_earnings: Option<&EarningsEvent>,
     exits: &ExitRules,
-    model: Option<&RankedContext>,
+    model: Option<(&RankedContext, usize)>,
 ) -> (Vec<Intent>, Vec<(usize, ExitReason)>) {
     let mut exiting = Vec::new();
     let mut synthetic = Vec::new();
-    for position in portfolio.open.iter().filter(|p| p.spread.symbol == symbol) {
+    let in_chain = |p: &&OpenPosition| p.spread.symbol == bar.symbol && p.expiry == bar.expiry;
+    for position in portfolio.open.iter().filter(in_chain) {
         match crate::execution::exit_credit(&position.spread, bar) {
             Ok(credit) => {
                 let gross = credit - position.entry_debit;
@@ -1214,7 +1314,7 @@ fn compute_exits(
                     bar_ts: bar.ts,
                     expiry_instant,
                     next_earnings,
-                    model: model.map(RankedContext::exit_model),
+                    model: model.map(|(ctx, chain)| ctx.exit_model(chain)),
                 };
                 if let Some(reason) = exits.triggered(position, &ctx) {
                     exiting.push(Intent::Close {
@@ -1245,46 +1345,64 @@ fn compute_exits(
     (exiting, synthetic)
 }
 
-/// Everything a ranked option bar computes before the entry gate: the forecast
-/// distribution and the basis map ranking needs, plus the logged forecast. This
-/// advances the feature engine — so it MUST run on every option bar, gate or no
-/// gate, in both the per-symbol and shared-account loops.
+/// Everything a ranked option bar computes before the entry gate: the symbol's
+/// features, read once, and the forecast as each chain quoting this bar sees it.
+/// This advances the feature engine — so it MUST run on every option bar, gate
+/// or no gate, in both the per-symbol and shared-account loops.
 struct RankedContext {
-    dist: PriceDistribution,
-    remaining_years: f64,
-    forward_scale: f64,
+    features: Features,
+    /// One per chain passed to [`ranked_observe`], in the same order.
+    chains: Vec<ChainForecast>,
     full_horizon_years: f64,
-    /// The current trend feature, for the momentum exit.
-    trend: Option<f64>,
-    /// The current RSI reading, for the entry-timing gate.
-    rsi: Option<f64>,
-    /// Bars since RSI turned up through its level, for the recovery gate.
-    bars_since_rsi_cross_up: Option<u32>,
-    /// ATM IV over its trailing median — the regime the allocator sizes by.
-    iv_vs_median: Option<f64>,
     /// What the model saw this bar, recorded onto any position opened from it.
     entry_features: crate::model::EntryFeatures,
 }
 
+/// The forecast as one chain sees it. The features are the symbol's, but the
+/// horizon is capped at *this* chain's expiry and a sampled spot maps to *this*
+/// chain's forward, so a candidate or a position is always marked against its
+/// own expiry.
+struct ChainForecast {
+    dist: PriceDistribution,
+    /// Years from the horizon to the chain's expiry (zero scores at expiry).
+    remaining_years: f64,
+    /// Sampled-spot -> forward scale, preserving the chain's parity basis.
+    forward_scale: f64,
+}
+
 impl RankedContext {
-    /// The forecast, packaged for the exit check.
-    fn exit_model(&self) -> exits::ExitModel<'_> {
+    /// Chain `index`'s forecast, packaged for the exit check.
+    fn exit_model(&self, index: usize) -> exits::ExitModel<'_> {
+        let chain = &self.chains[index];
         exits::ExitModel {
-            dist: &self.dist,
-            remaining_years: self.remaining_years,
-            forward_scale: self.forward_scale,
-            trend: self.trend,
+            dist: &chain.dist,
+            remaining_years: chain.remaining_years,
+            forward_scale: chain.forward_scale,
+            trend: self.features.trend,
         }
     }
 }
 
+/// Which chain feeds the features: the nearest expiry that still covers the
+/// horizon, so its ATM IV is the vol of the period being forecast — failing
+/// that, the farthest. `chains` ascends by expiry; with one chain, that chain.
+fn feature_chain(chains: &[(&ChainSeries, &ChainSnapshot)], horizon_years: f64) -> usize {
+    chains
+        .iter()
+        .position(|(_, bar)| bar.year_fraction >= horizon_years)
+        .unwrap_or(chains.len() - 1)
+}
+
+/// `chains` is every chain of one symbol quoting this bar, ascending by expiry.
 fn ranked_observe(
     ranked: &mut RankedStrategy,
-    series: &ChainSeries,
-    bar: &ChainSnapshot,
+    chains: &[(&ChainSeries, &ChainSnapshot)],
     next_earnings: Option<&EarningsEvent>,
     forecasts: &mut Vec<ForecastRecord>,
 ) -> RankedContext {
+    let full_horizon_years = ranked.model.horizon_days() / 365.25;
+    let feature = feature_chain(chains, full_horizon_years);
+    let (series, bar) = chains[feature];
     let bar_date = bar.ts.date_naive();
     let earnings = EarningsDistance {
         days_to: next_earnings.map(|e| (e.date - bar_date).num_days()),
@@ -1294,28 +1412,30 @@ fn ranked_observe(
     };
     let features = ranked.features.observe(bar, earnings);
 
-    // Horizon (capped at expiry), the distribution, and the basis map, computed
-    // once per option bar because both logging and ranking need them.
-    let horizon_years = (ranked.model.horizon_days() / 365.25)
-        .min(features.year_fraction)
-        .max(0.0);
-    let remaining_years = (features.year_fraction - horizon_years).max(0.0);
-    let forward_scale = if features.spot > 0.0 {
-        features.forward / features.spot
-    } else {
-        1.0
-    };
-    let dist = ranked.model.forecast(&features, horizon_years);
+    let forecasts_by_chain: Vec<ChainForecast> = chains
+        .iter()
+        .map(|(_, chain)| {
+            let horizon_years = full_horizon_years.min(chain.year_fraction).max(0.0);
+            ChainForecast {
+                dist: ranked.model.forecast(&features, horizon_years),
+                remaining_years: (chain.year_fraction - horizon_years).max(0.0),
+                forward_scale: if features.spot > 0.0 {
+                    chain.forward / features.spot
+                } else {
+                    1.0
+                },
+            }
+        })
+        .collect();
 
     // Score the forecast against what the underlying actually did a horizon
     // later. Eval-only — never on the decision path. Uses the *full* (uncapped)
     // horizon so the realized read lands on a fixed same-weekday bar.
-    let full_horizon_years = ranked.model.horizon_days() / 365.25;
     if let Some(record) = score_forecast(
         series,
         bar,
         &features,
-        &dist,
+        &forecasts_by_chain[feature].dist,
         full_horizon_years,
         ranked.model.as_ref(),
     ) {
@@ -1323,72 +1443,85 @@ fn ranked_observe(
     }
 
     RankedContext {
-        dist,
-        remaining_years,
-        forward_scale,
+        features,
+        chains: forecasts_by_chain,
         full_horizon_years,
-        trend: features.trend,
-        rsi: features.rsi,
-        bars_since_rsi_cross_up: features.bars_since_rsi_cross_up,
-        iv_vs_median: features.iv_vs_median,
         entry_features: (&features).into(),
     }
 }
 
-/// Candidate enumeration, scorer sampling, and ranking for one option bar, once
-/// the entry gate has said Open. Returns the best **one-lot** choice and its
-/// forecast target; allocation is the caller's, so it can differ by portfolio model.
+/// Candidate enumeration, scorer sampling, and ranking for one symbol-bar, once
+/// the entry gate has said Open. Each chain in `open` — `(index into
+/// ctx.chains, series, bar)` — is ranked against its own forecast, and the best
+/// candidate across them wins by the ranker's own key, so a position opens in
+/// whichever expiry offers the best trade. Returns the best **one-lot** choice,
+/// its forecast bounds and its expiry; allocation is the caller's, so it can
+/// differ by portfolio model.
 fn ranked_choose(
     ranked: &RankedStrategy,
-    series: &ChainSeries,
-    bar: &ChainSnapshot,
-    config: &RunConfig,
     ctx: &RankedContext,
+    open: &[(usize, &ChainSeries, &ChainSnapshot)],
+    config: &RunConfig,
     census: &mut Census,
     scorer_records: &mut Vec<ScorerRecord>,
-) -> Option<(crate::model::RankedChoice, ForecastBounds)> {
+) -> Option<(crate::model::RankedChoice, ForecastBounds, NaiveDate)> {
+    let cfg = &ranked.ranking;
     let mut funnel = RankingFunnel::default();
-    let candidates = enumerate_verticals(bar, &config.costs, &ranked.candidates, &mut funnel);
-    // Scorer evaluation: sample candidates and price them forward to grade the
-    // score. Reads the candidates before `rank` consumes them; eval-only.
-    scorer_sample(
-        series,
-        bar,
-        &candidates,
-        &ctx.dist,
-        ctx.remaining_years,
-        ctx.forward_scale,
-        ctx.full_horizon_years,
-        &ranked.ranking,
-        scorer_records,
-    );
-    let choice = rank(
-        candidates,
-        &ctx.dist,
-        ctx.remaining_years,
-        ctx.forward_scale,
-        &ranked.ranking,
-        &mut funnel,
-    );
+    let mut best: Option<(crate::model::RankedChoice, usize, NaiveDate)> = None;
+    for &(index, series, bar) in open {
+        let forecast = &ctx.chains[index];
+        let mut chain_funnel = RankingFunnel::default();
+        let candidates =
+            enumerate_verticals(bar, &config.costs, &ranked.candidates, &mut chain_funnel);
+        // Scorer evaluation: sample candidates and price them forward to grade
+        // the score. Reads the candidates before `rank` consumes them; eval-only.
+        scorer_sample(
+            series,
+            bar,
+            &candidates,
+            forecast,
+            ctx.full_horizon_years,
+            cfg,
+            scorer_records,
+        );
+        let choice = rank(
+            candidates,
+            &forecast.dist,
+            forecast.remaining_years,
+            forecast.forward_scale,
+            cfg,
+            &mut chain_funnel,
+        );
+        funnel.merge(&chain_funnel);
+        if let Some(choice) = choice
+            && best
+                .as_ref()
+                .is_none_or(|(held, ..)| choice_key(&choice, cfg) > choice_key(held, cfg))
+        {
+            best = Some((choice, index, bar.expiry));
+        }
+    }
+    // A bar takes at most one candidate, however many chains offered one.
+    funnel.chosen = usize::from(best.is_some());
     census.ranking.merge(&funnel);
-    choice.map(|choice| {
-        // Both bounds of the entry distribution, read in the trade's direction:
-        // the favourable quantile it takes profit at, and the adverse one past
-        // which the forecast no longer covers it. Prices, so lot count never
-        // touches either.
-        let rises = choice.candidate.spread.profits_from_a_rise();
-        let quantile_toward = |q: f64| ctx.dist.quantile(if rises { q } else { 1.0 - q });
-        let bounds = ForecastBounds {
-            target: config.exits.forecast_target_quantile.map(&quantile_toward),
-            // The adverse side is the mirror image: 0.85 means the 85th
-            // percentile of the move *against* the position.
-            stop: config
-                .exits
-                .forecast_stop_quantile
-                .map(|q| quantile_toward(1.0 - q)),
-        };
-        (choice, bounds)
-    })
+
+    let (choice, index, expiry) = best?;
+    // Both bounds of the entry distribution, read in the trade's direction: the
+    // favourable quantile it takes profit at, and the adverse one past which the
+    // forecast no longer covers it. Prices, so lot count never touches either.
+    let dist = &ctx.chains[index].dist;
+    let rises = choice.candidate.spread.profits_from_a_rise();
+    let quantile_toward = |q: f64| dist.quantile(if rises { q } else { 1.0 - q });
+    let bounds = ForecastBounds {
+        target: config.exits.forecast_target_quantile.map(&quantile_toward),
+        // The adverse side is the mirror image: 0.85 means the 85th percentile
+        // of the move *against* the position.
+        stop: config
+            .exits
+            .forecast_stop_quantile
+            .map(|q| quantile_toward(1.0 - q)),
+    };
+    Some((choice, bounds, expiry))
 }
 
 /// Sample up to `sample_per_bar` candidates (a deterministic stride across the
@@ -1402,13 +1535,17 @@ fn scorer_sample(
     series: &ChainSeries,
     bar: &ChainSnapshot,
     candidates: &[Candidate],
-    dist: &PriceDistribution,
-    remaining_years: f64,
-    forward_scale: f64,
+    forecast: &ChainForecast,
     full_horizon_years: f64,
     cfg: &RankingConfig,
     out: &mut Vec<ScorerRecord>,
 ) {
+    let ChainForecast {
+        dist,
+        remaining_years,
+        forward_scale,
+    } = forecast;
+    let (remaining_years, forward_scale) = (*remaining_years, *forward_scale);
     let (forecast_target_quantile, sample_per_bar) =
         (cfg.forecast_target_quantile, cfg.scorer_sample_per_bar);
     if sample_per_bar == 0 || candidates.is_empty() {
@@ -1466,6 +1603,7 @@ fn scorer_sample(
         out.push(ScorerRecord {
             ts: bar.ts,
             symbol: series.symbol.clone(),
+            expiry: series.expiry,
             score,
             expected_pl,
             realized_pl,
@@ -1518,6 +1656,7 @@ fn score_forecast(
     Some(ForecastRecord::score(
         bar.ts,
         &series.symbol,
+        bar.expiry,
         features.spot,
         features.forward,
         features.atm_iv,
@@ -1546,6 +1685,7 @@ fn execute(
             entry_features,
             allocation,
             leg_vols,
+            expiry: _,
         } => {
             // A deferred allocation hint means `spread` is one lot and the
             // shared account funds it now against capital committed across all
@@ -1652,6 +1792,17 @@ pub mod testing {
     /// model, the parity fit recovers the path exactly and every delta is
     /// analytic — so a test failure is the engine's, not the fixture's.
     pub fn snapshot_with(name: &str, path: &[f64], settlement: f64) -> PathBuf {
+        snapshot_with_chains(name, path, settlement, &[expiry()])
+    }
+
+    /// `snapshot_with`, but with a full ladder for every expiry in `expiries`,
+    /// each priced to its own time to expiry and settling at `settlement`.
+    pub fn snapshot_with_chains(
+        name: &str,
+        path: &[f64],
+        settlement: f64,
+        expiries: &[NaiveDate],
+    ) -> PathBuf {
         let dir = std::env::temp_dir().join("ib-spread-trader-engine-fixtures");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(format!("{name}.sqlite3"));
@@ -1673,24 +1824,26 @@ pub mod testing {
         .unwrap();
 
         let strikes: Vec<f64> = (35..=65).map(|i| i as f64 * 2.0).collect();
-        let expiry_text = expiry().format("%Y-%m-%d").to_string();
         let mut next_id = 2i64;
         let mut ids = Vec::new();
-        for &strike in &strikes {
-            for right in ["C", "P"] {
-                conn.execute(
-                    "INSERT INTO contracts (id, symbol, kind, exchange, currency, expiry, strike, right)
-                     VALUES (?1, 'TEST', 'option', 'SMART', 'USD', ?2, ?3, ?4)",
-                    rusqlite::params![next_id, expiry_text, strike, right],
-                )
-                .unwrap();
-                ids.push((next_id, strike, right == "C"));
-                next_id += 1;
+        for &expiry in expiries {
+            let expiry_text = expiry.format("%Y-%m-%d").to_string();
+            let expiry_instant = pricing::expiry_instant(expiry).unwrap();
+            for &strike in &strikes {
+                for right in ["C", "P"] {
+                    conn.execute(
+                        "INSERT INTO contracts (id, symbol, kind, exchange, currency, expiry, strike, right)
+                         VALUES (?1, 'TEST', 'option', 'SMART', 'USD', ?2, ?3, ?4)",
+                        rusqlite::params![next_id, expiry_text, strike, right],
+                    )
+                    .unwrap();
+                    ids.push((next_id, strike, right == "C", expiry_instant));
+                    next_id += 1;
+                }
             }
         }
 
         let start = Utc.with_ymd_and_hms(2026, 7, 1, 13, 30, 0).unwrap();
-        let expiry_instant = pricing::expiry_instant(expiry()).unwrap();
         conn.execute_batch("BEGIN").unwrap();
         let mut insert = conn
             .prepare(
@@ -1707,9 +1860,9 @@ pub mod testing {
                     .execute(rusqlite::params![1i64, &ts, kind, price])
                     .unwrap();
             }
-            let t =
-                pricing::year_fraction(start + Duration::minutes(30 * bar as i64), expiry_instant);
-            for &(id, strike, is_call) in &ids {
+            let now = start + Duration::minutes(30 * bar as i64);
+            for &(id, strike, is_call, expiry_instant) in &ids {
+                let t = pricing::year_fraction(now, expiry_instant);
                 // Floor the mid so a deep wing still quotes a positive book,
                 // as a real one does.
                 let mid = pricing::black76(spot, strike, t, VOL, is_call).max(0.06);
@@ -1722,14 +1875,17 @@ pub mod testing {
             }
         }
 
-        // The stock print on expiry day that settlement reads.
-        let settle_ts = Utc
-            .with_ymd_and_hms(EXPIRY.0, EXPIRY.1, EXPIRY.2, 19, 30, 0)
-            .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
-        insert
-            .execute(rusqlite::params![1i64, &settle_ts, "trades", settlement])
-            .unwrap();
+        // The stock print on each expiry day that settlement reads.
+        for expiry in expiries {
+            let settle_ts = expiry
+                .and_hms_opt(19, 30, 0)
+                .unwrap()
+                .and_utc()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+            insert
+                .execute(rusqlite::params![1i64, &settle_ts, "trades", settlement])
+                .unwrap();
+        }
 
         drop(insert);
         conn.execute_batch("COMMIT").unwrap();
@@ -1982,6 +2138,57 @@ mod tests {
     use super::*;
     use crate::portfolio::ExitReason;
     use crate::signal::{MarketView, Signal, Trigger};
+
+    /// Two chains, one symbol: the near one is inside the entry blackout, so
+    /// every position must open in the far one — and be marked, exited and
+    /// closed only there. Floors are off so the ranker always picks something.
+    #[test]
+    fn a_position_opens_in_the_chain_that_is_open_and_stays_there() {
+        let near = expiry();
+        let far = NaiveDate::from_ymd_opt(2026, 9, 18).unwrap();
+        let file = snapshot_with_chains("two-chains", &v_shaped_path(), 100.0, &[near, far]);
+        let snapshot = crate::data::Snapshot::open(&file).unwrap();
+        let chains: Vec<ChainSeries> = [near, far]
+            .iter()
+            .map(|&e| ChainSeries::load(&snapshot, "TEST", e).unwrap())
+            .collect();
+
+        let strategy_config: crate::config::StrategyConfig = toml::from_str(
+            r#"
+symbols = ["TEST"]
+expiries = ["2026-08-21", "2026-09-18"]
+model = "mean-reversion"
+[candidates]
+max_loss = 5000.0
+[ranking]
+min_score = -10.0
+min_expected_pl = -1.0e9
+[execution]
+min_entry_days_before_expiry = 55
+"#,
+        )
+        .unwrap();
+        strategy_config.validate().unwrap();
+        let mut run_config = strategy_config.run_config().unwrap();
+        run_config.max_open_positions = 1;
+        let mut strategies = vec![strategy_config.strategy().unwrap()];
+        let run = run_shared(&[chains], &mut strategies, &run_config).unwrap();
+
+        let opened: Vec<NaiveDate> = run
+            .portfolio
+            .closed
+            .iter()
+            .map(|t| t.expiry)
+            .chain(run.portfolio.open.iter().map(|p| p.expiry))
+            .collect();
+        assert!(!opened.is_empty(), "the far chain offered a trade");
+        assert!(opened.iter().all(|&e| e == far), "{opened:?}");
+        assert_eq!(run.expiries, vec![near, far]);
+        let census = &run.per_symbol[0].census;
+        assert_eq!(census.synthetic_exits, 0, "never read against the wrong chain");
+        // At most one pick per bar, however many chains offered one.
+        assert!(census.ranking.chosen <= v_shaped_path().len(), "{}", census.ranking.chosen);
+    }
 
     fn config() -> RunConfig {
         RunConfig {

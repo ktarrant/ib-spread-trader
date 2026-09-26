@@ -40,6 +40,9 @@ pub struct StrategyConfig {
     pub symbols: Vec<String>,
     #[serde(default = "default_expiry")]
     pub expiry: NaiveDate,
+    /// Several chains per symbol, traded side by side. Exclusive with `expiry`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expiries: Vec<NaiveDate>,
     /// A named dataset under `datasets/`, or an inline `[dataset]` block.
     #[serde(default)]
     pub dataset: Option<DatasetBlock>,
@@ -449,7 +452,7 @@ fn reject_shadowed_fields(text: &str) -> Result<()> {
     const BLOCKS: [(&str, bool, &[&str]); 4] = [
         ("model", true, &["features"]),
         ("ranker", false, &["candidates", "ranking"]),
-        ("dataset", false, &["symbols", "expiry"]),
+        ("dataset", false, &["symbols", "expiry", "expiries"]),
         ("portfolio", false, &["account", "initial_cash", "sizing"]),
     ];
     for (block, label_only, shadowed) in BLOCKS {
@@ -952,12 +955,14 @@ impl Default for ModelBlock {
     }
 }
 
-/// The symbols and expiry that identify the currently available dataset.
+/// The symbols and chains a backtest runs over: one `expiry`, or several
+/// `expiries` traded side by side — each position in one chain, never rolled.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DatasetConfig {
     pub symbols: Vec<String>,
     pub expiry: NaiveDate,
+    pub expiries: Vec<NaiveDate>,
 }
 
 impl Default for DatasetConfig {
@@ -965,7 +970,27 @@ impl Default for DatasetConfig {
         Self {
             symbols: Vec::new(),
             expiry: default_expiry(),
+            expiries: Vec::new(),
         }
+    }
+}
+
+impl DatasetConfig {
+    /// Every chain to load, ascending. Empty when none was given.
+    fn chains(&self) -> Result<Vec<NaiveDate>> {
+        if self.expiries.is_empty() {
+            return Ok((self.expiry != default_expiry())
+                .then_some(self.expiry)
+                .into_iter()
+                .collect());
+        }
+        if self.expiry != default_expiry() {
+            bail!("use `expiry` for one chain or `expiries` for several, not both");
+        }
+        let mut chains = self.expiries.clone();
+        chains.sort();
+        chains.dedup();
+        Ok(chains)
     }
 }
 
@@ -1155,6 +1180,7 @@ impl StrategyConfig {
             let resolved = dataset.resolve()?;
             config.symbols = resolved.symbols;
             config.expiry = resolved.expiry;
+            config.expiries = resolved.expiries;
         }
         config.validate()?;
         Ok(config)
@@ -1165,8 +1191,17 @@ impl StrategyConfig {
         if dataset.symbols.is_empty() {
             bail!("`symbols` is empty; nothing to backtest");
         }
-        if dataset.expiry == default_expiry() {
+        let chains = dataset.chains()?;
+        if chains.is_empty() {
             bail!("an expiry is required, inline or through a dataset label");
+        }
+        // Several chains need one account to weigh them against each other and a
+        // forecast to rank them by; the per-symbol loop and the staged pipeline
+        // each read exactly one chain.
+        if chains.len() > 1
+            && (self.mode != StrategyMode::Ranked || self.account_mode()? != AccountMode::Shared)
+        {
+            bail!("several `expiries` need `mode = \"ranked\"` and the shared account");
         }
         if self.portfolio.is_some() && self.sizing.is_some() {
             bail!("use either `portfolio` or legacy `[sizing]`, not both");
@@ -1282,6 +1317,7 @@ impl StrategyConfig {
         Ok(Self {
             symbols: dataset.symbols,
             expiry: dataset.expiry,
+            expiries: dataset.expiries,
             dataset: None,
             features: model.features,
             model: ModelBlock::Inline(model.model),
@@ -1317,12 +1353,18 @@ impl StrategyConfig {
         labels
     }
 
+    /// Every chain the run loads per symbol, ascending.
+    pub fn expiries(&self) -> Result<Vec<NaiveDate>> {
+        self.resolved_dataset()?.chains()
+    }
+
     fn resolved_dataset(&self) -> Result<DatasetConfig> {
         match &self.dataset {
             Some(block) => block.resolve(),
             None => Ok(DatasetConfig {
                 symbols: self.symbols.clone(),
                 expiry: self.expiry,
+                expiries: self.expiries.clone(),
             }),
         }
     }
@@ -1820,6 +1862,26 @@ horizon_days = 10.0
         ] {
             let err = reject_shadowed_fields(source).unwrap_err();
             assert!(err.to_string().contains("would be ignored"), "{source}: {err}");
+        }
+    }
+
+    #[test]
+    fn several_expiries_need_the_ranked_engine_on_one_account() {
+        let parse = |src: &str| toml::from_str::<StrategyConfig>(src).unwrap();
+        let ok = parse("symbols=[\"SPY\"]\nexpiries=[\"2026-10-16\",\"2026-09-18\",\"2026-09-18\"]");
+        ok.validate().unwrap();
+        assert_eq!(
+            ok.expiries().unwrap(),
+            [NaiveDate::from_ymd_opt(2026, 9, 18).unwrap(), NaiveDate::from_ymd_opt(2026, 10, 16).unwrap()],
+            "sorted and deduplicated"
+        );
+        for (src, needle) in [
+            ("symbols=[\"SPY\"]\nexpiry=\"2026-08-21\"\nexpiries=[\"2026-09-18\"]", "not both"),
+            ("mode=\"staged\"\nsymbols=[\"SPY\"]\nexpiries=[\"2026-09-18\",\"2026-10-16\"]", "shared account"),
+            ("symbols=[\"SPY\"]\naccount=\"per_symbol\"\nexpiries=[\"2026-09-18\",\"2026-10-16\"]", "shared account"),
+        ] {
+            let err = parse(src).validate().unwrap_err();
+            assert!(err.to_string().contains(needle), "{src}: {err}");
         }
     }
 

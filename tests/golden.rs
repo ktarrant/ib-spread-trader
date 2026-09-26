@@ -218,14 +218,15 @@ fn shared_run(
 ) -> (report::Report, ib_spread_trader::engine::SharedRun) {
     let config = StrategyConfig::load(path).unwrap();
     let run_config = config.run_config().unwrap();
-    let all_series: Vec<ChainSeries> = config
+    let symbols: Vec<Vec<ChainSeries>> = config
         .symbols
         .iter()
         .map(|s| ChainSeries::load(snapshot, s, config.expiry).unwrap())
         .filter(|s| !s.is_empty())
+        .map(|s| vec![s])
         .collect();
-    let mut strategies: Vec<_> = all_series.iter().map(|_| config.strategy().unwrap()).collect();
-    let shared = engine::run_shared(&all_series, &mut strategies, &run_config).unwrap();
+    let mut strategies: Vec<_> = symbols.iter().map(|_| config.strategy().unwrap()).collect();
+    let shared = engine::run_shared(&symbols, &mut strategies, &run_config).unwrap();
     let built = report::build_shared(&config.name, config.expiry, &shared);
     (built, shared)
 }

@@ -431,6 +431,7 @@ mod tests {
         );
         OpenPosition {
             id: 1,
+            expiry: chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
             opened_at: Utc.with_ymd_and_hms(2026, 7, 1, 13, 30, 0).unwrap(),
             entry_debit: 170.0,
             entry_commission: 1.30,
@@ -638,6 +639,7 @@ mod tests {
         );
         let p = OpenPosition {
             id: 1,
+            expiry: chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
             opened_at: Utc.with_ymd_and_hms(2026, 7, 1, 13, 30, 0).unwrap(),
             entry_debit: 170.0,
             entry_commission: 1.30,
@@ -692,6 +694,7 @@ mod tests {
         );
         let credit = OpenPosition {
             id: 1,
+            expiry: chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
             opened_at: Utc.with_ymd_and_hms(2026, 7, 1, 13, 30, 0).unwrap(),
             entry_debit: -130.0, // negative: a credit was received
             entry_commission: 1.30,

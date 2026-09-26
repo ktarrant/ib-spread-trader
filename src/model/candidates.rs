@@ -358,6 +358,7 @@ mod tests {
         };
         ChainSnapshot {
             symbol: "TEST".into(),
+            expiry: chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
             ts: Utc::now(),
             underlying: UnderlyingBar {
                 mid: Some(100.0),

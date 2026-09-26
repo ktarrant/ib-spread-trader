@@ -8,7 +8,7 @@
 //! the realized price from the already-loaded series precisely because that read
 //! is safe here and nowhere near the decision path.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 
 use super::distribution::PriceDistribution;
@@ -25,6 +25,9 @@ pub const QUANTILE_LEVELS: [f64; 7] = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
 pub struct ForecastRecord {
     pub ts: DateTime<Utc>,
     pub symbol: String,
+    /// The chain whose ladder fed the features — its ATM IV is the forecast's
+    /// vol. With several expiries, the nearest one that covers the horizon.
+    pub expiry: NaiveDate,
     pub spot: f64,
     pub forward: f64,
     pub atm_iv: Option<f64>,
@@ -55,6 +58,7 @@ impl ForecastRecord {
     pub fn score(
         ts: DateTime<Utc>,
         symbol: &str,
+        expiry: NaiveDate,
         spot: f64,
         forward: f64,
         atm_iv: Option<f64>,
@@ -71,6 +75,7 @@ impl ForecastRecord {
         Self {
             ts,
             symbol: symbol.to_string(),
+            expiry,
             spot,
             forward,
             atm_iv,
@@ -204,6 +209,8 @@ impl ModelEval {
 pub struct ScorerRecord {
     pub ts: DateTime<Utc>,
     pub symbol: String,
+    /// The chain the candidate was enumerated from.
+    pub expiry: NaiveDate,
     /// The value the ranker ordered by: `E[P/L] / max_loss` for the
     /// expected-value metric, the model probability of profit for `prob_profit`.
     /// Grading the ordering key is what makes the Spearman a claim about *this*
@@ -382,6 +389,7 @@ mod tests {
         let r = ForecastRecord::score(
             Utc.with_ymd_and_hms(2026, 8, 3, 15, 0, 0).unwrap(),
             "TEST",
+            NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
             100.0,
             100.0,
             Some(0.2),
@@ -408,6 +416,7 @@ mod tests {
             ForecastRecord::score(
                 Utc.with_ymd_and_hms(2026, 8, 3, 15, 0, 0).unwrap(),
                 "T",
+                NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
                 100.0,
                 100.0,
                 Some(0.2),
@@ -431,6 +440,7 @@ mod tests {
             .map(|i| ScorerRecord {
                 ts,
                 symbol: "T".into(),
+                expiry: NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
                 score: i as f64 * 0.1,
                 expected_pl: i as f64,
                 realized_pl: realized(i),
@@ -476,6 +486,7 @@ mod tests {
             ForecastRecord::score(
                 Utc.with_ymd_and_hms(2026, 8, 3, 15, 0, 0).unwrap(),
                 "TEST",
+                NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
                 100.0,
                 100.0,
                 None,

@@ -105,6 +105,7 @@ pub mod testing {
     pub fn bar(minute: u32, price: f64) -> ChainSnapshot {
         ChainSnapshot {
             symbol: "TEST".into(),
+            expiry: chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
             ts: Utc
                 .with_ymd_and_hms(2026, 7, 1, 13 + minute / 60, minute % 60, 0)
                 .unwrap(),

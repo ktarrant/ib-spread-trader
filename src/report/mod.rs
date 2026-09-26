@@ -128,7 +128,10 @@ impl ModelEvalReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub strategy: String,
+    /// The earliest chain; `expiries` lists them all. Kept for readers written
+    /// when a run had exactly one.
     pub expiry: chrono::NaiveDate,
+    pub expiries: Vec<chrono::NaiveDate>,
     pub totals: Totals,
     pub symbols: Vec<SymbolSummary>,
     pub trades: Vec<ClosedTrade>,
@@ -272,6 +275,7 @@ fn assemble(
     Report {
         strategy: strategy.to_string(),
         expiry,
+        expiries: vec![expiry],
         totals,
         symbols,
         trades,
@@ -357,6 +361,7 @@ pub fn build_shared(
         shared.final_equity,
         &shared.equity_curve,
     );
+    report.expiries = shared.expiries.clone();
     report.caveats.insert(
         0,
         format!(
@@ -581,11 +586,11 @@ pub fn write_csvs(
         .with_context(|| format!("creating output directory {}", dir.display()))?;
 
     let mut trades = String::from(
-        "id,symbol,description,opened_at,closed_at,bars_held,entry_debit,exit_credit,commission,pnl,exit_reason\n",
+        "id,symbol,description,opened_at,closed_at,bars_held,entry_debit,exit_credit,commission,pnl,exit_reason,expiry\n",
     );
     for t in &report.trades {
         trades.push_str(&format!(
-            "{},{},\"{}\",{},{},{},{:.2},{:.2},{:.2},{:.2},{}\n",
+            "{},{},\"{}\",{},{},{},{:.2},{:.2},{:.2},{:.2},{},{}\n",
             t.id,
             t.symbol,
             t.description,
@@ -597,6 +602,7 @@ pub fn write_csvs(
             t.commission,
             t.pnl,
             reason_key(t.exit_reason),
+            t.expiry,
         ));
     }
     std::fs::write(dir.join("trades.csv"), trades)?;
@@ -620,7 +626,7 @@ pub fn write_csvs(
         let mut forecasts = String::from(
             "ts,symbol,spot,forward,atm_iv,horizon_years,mean,stddev,\
              q05,q10,q25,q50,q75,q90,q95,realized,model_crps,null_crps,pit,\
-             trend,vwap_distance,atr,realized_vol,skew,rsi,days_to_earnings\n",
+             trend,vwap_distance,atr,realized_vol,skew,rsi,days_to_earnings,expiry\n",
         );
         for run in runs {
             for f in &run.forecasts {
@@ -630,7 +636,7 @@ pub fn write_csvs(
                 let num = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_default();
                 let x = &f.features;
                 forecasts.push_str(&format!(
-                    "{},{},{:.4},{:.4},{},{:.6},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{},{},{},{},{},{},{}\n",
+                    "{},{},{:.4},{:.4},{},{:.6},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{},{},{},{},{},{},{},{}\n",
                     f.ts.to_rfc3339(), f.symbol, f.spot, f.forward, atm_iv, f.horizon_years,
                     f.mean, f.stddev,
                     f.quantiles[0], f.quantiles[1], f.quantiles[2], f.quantiles[3],
@@ -639,6 +645,7 @@ pub fn write_csvs(
                     num(x.trend), num(x.vwap_distance), num(x.atr), num(x.realized_vol),
                     num(x.skew), num(x.rsi),
                     x.days_to_earnings.map(|d| d.to_string()).unwrap_or_default(),
+                    f.expiry,
                 ));
             }
         }
@@ -671,11 +678,11 @@ pub fn write_csvs(
 
     let has_scorer = runs.iter().any(|r| !r.scorer_records.is_empty());
     if has_scorer {
-        let mut scorer = String::from("ts,symbol,score,expected_pl,realized_pl,max_loss,prob_profit,entry_debit,legs\n");
+        let mut scorer = String::from("ts,symbol,score,expected_pl,realized_pl,max_loss,prob_profit,entry_debit,legs,expiry\n");
         for run in runs {
             for s in &run.scorer_records {
                 scorer.push_str(&format!(
-                    "{},{},{:.6},{:.2},{:.2},{:.2},{:.6},{:.2},{}\n",
+                    "{},{},{:.6},{:.2},{:.2},{:.2},{:.6},{:.2},{},{}\n",
                     s.ts.to_rfc3339(),
                     s.symbol,
                     s.score,
@@ -685,6 +692,7 @@ pub fn write_csvs(
                     s.prob_profit,
                     s.entry_debit,
                     s.legs,
+                    s.expiry,
                 ));
             }
         }

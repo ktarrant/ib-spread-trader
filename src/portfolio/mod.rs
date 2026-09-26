@@ -7,7 +7,7 @@
 //! bid is genuinely worth less than it cost.
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 
 use crate::data::ChainSnapshot;
@@ -81,6 +81,9 @@ pub struct TradePrediction {
 pub struct OpenPosition {
     pub id: usize,
     pub spread: Spread,
+    /// The chain the spread was opened in. Every leg shares it, and only that
+    /// chain's bars can mark, exit or close the position.
+    pub expiry: NaiveDate,
     pub opened_at: DateTime<Utc>,
     /// Positive for a debit structure, negative for a credit one. Excludes commission.
     pub entry_debit: f64,
@@ -123,6 +126,7 @@ impl OpenPosition {
 pub struct ClosedTrade {
     pub id: usize,
     pub symbol: String,
+    pub expiry: NaiveDate,
     pub description: String,
     pub opened_at: DateTime<Utc>,
     pub closed_at: DateTime<Utc>,
@@ -235,6 +239,7 @@ impl Portfolio {
             max_loss: bounds.map(|(lo, _)| debit - lo),
             id,
             spread,
+            expiry: bar.expiry,
             opened_at: bar.ts,
             entry_debit: debit,
             entry_commission: commission,
@@ -268,6 +273,7 @@ impl Portfolio {
         let trade = ClosedTrade {
             id: position.id,
             symbol: position.spread.symbol.clone(),
+            expiry: position.expiry,
             description: position.spread.describe(),
             opened_at: position.opened_at,
             closed_at: bar.ts,
@@ -313,6 +319,7 @@ impl Portfolio {
         let trade = ClosedTrade {
             id: position.id,
             symbol: position.spread.symbol.clone(),
+            expiry: position.expiry,
             description: position.spread.describe(),
             opened_at: position.opened_at,
             closed_at: bar_ts,
@@ -359,6 +366,7 @@ impl Portfolio {
         let trade = ClosedTrade {
             id: position.id,
             symbol: position.spread.symbol.clone(),
+            expiry: position.expiry,
             description: position.spread.describe(),
             opened_at: position.opened_at,
             closed_at: settled_at,
@@ -454,6 +462,7 @@ mod tests {
     fn bar_at(hour: u32, long: (f64, f64), short: (f64, f64)) -> ChainSnapshot {
         ChainSnapshot {
             symbol: "SPY".into(),
+            expiry: chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
             ts: Utc.with_ymd_and_hms(2026, 8, 19, hour, 0, 0).unwrap(),
             underlying: UnderlyingBar {
                 mid: Some(751.0),

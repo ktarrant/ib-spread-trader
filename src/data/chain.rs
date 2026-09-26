@@ -36,6 +36,14 @@ pub struct Quality {
 }
 
 impl Quality {
+    /// Fold another chain's tally in, for a symbol read across several expiries.
+    pub fn add(&mut self, other: &Quality) {
+        self.rows_read += other.rows_read;
+        self.dropped_unpaired += other.dropped_unpaired;
+        self.dropped_crossed += other.dropped_crossed;
+        self.dropped_nonpositive += other.dropped_nonpositive;
+    }
+
     pub fn rows_kept(&self) -> usize {
         self.rows_read - self.dropped_unpaired - self.dropped_crossed - self.dropped_nonpositive
     }
@@ -104,6 +112,9 @@ impl OptionQuote {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChainSnapshot {
     pub symbol: String,
+    /// The chain this ladder belongs to. A position is marked, exited and closed
+    /// only against bars of its own expiry.
+    pub expiry: NaiveDate,
     pub ts: DateTime<Utc>,
     pub underlying: UnderlyingBar,
     /// Median-of-parity forward across the paired ladder.
@@ -213,7 +224,6 @@ fn interp_smile_iv(smile: &[(f64, f64)], x: f64) -> Option<f64> {
     })
 }
 
-/// A whole symbol/expiry, loaded once.
 /// An earnings announcement for one symbol.
 #[derive(Debug, Clone)]
 pub struct EarningsEvent {
@@ -225,6 +235,7 @@ pub struct EarningsEvent {
     pub close_on: NaiveDate,
 }
 
+/// A whole symbol/expiry, loaded once.
 #[derive(Debug)]
 pub struct ChainSeries {
     pub symbol: String,
@@ -325,6 +336,19 @@ impl ChainSeries {
         self.expiry_instant
     }
 
+    /// The underlying's expiry-day print, which settles a position the option
+    /// tape stopped quoting. `None` when the tape does not reach expiry day — a
+    /// chain still live at the end of the capture — so an unexpired position is
+    /// never settled against a stale price.
+    pub fn settlement_price(&self) -> Option<f64> {
+        let (ts, bar) = self
+            .signal_underlying
+            .range(..=self.expiry_instant)
+            .next_back()
+            .or_else(|| self.underlying.range(..=self.expiry_instant).next_back())?;
+        (ts.date_naive() == self.expiry).then(|| bar.price())?
+    }
+
     /// The next earnings event on or after the given date. The engine uses this
     /// to close positions before earnings and to refuse entries in the blackout.
     pub fn next_earnings_from(&self, date: NaiveDate) -> Option<&EarningsEvent> {
@@ -368,6 +392,7 @@ impl ChainSeries {
         let price = underlying.price()?;
         Some(ChainSnapshot {
             symbol: self.symbol.clone(),
+            expiry: self.expiry,
             ts,
             underlying,
             forward: price,
@@ -434,6 +459,7 @@ impl ChainSeries {
 
         Some(ChainSnapshot {
             symbol: self.symbol.clone(),
+            expiry: self.expiry,
             ts,
             underlying: self.underlying_at(ts).unwrap_or_default(),
             forward: fit.forward,
@@ -796,6 +822,7 @@ mod tests {
         };
         let bar = ChainSnapshot {
             symbol: "TEST".into(),
+            expiry: chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
             ts: Utc::now(),
             underlying: UnderlyingBar::default(),
             forward: 100.0,
@@ -833,6 +860,7 @@ mod tests {
         };
         let snap = |quotes| ChainSnapshot {
             symbol: "TEST".into(),
+            expiry: chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
             ts: Utc::now(),
             underlying: UnderlyingBar::default(),
             forward: 100.0,

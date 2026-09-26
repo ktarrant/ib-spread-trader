@@ -133,6 +133,7 @@ mod tests {
     fn bar() -> ChainSnapshot {
         ChainSnapshot {
             symbol: "SPY".into(),
+            expiry: chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
             ts: Utc.with_ymd_and_hms(2026, 8, 19, 15, 0, 0).unwrap(),
             underlying: UnderlyingBar {
                 mid: Some(751.0),

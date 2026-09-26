@@ -29,7 +29,7 @@ pub use eval::{
 pub use features::{EarningsDistance, EntryFeatures, FeatureConfig, FeatureEngine, Features};
 pub use price_model::{LognormalDriftModel, LognormalModelConfig, PriceModel};
 pub use ranker::{
-    RankMetric, RankedChoice, RankingConfig, expected_pl_and_score, prob_profit_of, rank,
-    ranking_key,
+    RankMetric, RankedChoice, RankingConfig, choice_key, expected_pl_and_score, prob_profit_of,
+    rank, ranking_key,
 };
 pub use validation::{RankerValidationRecord, ValidationRecord};

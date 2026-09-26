@@ -187,6 +187,16 @@ pub fn ranking_key(
     (expected_pl, key)
 }
 
+/// What `rank` orders by: the configured metric, ties broken on the other so a
+/// field of equal-probability spreads still resolves to the highest-edge one.
+/// Public so a choice made in one chain can be weighed against another's.
+pub fn choice_key(choice: &RankedChoice, cfg: &RankingConfig) -> (f64, f64) {
+    match cfg.metric {
+        RankMetric::ExpectedValue => (choice.score, choice.prob_profit),
+        RankMetric::ProbProfit => (choice.prob_profit, choice.score),
+    }
+}
+
 pub fn rank(
     candidates: Vec<Candidate>,
     dist: &PriceDistribution,
@@ -227,15 +237,9 @@ pub fn rank(
             score,
             prob_profit,
         };
-        // Rank by the configured metric; break ties on the other so a field of
-        // equal-probability spreads still resolves to the highest-edge one.
-        let key = |c: &RankedChoice| match cfg.metric {
-            RankMetric::ExpectedValue => (c.score, c.prob_profit),
-            RankMetric::ProbProfit => (c.prob_profit, c.score),
-        };
         let better = match &best {
             None => true,
-            Some(current) => key(&choice) > key(current),
+            Some(current) => choice_key(&choice, cfg) > choice_key(current, cfg),
         };
         if better {
             best = Some(choice);
