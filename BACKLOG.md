@@ -60,9 +60,10 @@ our crude benchmark (monthly IV scaled to 7 days) rather than a mispricing.
 
 ## Also next
 
-- **The viz cannot see 15-minute chains**: `catalog.py`, `frames.BAR_SIZE` and
-  `backtest.underlying_bars` all read `30min`. The report's new `bar_minutes`
-  tells it which grid a run used.
+- **The viz chain pages (Events, Coverage) still read `30min` only.** The
+  Backtest and Model Evaluation pages handle 15-minute runs, neutral trades and
+  the skill interval; the chain pages' event thresholds were tuned on 30-minute
+  boundaries and need re-checking before they read 15-minute chains.
 - **calc's weekly script passes `--bar-size 30min`**, while 15 is now the grid;
   they should agree.
 - **The validation scripts read a dataset's `expiry`** and fail on an

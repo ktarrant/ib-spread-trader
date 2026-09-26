@@ -28,7 +28,7 @@ viz is the read side for the reports this repo writes, and the two halves of a
 change — a new field and the panel that renders it — belong together.
 
 When changing the viz: it has its own `CLAUDE.md`, its own conventions and its own
-golden tests (`uv run pytest`, 60 of them, skipping cleanly without a snapshot).
+golden tests (`uv run pytest`, 69 of them, skipping cleanly without a snapshot).
 Run them. And note the dependency direction stays one-way: the viz reads this
 repo's `out/` artifacts, so a field must exist in the report **before** the page
 that renders it, and removing one breaks a consumer you now maintain.
