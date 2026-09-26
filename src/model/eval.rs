@@ -141,8 +141,11 @@ pub struct ModelEval {
     /// Mean predictive stddev — sharpness. Only meaningful read next to coverage.
     pub mean_stddev: f64,
     /// Fraction of bars where the sign of the model's drift matched the realized
-    /// move. 0.5 is a coin flip.
+    /// move. 0.5 is a coin flip; 0.0 when the model forecast no direction at all.
     pub directional_hit_rate: f64,
+    /// Forecasts that called a direction — zero for a driftless model, whose
+    /// `directional_hit_rate` then means nothing.
+    pub directional_forecasts: usize,
 }
 
 /// Bootstrap resamples behind `crps_skill_interval`. The generator is seeded, so
@@ -225,7 +228,10 @@ impl ModelEval {
         for r in records {
             let predicted = r.mean - r.spot;
             let realized = r.realized - r.spot;
-            if predicted != 0.0 && realized != 0.0 {
+            // A mean within a thousandth of a stddev of spot is no call: a
+            // driftless lognormal's truncated grid mean wanders off spot on its
+            // own, by more the wider the distribution.
+            if predicted.abs() > 1e-3 * r.stddev && realized != 0.0 {
                 directional_total += 1;
                 if predicted.signum() == realized.signum() {
                     directional_hits += 1;
@@ -253,6 +259,7 @@ impl ModelEval {
             pit_calibration_error,
             mean_stddev,
             directional_hit_rate,
+            directional_forecasts: directional_total,
         })
     }
 }

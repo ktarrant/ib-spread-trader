@@ -904,6 +904,10 @@ pub struct ModelConfig {
     pub skew_weight: f64,
     pub grid_sigma: f64,
     pub grid_points: usize,
+    /// See `LognormalModelConfig::vol_multiplier`.
+    pub vol_multiplier: f64,
+    /// See `LognormalModelConfig::earnings_vol_multiplier`.
+    pub earnings_vol_multiplier: f64,
 }
 
 impl Default for ModelConfig {
@@ -919,6 +923,8 @@ impl Default for ModelConfig {
             skew_weight: d.skew_weight,
             grid_sigma: d.grid_sigma,
             grid_points: d.grid_points,
+            vol_multiplier: d.vol_multiplier,
+            earnings_vol_multiplier: d.earnings_vol_multiplier,
         }
     }
 }
@@ -927,6 +933,9 @@ impl ModelConfig {
     fn to_runtime(self) -> Result<LognormalModelConfig> {
         if self.horizon_days.is_nan() || self.horizon_days <= 0.0 {
             bail!("`model.horizon_days` must be positive");
+        }
+        if !(self.vol_multiplier > 0.0 && self.earnings_vol_multiplier > 0.0) {
+            bail!("`model.vol_multiplier` and `model.earnings_vol_multiplier` must be positive");
         }
         Ok(LognormalModelConfig {
             horizon_days: self.horizon_days,
@@ -938,6 +947,8 @@ impl ModelConfig {
             skew_weight: self.skew_weight,
             grid_sigma: self.grid_sigma,
             grid_points: self.grid_points,
+            vol_multiplier: self.vol_multiplier,
+            earnings_vol_multiplier: self.earnings_vol_multiplier,
         })
     }
 }

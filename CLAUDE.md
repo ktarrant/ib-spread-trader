@@ -1412,6 +1412,43 @@ BACKLOG.md records the resulting reframe — forecast move *size* against the
 option market's price for it, not direction. Every directional finding in this
 file predates the interval; re-check it against the gate before relying on it.
 
+### The first vol-timing model: positive on both months, not yet significant
+
+Fitting ATM IV × a multiplier on one month and scoring it on the other (Gaussian
+CRPS in log space, weekly-block intervals, both directions):
+
+- **Realized vol adds nothing beyond IV.** 1-, 5- and 22-day realized vol from
+  the 5-minute tape (overnight gaps included), alone or blended, fit a weight of
+  ~0 and score no better than a flat rescale. At a week out, IV already knows
+  what the stock's recent vol knows.
+- **Outside earnings, moves run below IV** — mean (move ÷ implied)² 0.69, 0.82
+  and 0.74 in the three periods the months do not share, 0.28–0.67 on the ETFs.
+  The variance premium, the one pattern with real sample size behind it.
+- **A week containing earnings moves ~2× the monthly IV's implied move** — but on
+  12 distinct events, 6 above implied and 6 below, and the months overlap
+  (2026-07-20 → 08-20) so they largely saw the same late-July prints. A monthly
+  IV spreads the jump over the month; the market's own event pricing is in the
+  near-over-far IV, which the weekly multi-expiry capture will supply.
+
+`models/vol-timing.toml` is the result: driftless, `vol_multiplier = 0.85`,
+`earnings_vol_multiplier = 2.0` (round numbers between the two fits, so neither
+record is strictly out of sample). It is the **first model positive on both
+months** — +0.0084 [−0.011, +0.029] and +0.0065 [−0.008, +0.023] — with the best
+calibration of any (PIT error 0.095/0.086, 50 % coverage 48–49 % against the
+null's 53 %), and it does not pass: both intervals include zero.
+
+Its null is `PriceModel::null_forecast` — driftless, vol = ATM IV, multipliers
+ignored — so the eval compares the model with the market rather than with
+itself. The gate's robustness test is now *per-symbol CRPS skill* (two thirds of
+symbols positive) rather than per-symbol direction, and a model that forecasts no
+direction records `directional_hit_rate: null` and owes that test nothing.
+
+**Do not read its backtest.** Traded through the directional-era `base` exits, it
+buys naked longs into earnings weeks and then `close_before_earnings` shuts all 8
+of them before the release they were bought for (August: 12 trades, +25.7 %;
+October: 1 trade). Exits and structures have to follow the model (BACKLOG Phases
+2–3) before its trades mean anything.
+
 The null-beating gate is the floor: a config that cannot beat a random walk
 out-of-sample is not a better forecaster, whatever P&L it posted. And the converse
 holds too — mean-reversion is adopted on its **forecast** merit, not its backtest

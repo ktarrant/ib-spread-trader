@@ -1,0 +1,20 @@
+{
+  "label": "vol-timing",
+  "dataset": "2026-08-21",
+  "horizon_days": 7.0,
+  "crps_skill": 0.008415526861489164,
+  "crps_skill_interval": [
+    -0.010830138657302868,
+    0.028714667343827105
+  ],
+  "weeks": 10,
+  "pit_error": 0.09465980376387326,
+  "coverage_50": 0.4886601254624417,
+  "coverage_80": 0.7592086215216343,
+  "coverage_90": 0.874859256876307,
+  "directional_hit_rate": null,
+  "symbols_with_skill": 6,
+  "symbols_total": 12,
+  "passed": false,
+  "evaluated_at": "2026-09-26T19:20:29.437482Z"
+}

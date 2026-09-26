@@ -24,6 +24,26 @@ pub trait PriceModel {
     fn horizon_days(&self) -> f64;
 
     fn forecast(&self, features: &Features, horizon_years: f64) -> PriceDistribution;
+
+    /// The random-walk null this model is scored against: no drift, and vol =
+    /// ATM IV — the option market's own forecast, untouched. A model that
+    /// reshapes the width must not reshape its null too, or the eval would
+    /// compare the model with itself.
+    fn null_forecast(&self, features: &Features, horizon_years: f64) -> PriceDistribution {
+        self.forecast(&null_features(features), horizon_years)
+    }
+}
+
+/// A bar's features with every drift and non-IV vol input removed.
+pub(crate) fn null_features(features: &Features) -> Features {
+    Features {
+        trend: None,
+        vwap_distance: None,
+        skew: None,
+        realized_vol: None,
+        atr: None,
+        ..*features
+    }
 }
 
 /// Tunable weights for [`LognormalDriftModel`]. Mapped from TOML in a later phase.
@@ -50,6 +70,13 @@ pub struct LognormalModelConfig {
     pub grid_sigma: f64,
     /// Number of grid points (odd keeps a point on the median).
     pub grid_points: usize,
+    /// Scales the whole volatility: below 1 says ATM IV overstates the moves
+    /// that follow (the variance premium option sellers collect).
+    pub vol_multiplier: f64,
+    /// Further scales the volatility when an earnings release falls inside the
+    /// horizon. A monthly chain's IV spreads the release's jump over the whole
+    /// month, so a week that contains it moves more than that IV implies.
+    pub earnings_vol_multiplier: f64,
 }
 
 impl Default for LognormalModelConfig {
@@ -66,6 +93,8 @@ impl Default for LognormalModelConfig {
             skew_weight: 0.5,
             grid_sigma: 4.0,
             grid_points: 101,
+            vol_multiplier: 1.0,
+            earnings_vol_multiplier: 1.0,
         }
     }
 }
@@ -118,8 +147,24 @@ impl PriceModel for LognormalDriftModel {
     }
 
     fn forecast(&self, features: &Features, horizon_years: f64) -> PriceDistribution {
+        let earnings_inside = features
+            .days_to_earnings
+            .is_some_and(|d| d >= 0 && d as f64 <= horizon_years * 365.25);
+        let scale = self.config.vol_multiplier
+            * if earnings_inside { self.config.earnings_vol_multiplier } else { 1.0 };
+        self.distribution(features, horizon_years, scale)
+    }
+
+    fn null_forecast(&self, features: &Features, horizon_years: f64) -> PriceDistribution {
+        self.distribution(&null_features(features), horizon_years, 1.0)
+    }
+}
+
+impl LognormalDriftModel {
+    /// The lognormal at `vol_scale` × the configured vol.
+    fn distribution(&self, features: &Features, horizon_years: f64, vol_scale: f64) -> PriceDistribution {
         let spot = features.spot;
-        let sigma_annual = self.annual_vol(features);
+        let sigma_annual = self.annual_vol(features) * vol_scale;
 
         // Scale vol to the horizon, then floor it so the grid never collapses:
         // a per-bar ATR range is a sane minimum, and a hard epsilon guards the

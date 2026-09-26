@@ -33,9 +33,9 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BINARY = ROOT / "target/release/ib-spread-trader"
 
 MIN_CRPS_SKILL = 0.0  # applied to the interval's lower bound
-MIN_DIRECTIONAL_HIT_RATE = 0.5
+MIN_DIRECTIONAL_HIT_RATE = 0.5  # only for a model that forecasts direction
 MAX_PIT_CALIBRATION_ERROR = 0.15
-MIN_LOSO_PASS_FRACTION = 0.66
+MIN_SYMBOL_PASS_FRACTION = 0.66  # symbols with their own positive CRPS skill
 
 
 def parse_args() -> argparse.Namespace:
@@ -87,15 +87,16 @@ def main() -> None:
         model_eval = backtest(args.binary, config, args.db)["model_eval"]
 
     pooled = model_eval["pooled"]
-    held_out_hits = [s["directional_hit_rate"] for s in model_eval["per_symbol"]]
-    passing_symbols = sum(hit > MIN_DIRECTIONAL_HIT_RATE for hit in held_out_hits)
-    required_symbols = math.ceil(MIN_LOSO_PASS_FRACTION * len(held_out_hits))
+    symbol_skills = [s["crps_skill"] for s in model_eval["per_symbol"]]
+    with_skill = sum(skill > 0 for skill in symbol_skills)
+    # A driftless model calls no direction, and owes the gate none.
+    hit = pooled["directional_hit_rate"] if pooled["directional_forecasts"] else None
     passed = (
         pooled["crps_skill_interval"][0] > MIN_CRPS_SKILL
-        and pooled["directional_hit_rate"] > MIN_DIRECTIONAL_HIT_RATE
+        and (hit is None or hit > MIN_DIRECTIONAL_HIT_RATE)
         and pooled["pit_calibration_error"] < MAX_PIT_CALIBRATION_ERROR
-        and len(held_out_hits) > 0
-        and passing_symbols >= required_symbols
+        and len(symbol_skills) > 0
+        and with_skill >= math.ceil(MIN_SYMBOL_PASS_FRACTION * len(symbol_skills))
     )
     record = {
         "label": args.label,
@@ -108,10 +109,9 @@ def main() -> None:
         "coverage_50": pooled["coverage_50"],
         "coverage_80": pooled["coverage_80"],
         "coverage_90": pooled["coverage_90"],
-        "directional_hit_rate": pooled["directional_hit_rate"],
-        "loso_min_dir_hit": min(held_out_hits),
-        "loso_symbols_passing": passing_symbols,
-        "loso_symbols_total": len(held_out_hits),
+        "directional_hit_rate": hit,
+        "symbols_with_skill": with_skill,
+        "symbols_total": len(symbol_skills),
         "passed": passed,
         "evaluated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }

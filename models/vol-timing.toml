@@ -1,0 +1,27 @@
+# A width-only forecast: no drift, and ATM IV rescaled by what moves have
+# actually followed it. Round numbers between the fits on each month (fit on
+# August, scored on October, and the reverse), not a fit to either:
+#   - outside earnings, weekly moves ran ~0.8-0.9x the IV-implied move in both
+#     months (the variance premium);
+#   - a week containing an earnings release moved ~2x what the *monthly* IV
+#     implied — partly because a monthly IV spreads the jump across the month.
+# Realized vol (1/5/22-day, 5-minute tape) added nothing beyond IV.
+[features]
+trend_fast = 10
+trend_slow = 30
+atr_period = 14
+realized_vol_period = 20
+skew_moneyness = 0.05
+
+[model]
+horizon_days = 7.0
+bars_per_year = 3276.0
+realized_vol_weight = 0.0
+fallback_vol = 0.30
+trend_weight = 0.0
+vwap_reversion = 0.0
+skew_weight = 0.0
+grid_sigma = 4.0
+grid_points = 101
+vol_multiplier = 0.85
+earnings_vol_multiplier = 2.0

@@ -29,16 +29,15 @@ our crude benchmark (monthly IV scaled to 7 days) rather than a mispricing.
   the ranker gate has no interval yet (its Spearman is pooled over candidates,
   and holds at 0.38–0.56 on both months), and a rule for what "labeled" means
   across several datasets (every record passes? the latest?).
-- **Phase 1 — the vol-timing model.** A driftless `PriceModel` whose width is
-  ATM IV × a forecast realized ÷ implied ratio. Inputs to test, each on both
-  months with intervals: earnings inside the horizon, index-ETF flag, realized
-  vol from the 5-minute tape over 1/5/22 days (the logged `realized_vol` is only
-  ~10 hours of 30-minute bars), and the **IV term structure** across the weekly
-  expiries — near-over-far ATM IV, and the event-implied move it implies. CRPS
-  skill against the IV null measures this directly once the width differs from
-  IV. Validate at the 15-minute cadence from the start (all captures are 15-min
-  now): trend 20/60, RSI 28, ATR 28, `iv_median_lookback` 400, `bars_per_year`
-  6552 as the like-for-like periods.
+- **Phase 1 — the vol-timing model.** First cut done: `models/vol-timing.toml`
+  (ATM IV × 0.85, × 2.0 when earnings fall inside the horizon) is positive on
+  both months but inside noise; realized vol added nothing (CLAUDE.md, *The first
+  vol-timing model*). Next inputs, as the weekly multi-expiry captures land:
+  the **IV term structure** (near-over-far ATM IV) and the **event-implied move**
+  it prices, which should replace the flat earnings multiplier — the monthly
+  chain's IV is the wrong benchmark for a week with a release in it. Then the
+  15-minute cadence (trend 20/60, RSI 28, ATR 28, `iv_median_lookback` 400,
+  `bars_per_year` 6552). More weeks of data are what the interval needs most.
 - **Phase 2 — direction-neutral structures.** Straddles and strangles (long
   vol), iron condors and butterflies (short vol) in `enumerate_verticals`' place
   or beside it. `payoff_bounds` already handles any same-expiry legs; the fill
@@ -46,7 +45,10 @@ our crude benchmark (monthly IV scaled to 7 days) rather than a mispricing.
   forecast has to clear.
 - **Phase 3 — vol-aware exits.** Long vol closes after the event or once the
   move has happened; short vol holds to its horizon. The directional give-ups
-  (forecast target/stop) do not transfer.
+  (forecast target/stop) do not transfer, and `close_before_earnings` plus the
+  entry blackout actively fight a long-vol position bought for the release —
+  vol-timing's first backtest closed all 8 of its earnings longs before the
+  print.
 - The existing directional work (RSI gates, 14-day models, trend sweeps) stays
   in git and CLAUDE.md as history; re-check any of it against the Phase 0 gate
   before relying on it.

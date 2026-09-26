@@ -12,10 +12,9 @@
   "coverage_50": 0.529688581314879,
   "coverage_80": 0.8326643598615917,
   "coverage_90": 0.9262283737024222,
-  "directional_hit_rate": 0.46173010380622836,
-  "loso_min_dir_hit": 0.1544885177453027,
-  "loso_symbols_passing": 5,
-  "loso_symbols_total": 15,
+  "directional_hit_rate": null,
+  "symbols_with_skill": 0,
+  "symbols_total": 15,
   "passed": false,
-  "evaluated_at": "2026-09-26T19:05:53.278922Z"
+  "evaluated_at": "2026-09-26T19:19:13.819951Z"
 }

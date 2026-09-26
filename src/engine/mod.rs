@@ -1733,17 +1733,8 @@ fn score_forecast(
         .underlying_at(bar.ts + Duration::seconds(horizon_secs))?
         .price()?;
 
-    // The random-walk null: same model, but features that carry no drift and let
-    // the vol fall back to ATM IV.
-    let null_features = Features {
-        trend: None,
-        vwap_distance: None,
-        skew: None,
-        realized_vol: None,
-        atr: None,
-        ..*features
-    };
-    let null = model.forecast(&null_features, horizon_years);
+    // The random-walk null: no drift, vol = ATM IV.
+    let null = model.null_forecast(features, horizon_years);
 
     Some(ForecastRecord::score(
         bar.ts,
