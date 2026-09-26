@@ -13,9 +13,9 @@
 //! like a clean one.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::domain::{OptionRight, normalize_symbol};
 use crate::pricing::{self, PairedStrike};
@@ -218,8 +218,11 @@ fn interp_smile_iv(smile: &[(f64, f64)], x: f64) -> Option<f64> {
 #[derive(Debug, Clone)]
 pub struct EarningsEvent {
     pub date: NaiveDate,
-    /// `before_open`, `after_close`, or `during_session`.
-    pub session_timing: String,
+    /// The last session before the release is priced in — the day a position
+    /// that must not hold through it closes. The session *before* the capture's
+    /// `reaction_date`, so an after-close release closes the same day and a
+    /// Monday pre-open release closes the Friday before.
+    pub close_on: NaiveDate,
 }
 
 #[derive(Debug)]
@@ -252,7 +255,8 @@ impl ChainSeries {
 
         let (quotes, option_quality) = load_option_quotes(snapshot, &symbol, &expiry_text)?;
         let (underlying, underlying_quality) = load_underlying(snapshot, &symbol, BAR_SIZE)?;
-        let earnings = load_earnings(snapshot, &symbol)?;
+        let sessions = underlying.keys().map(|ts| ts.date_naive()).collect();
+        let earnings = load_earnings(snapshot, &symbol, &sessions)?;
         let (signal_underlying, signal_quality, underlying_bar_size) = {
             let (u, q) = load_underlying(snapshot, &symbol, "5min")?;
             if !u.is_empty() {
@@ -584,29 +588,54 @@ fn load_underlying(
     Ok((out, quality))
 }
 
-fn load_earnings(snapshot: &Snapshot, symbol: &str) -> Result<Vec<EarningsEvent>> {
+/// `reaction_date` is the session the capture says absorbs the release; it
+/// already encodes before-open against after-close, so no timing rule is
+/// repeated here.
+fn load_earnings(
+    snapshot: &Snapshot,
+    symbol: &str,
+    sessions: &BTreeSet<NaiveDate>,
+) -> Result<Vec<EarningsEvent>> {
     let mut stmt = snapshot.conn().prepare(
-        "SELECT event_date, session_timing FROM events
+        "SELECT event_date,
+                COALESCE(json_extract(detail_json, '$.reaction_date'), event_date)
+         FROM events
          WHERE symbol = ?1 AND kind = 'earnings'
          ORDER BY event_date",
     )?;
     let rows = stmt.query_map([symbol], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
-        ))
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
+    let parse = |text: &str| {
+        NaiveDate::parse_from_str(text, "%Y-%m-%d")
+            .with_context(|| format!("earnings date '{text}'"))
+    };
     let mut out = Vec::new();
     for row in rows {
-        let (date_str, timing) = row?;
-        let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-            .with_context(|| format!("earnings date '{date_str}'"))?;
+        let (date, reaction) = row?;
         out.push(EarningsEvent {
-            date,
-            session_timing: timing.unwrap_or_default(),
+            date: parse(&date)?,
+            close_on: session_before(parse(&reaction)?, sessions),
         });
     }
     Ok(out)
+}
+
+/// The last session before `day`. Read off the stock tape where the tape spans
+/// `day`, so a holiday is skipped like a weekend; otherwise — the release is past
+/// the end of the data — the previous weekday, rather than the tape's last day,
+/// which would close a position for an event still a week away.
+fn session_before(day: NaiveDate, sessions: &BTreeSet<NaiveDate>) -> NaiveDate {
+    match sessions.range(..day).next_back() {
+        Some(&session) if sessions.range(day..).next().is_some() => session,
+        _ => {
+            let mut prior = day.pred_opt().expect("a capture date has a predecessor");
+            while prior.weekday().number_from_monday() > 5 {
+                prior = prior.pred_opt().expect("a capture date has a predecessor");
+            }
+            prior
+        }
+    }
 }
 
 /// Every writer emits RFC3339 UTC with a literal `+00:00`; lexicographic range
@@ -630,6 +659,22 @@ mod tests {
             dropped_nonpositive: 1,
         };
         assert_eq!(q.rows_kept(), 94);
+    }
+
+    /// The before-earnings exit closes on this date, so a miss here holds a
+    /// position through the print. 33 of 254 pre-open releases in the reference
+    /// snapshot land on a Monday.
+    #[test]
+    fn the_session_before_a_release_skips_weekends_and_holidays() {
+        let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        // 2026-09-07 is Labor Day; the tape trades Thu 3, Fri 4, Tue 8, Wed 9.
+        let tape: BTreeSet<NaiveDate> = [d(9, 3), d(9, 4), d(9, 8), d(9, 9)].into();
+
+        assert_eq!(session_before(d(9, 9), &tape), d(9, 8), "after-close Tuesday");
+        assert_eq!(session_before(d(9, 8), &tape), d(9, 4), "pre-open after the holiday");
+        // Past the tape: the previous weekday, never the tape's last session.
+        assert_eq!(session_before(d(9, 21), &tape), d(9, 18), "a Monday past the data");
+        assert_eq!(session_before(d(9, 16), &tape), d(9, 15));
     }
 
     #[test]
@@ -657,7 +702,7 @@ mod tests {
                  open REAL, high REAL, low REAL, close REAL, volume REAL);
              CREATE TABLE events (id INTEGER PRIMARY KEY, symbol TEXT,
                  event_date TEXT NOT NULL, event_time TEXT, session_timing TEXT,
-                 kind TEXT NOT NULL, source TEXT NOT NULL, source_id TEXT, title TEXT);
+                 kind TEXT NOT NULL, source TEXT NOT NULL, source_id TEXT, title TEXT, detail_json TEXT);
              INSERT INTO contracts (id, symbol, kind, exchange, currency, expiry, strike, right)
              VALUES (1, 'TEST', 'stock',  'SMART', 'USD', NULL,         NULL, NULL),
                     (2, 'TEST', 'option', 'SMART', 'USD', '2026-08-21', 100.0, 'C'),

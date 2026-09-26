@@ -302,23 +302,13 @@ fn forecast_horizon_exit(
     (elapsed_days >= days).then_some(ExitReason::ForecastHorizon)
 }
 
-/// Close if earnings are tonight (`after_close` on today) or tomorrow morning
-/// (`before_open` on tomorrow). A `during_session` event on today also triggers.
+/// Close on the last session before the release is priced in: the day of an
+/// after-close release, the session before a pre-open one — a Friday for a
+/// Monday morning, which "the calendar day before" would have made a Sunday and
+/// never fired. A during-session release also closes the session before, since
+/// by the day itself the print may already be out.
 fn earnings_exit(bar_ts: DateTime<Utc>, next: Option<&EarningsEvent>) -> Option<ExitReason> {
-    let event = next?;
-    let bar_date = bar_ts.date_naive();
-
-    let should_close = match event.session_timing.as_str() {
-        "after_close" | "during_session" => bar_date == event.date,
-        "before_open" => {
-            // Close the day before — the next session opens with earnings priced in.
-            let day_before = event.date - chrono::Duration::days(1);
-            bar_date == day_before
-        }
-        _ => bar_date == event.date,
-    };
-
-    should_close.then_some(ExitReason::BeforeEarnings)
+    (bar_ts.date_naive() == next?.close_on).then_some(ExitReason::BeforeEarnings)
 }
 
 /// True if the bar falls within the earnings blackout window.
@@ -1190,7 +1180,7 @@ mod tests {
         use crate::data::EarningsEvent;
         let event = EarningsEvent {
             date: chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
-            session_timing: "after_close".to_string(),
+            close_on: chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
         };
         let rules = ExitRules {
             close_before_earnings: true,
@@ -1223,7 +1213,7 @@ mod tests {
         use crate::data::EarningsEvent;
         let event = EarningsEvent {
             date: chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
-            session_timing: "before_open".to_string(),
+            close_on: chrono::NaiveDate::from_ymd_opt(2026, 7, 28).unwrap(),
         };
         let rules = ExitRules {
             close_before_earnings: true,
@@ -1249,7 +1239,7 @@ mod tests {
         use crate::data::EarningsEvent;
         let event = EarningsEvent {
             date: chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
-            session_timing: "after_close".to_string(),
+            close_on: chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
         };
         let rules = ExitRules::default();
         let ctx = ExitContext {
@@ -1268,7 +1258,7 @@ mod tests {
         use crate::data::EarningsEvent;
         let event = EarningsEvent {
             date: chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
-            session_timing: "after_close".to_string(),
+            close_on: chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
         };
         // 3-day blackout: Jul 27, 28, 29 are blocked (days_until = 2, 1, 0).
         assert!(!in_earnings_blackout(

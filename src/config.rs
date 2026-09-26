@@ -45,8 +45,8 @@ pub struct StrategyConfig {
     pub dataset: Option<DatasetBlock>,
     #[serde(default = "default_cash")]
     pub initial_cash: f64,
-    /// Which decision engine to run. Absent means the staged pipeline, so every
-    /// existing config keeps working untouched.
+    /// Which decision engine to run. Absent means the ranked engine; the retired
+    /// staged pipeline must be asked for by name.
     #[serde(default)]
     pub mode: StrategyMode,
     /// Legacy inline account selection. Named/inline `portfolio` blocks supersede
@@ -90,10 +90,10 @@ pub struct StrategyConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyMode {
-    /// The `signal -> structure -> selector` pipeline.
-    #[default]
+    /// The retired `signal -> structure -> selector` pipeline.
     Staged,
     /// The price-target engine: features -> distribution -> ranked verticals.
+    #[default]
     Ranked,
 }
 
@@ -466,6 +466,18 @@ fn reject_shadowed_fields(text: &str) -> Result<()> {
                  move it inside the block, or drop `{block}`"
             );
         }
+    }
+    // The engine a config does not run ignores its sections just as silently. A
+    // config that named `model` and `ranker` but forgot `mode` once ran the
+    // staged pipeline under those labels.
+    let staged = raw.get("mode").and_then(toml::Value::as_str) == Some("staged");
+    let (engine, ignored): (&str, &[&str]) = if staged {
+        ("ranked", &["model", "ranker", "features", "candidates", "ranking"])
+    } else {
+        ("staged", &["signal", "structure"])
+    };
+    if let Some(key) = ignored.iter().find(|key| raw.contains_key(**key)) {
+        bail!("`{key}` configures the {engine} engine, which this config's `mode` does not run");
     }
     Ok(())
 }
@@ -1524,6 +1536,7 @@ mod tests {
 
     const FULL: &str = r#"
 name    = "rsi-oversold-bull-call"
+mode    = "staged"
 symbols = ["SPY", "QQQ"]
 expiry  = "2026-08-21"
 initial_cash = 50000.0
@@ -1810,6 +1823,24 @@ horizon_days = 10.0
         }
     }
 
+    /// A config names its engine's sections, and the default engine is ranked:
+    /// labels without a `mode` once ran the staged pipeline under their names.
+    #[test]
+    fn a_section_for_the_engine_not_run_is_refused() {
+        for source in [
+            "mode=\"staged\"\nmodel=\"mean-reversion\"",
+            "mode=\"staged\"\nranker=\"ev\"",
+            "[signal]\nkind=\"rsi_cross\"",
+            "mode=\"ranked\"\n[structure]\nkind=\"vertical\"",
+        ] {
+            let err = reject_shadowed_fields(source).unwrap_err();
+            assert!(err.to_string().contains("does not run"), "{source}: {err}");
+        }
+        reject_shadowed_fields("model=\"mean-reversion\"\nranker=\"ev\"").unwrap();
+        let unmoded: StrategyConfig = toml::from_str("symbols=[\"SPY\"]").unwrap();
+        assert_eq!(unmoded.mode, StrategyMode::Ranked);
+    }
+
     #[test]
     fn an_inline_block_still_pairs_with_its_own_legacy_fields() {
         // `[model]` *is* the inline block, so `[features]` belongs beside it —
@@ -1879,7 +1910,7 @@ horizon_days = 10.0
     #[test]
     fn a_typo_in_a_stage_name_fails_before_any_io() {
         let err = toml::from_str::<StrategyConfig>(
-            "symbols = [\"SPY\"]\nexpiry = \"2026-08-21\"\n[signal]\nkind = \"rsi_crass\"",
+            "mode = \"staged\"\nsymbols = [\"SPY\"]\nexpiry = \"2026-08-21\"\n[signal]\nkind = \"rsi_crass\"",
         )
         .unwrap_err();
         assert!(err.to_string().contains("rsi_crass"), "{err}");
@@ -1902,7 +1933,7 @@ horizon_days = 10.0
         assert!(no_symbols.validate().is_err());
 
         let inverted: StrategyConfig = toml::from_str(
-            "symbols = [\"SPY\"]\nexpiry = \"2026-08-21\"\n[structure]\nkind = \"vertical\"\nlong_delta = 0.3\nshort_delta = 0.5",
+            "mode = \"staged\"\nsymbols = [\"SPY\"]\nexpiry = \"2026-08-21\"\n[structure]\nkind = \"vertical\"\nlong_delta = 0.3\nshort_delta = 0.5",
         )
         .unwrap();
         let err = inverted.validate().unwrap_err();
@@ -1913,6 +1944,7 @@ horizon_days = 10.0
     fn rsi_trend_filtered_with_price_sma_parses() {
         let config: StrategyConfig = toml::from_str(
             r#"
+mode = "staged"
 symbols = ["SPY"]
 expiry = "2026-08-21"
 
@@ -1941,6 +1973,7 @@ trend_period = 50
     fn rsi_trend_filtered_with_sma_cross_parses() {
         let config: StrategyConfig = toml::from_str(
             r#"
+mode = "staged"
 symbols = ["SPY"]
 expiry = "2026-08-21"
 
@@ -1960,6 +1993,7 @@ trend_slow = 50
     fn rsi_trend_filtered_without_trend_params_fails_validation() {
         let config: StrategyConfig = toml::from_str(
             r#"
+mode = "staged"
 symbols = ["SPY"]
 expiry = "2026-08-21"
 
@@ -1975,6 +2009,7 @@ kind = "rsi_trend_filtered"
     fn volatility_contraction_defaults_are_configurable_without_recompiling() {
         let config: StrategyConfig = toml::from_str(
             r#"
+mode = "staged"
 symbols = ["SPY"]
 expiry = "2026-08-21"
 

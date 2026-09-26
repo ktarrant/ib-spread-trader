@@ -376,7 +376,7 @@ fn a_never_firing_strategy_returns_its_capital_exactly_on_real_data() {
     let snapshot = snapshot_or_skip!();
     // An RSI level of 0 is unreachable, so the signal cannot cross it.
     let config: StrategyConfig = toml::from_str(
-        "symbols = [\"SPY\"]\nexpiry = \"2026-08-21\"\n[signal]\nkind = \"rsi_cross\"\nlevel = 0.0",
+        "mode = \"staged\"\nsymbols = [\"SPY\"]\nexpiry = \"2026-08-21\"\n[signal]\nkind = \"rsi_cross\"\nlevel = 0.0",
     )
     .unwrap();
     let series = ChainSeries::load(&snapshot, "SPY", config.expiry).unwrap();

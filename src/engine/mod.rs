@@ -1666,7 +1666,7 @@ pub mod testing {
                  open REAL, high REAL, low REAL, close REAL, volume REAL);
              CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, symbol TEXT,
                  event_date TEXT NOT NULL, event_time TEXT, session_timing TEXT,
-                 kind TEXT NOT NULL, source TEXT NOT NULL, source_id TEXT, title TEXT);
+                 kind TEXT NOT NULL, source TEXT NOT NULL, source_id TEXT, title TEXT, detail_json TEXT);
              INSERT INTO contracts (id, symbol, kind, exchange, currency, expiry, strike, right)
              VALUES (1, 'TEST', 'stock', 'SMART', 'USD', NULL, NULL, NULL);",
         )
@@ -1761,7 +1761,7 @@ pub mod testing {
                  open REAL, high REAL, low REAL, close REAL, volume REAL);
              CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, symbol TEXT,
                  event_date TEXT NOT NULL, event_time TEXT, session_timing TEXT,
-                 kind TEXT NOT NULL, source TEXT NOT NULL, source_id TEXT, title TEXT);
+                 kind TEXT NOT NULL, source TEXT NOT NULL, source_id TEXT, title TEXT, detail_json TEXT);
              INSERT INTO contracts (id, symbol, kind, exchange, currency, expiry, strike, right)
              VALUES (1, 'TEST', 'stock', 'SMART', 'USD', NULL, NULL, NULL);",
         )

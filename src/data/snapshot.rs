@@ -56,10 +56,8 @@ impl Snapshot {
         })
     }
 
-    /// Open the newest snapshot in `~/Documents/Options Database`.
-    ///
-    /// Filenames carry an ISO date (`...-2026-08-26.sqlite3`), so lexicographic
-    /// order is chronological order.
+    /// Open the newest snapshot in `~/Documents/Options Database`, judged by the
+    /// ISO date that ends its filename.
     pub fn open_default() -> Result<Self> {
         Self::open(default_snapshot_path()?)
     }
@@ -82,20 +80,50 @@ impl Snapshot {
 pub fn default_snapshot_path() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").context("HOME is not set")?;
     let dir = PathBuf::from(home).join(SNAPSHOT_DIR);
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir(&dir)
+    let candidates: Vec<PathBuf> = std::fs::read_dir(&dir)
         .with_context(|| format!("reading snapshot directory {}", dir.display()))?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|ext| ext == "sqlite3"))
         .collect();
-    candidates.sort();
-    candidates
-        .pop()
-        .with_context(|| format!("no *.sqlite3 snapshot in {}", dir.display()))
+    newest(candidates).with_context(|| format!("no *.sqlite3 snapshot in {}", dir.display()))
+}
+
+/// The snapshot whose filename ends in the latest date. Sorting whole names is
+/// not enough: the weekly capture writes `ib-option-calc-2026-10-01`, which must
+/// beat the older `ib-option-calc-snapshot-2026-08-28` — and `s` sorts after `2`.
+/// An undated name loses to any dated one.
+fn newest(paths: Vec<PathBuf>) -> Option<PathBuf> {
+    let date_in_name = |path: &PathBuf| {
+        let stem = path.file_stem()?.to_str()?;
+        let tail = stem.get(stem.len().checked_sub(10)?..)?;
+        chrono::NaiveDate::parse_from_str(tail, "%Y-%m-%d").ok()
+    };
+    paths
+        .into_iter()
+        .max_by_key(|path| (date_in_name(path), path.clone()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_newest_snapshot_is_judged_by_the_date_in_its_name() {
+        let pick = |names: &[&str]| {
+            newest(names.iter().map(PathBuf::from).collect())
+                .map(|p| p.display().to_string())
+        };
+        assert_eq!(
+            pick(&[
+                "ib-option-calc-snapshot-2026-08-28.sqlite3",
+                "ib-option-calc-2026-10-01.sqlite3",
+                "scratch.sqlite3",
+            ]),
+            Some("ib-option-calc-2026-10-01.sqlite3".into())
+        );
+        assert_eq!(pick(&["scratch.sqlite3"]), Some("scratch.sqlite3".into()));
+        assert_eq!(pick(&[]), None);
+    }
 
     #[test]
     fn rejects_a_missing_file() {
