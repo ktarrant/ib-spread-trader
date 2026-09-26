@@ -172,7 +172,9 @@ label mean "walk-forward across dates."
 
 Items 1–6 are complete: model-owned horizon, model and ranker validation
 registries, labeled exits, pluggable portfolio allocation, and five-label backtest
-composition. The remaining constraint is external: `DataSet = "2026-08-21"` is
+composition. A DataSet may now name several `expiries`, traded side by side with
+each position in one chain (see CLAUDE.md, *Several expiries*). The remaining
+constraint is external: `DataSet = "2026-08-21"` is
 fixed to one snapshot/expiry until the capture side provides more. Once it does,
 the current per-symbol robustness check generalizes to walk-forward validation
 across dataset dates. This repository does not modify the capture tool.

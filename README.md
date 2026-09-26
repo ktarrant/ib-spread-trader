@@ -41,7 +41,7 @@ model     = "mean-reversion"
 ranker    = "ev"
 portfolio = "shared_20k"
 exit      = "base"
-dataset   = "2026-08-21"
+dataset   = "2026-08-21"   # a label whose file sets `expiry`, or `expiries = [...]`
 
 [execution]
 timing = "next_bar"
@@ -85,7 +85,8 @@ Most of the design is about not manufacturing edge that was never there.
 | `pricing/` | Black-76, put-call-parity forward, implied vol, delta |
 | `model/` | Forecasts, ranking, evaluation, validation gates |
 | `execution/` | Which strikes fill, and what crossing the book costs |
-| `indicators/`, `signal/`, `structure/` | The retired staged pipeline, kept dormant behind `Strategy::Staged` |
+| `indicators/` | Incremental SMA, RSI, ATR, VWAP, realized vol — the feature engine's inputs |
+| `signal/`, `structure/` | The retired staged pipeline, kept dormant behind `Strategy::Staged` |
 | `portfolio/`, `engine/` | Allocation policies, positions, bar loop, exits, settlement |
 | `report/` | Summary, trade log, equity curve, rejection census |
 | `models/`, `rankers/`, `portfolios/`, `exits/`, `datasets/` | Labeled block registries |

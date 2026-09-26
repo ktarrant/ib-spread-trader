@@ -57,9 +57,10 @@ cargo run -- catalog --all      # including chains too thin to trade
 Every subcommand prints **JSON to stdout and nothing else** (a convention shared
 with `ib-option-calc`), so output pipes into `jq` and diffs cleanly between runs.
 
-`--db` / `$IB_SNAPSHOT` picks the snapshot; the default is the newest `*.sqlite3`
-in `~/Documents/Options Database`, which works because the filenames are date-stamped
-and therefore sort chronologically.
+`--db` / `$IB_SNAPSHOT` picks the snapshot; the default is the `*.sqlite3` in
+`~/Documents/Options Database` whose filename **ends in the latest date**. Not a plain
+name sort: the weekly capture writes `ib-option-calc-2026-10-01.sqlite3`, and the
+older `ib-option-calc-snapshot-2026-08-28.sqlite3` would win that (`s` > `2`).
 
 ## The snapshot is irreplaceable — read-only is enforced, not requested
 
@@ -85,7 +86,7 @@ number is there to stop you assuming:
 
 | | |
 |---|---|
-| 12 chains, **all expiry `2026-08-21`** | No expiry roll is testable. Build for it; validate on one chain. |
+| 12 chains, **all expiry `2026-08-21`** | Multi-expiry runs are built (see *Several expiries*) but only fixture-tested until a snapshot holds more than one chain. |
 | ~2 months, 42–45 sessions, 543–619 timestamps | Thin. Per-trade logs mean more than Sharpe here. |
 | `strikes` > `paired_strikes` on AAPL/AMZN/COIN/NVDA (36 vs 24 on AMZN) | The parity fit only sees paired strikes. |
 | `stock_ts_overlap` < `timestamps` on SPY/QQQ/IWM only | Those options trade to 20:00 UTC, 15 min past the equity close. That bar has no spot — fall back to the parity forward. |
@@ -333,6 +334,36 @@ The 30-min underlying stays in `ChainSnapshot.underlying` for option bars so the
 parity forward comparison against spot remains contemporaneous. Stock-only
 snapshots use the 5-min bar and carry no option quotes — `atm_implied_vol()`
 returns None and no strikes are selectable.
+
+### Several expiries: one forecast, a position per chain, never rolled
+
+A dataset with `expiries = [...]` loads every chain of each symbol, and
+`run_shared` takes `&[Vec<ChainSeries>]` — a symbol's chains, ascending by expiry.
+Per bar and symbol:
+
+- **Features are read once**, off the *feature chain*: the nearest expiry that
+  still covers the model horizon, so its ATM IV is the vol of the period being
+  forecast (the farthest when none covers it). Its expiry is logged on every
+  forecast row. Switching chains as one expires steps ATM IV along the term
+  structure, and `iv_vs_median`'s trailing window sees that step.
+- **Each chain gets its own forecast**: horizon capped at *that* chain's expiry,
+  and a sampled spot mapped through *that* chain's forward.
+- **Every chain outside the entry blackout is ranked, and the best candidate
+  across them wins** by the ranker's own key (`ranker::choice_key`). The funnel
+  still counts at most one `chosen` per bar.
+- **A position lives in one chain.** `OpenPosition`/`ClosedTrade` carry `expiry`;
+  marks, exits and closes read only that chain's bar. Read against another
+  chain's bar a position looks unquoted and would be closed at intrinsic, so
+  every filter is `(symbol, expiry)`. Nothing rolls.
+- **Settlement happens mid-run**, at each chain's expiry-day print, freeing the
+  capital for later entries. A chain whose tape never reaches expiry day (still
+  live at the end of the capture) has no print, and its positions stay open,
+  marked.
+
+Several expiries need ranked mode and the shared account; `validate` refuses the
+staged pipeline and the per-symbol loop, which each read one chain. With one
+chain every step reduces to the old path — the full reports were diffed
+byte-for-byte against the previous build, and the goldens pin it.
 
 ## The census is part of the result
 
@@ -1142,9 +1173,12 @@ takes 10.7s instead of 0.24s.
 
 ## Strategies are TOML over Rust traits
 
-`strategies/mean_reversion.toml` is the worked example; the shipped configs are all
-`mode = "ranked"` (the staged three-stage pipeline is retired — its configs are
-gone, its engine dormant). A ranked strategy composes five strict labels:
+`strategies/mean_reversion.toml` is the worked example. **`mode` defaults to
+`ranked`**; the retired staged pipeline (its configs gone, its engine dormant) must
+be asked for with `mode = "staged"`. A section for the engine a config does not
+run — `[signal]` in a ranked config, a `model` label in a staged one — is refused,
+because a config that named `model` and `ranker` but forgot `mode` once ran the
+staged pipeline under those labels. A ranked strategy composes five strict labels:
 `model`, `ranker`, `portfolio`, `exit`, and `dataset`. They resolve TOML under the
 matching plural directories; each field also accepts an inline table for one-off
 runs. Genuinely new logic is still a trait impl (`PriceModel`, `PortfolioModel`,
