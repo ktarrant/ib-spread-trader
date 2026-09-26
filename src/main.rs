@@ -8,7 +8,7 @@ use ib_spread_trader::config::{AccountMode, StrategyConfig};
 use ib_spread_trader::data::{
     ChainSeries, Snapshot, chain_coverage, snapshot::default_snapshot_path,
 };
-use ib_spread_trader::{engine, report};
+use ib_spread_trader::{engine, intraday, report};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -57,6 +57,15 @@ enum Command {
         #[arg(long)]
         trades: bool,
     },
+    /// Day-trade the stock tape off the initial balance or prior value area.
+    Intraday {
+        /// Path to an intraday TOML; defaults to the initial-balance rules.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Include every trade in the JSON, not just the summaries.
+        #[arg(long)]
+        trades: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -68,6 +77,14 @@ fn main() -> Result<()> {
     let snapshot = Snapshot::open(&path)?;
 
     match cli.command {
+        Command::Intraday { config, trades } => {
+            let cfg = match config {
+                Some(path) => intraday::IntradayConfig::load(&path)?,
+                None => intraday::IntradayConfig::default(),
+            };
+            let report = intraday::run(&snapshot, &cfg, trades)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::Catalog { all } => {
             let mut chains = chain_coverage(&snapshot)?;
             let total = chains.len();

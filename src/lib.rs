@@ -4,6 +4,7 @@ pub mod domain;
 pub mod engine;
 pub mod execution;
 pub mod indicators;
+pub mod intraday;
 pub mod model;
 pub mod portfolio;
 pub mod pricing;

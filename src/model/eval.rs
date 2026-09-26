@@ -164,6 +164,20 @@ fn skill_interval(records: &[ForecastRecord]) -> ([f64; 2], usize) {
         week.1 += r.null_crps;
     }
     let blocks: Vec<(f64, f64)> = weeks.into_values().collect();
+    let interval = bootstrap_interval(&blocks, |model, null| {
+        if null > 0.0 { 1.0 - model / null } else { 0.0 }
+    });
+    (interval, blocks.len())
+}
+
+/// 95 % interval of `stat(Σa, Σb)` over `blocks` of `(a, b)` sums, resampled
+/// whole with replacement. Blocks are what make it honest: records inside one
+/// week (or one day, for the intraday tape) move together and are not
+/// independent draws. `[0, 0]` for no blocks.
+pub fn bootstrap_interval(blocks: &[(f64, f64)], stat: impl Fn(f64, f64) -> f64) -> [f64; 2] {
+    if blocks.is_empty() {
+        return [0.0; 2];
+    }
     // splitmix64: a few lines, and no dependency for a resampling index.
     let mut state = 0x9E37_79B9_7F4A_7C15_u64;
     let mut next = || {
@@ -173,18 +187,18 @@ fn skill_interval(records: &[ForecastRecord]) -> ([f64; 2], usize) {
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     };
-    let mut skills: Vec<f64> = (0..BOOTSTRAP_REPS)
+    let mut stats: Vec<f64> = (0..BOOTSTRAP_REPS)
         .map(|_| {
-            let (model, null) = (0..blocks.len()).fold((0.0, 0.0), |(m, n), _| {
-                let (bm, bn) = blocks[(next() % blocks.len() as u64) as usize];
-                (m + bm, n + bn)
+            let (a, b) = (0..blocks.len()).fold((0.0, 0.0), |(a, b), _| {
+                let (ba, bb) = blocks[(next() % blocks.len() as u64) as usize];
+                (a + ba, b + bb)
             });
-            if null > 0.0 { 1.0 - model / null } else { 0.0 }
+            stat(a, b)
         })
         .collect();
-    skills.sort_by(f64::total_cmp);
-    let at = |q: f64| skills[((BOOTSTRAP_REPS - 1) as f64 * q).round() as usize];
-    ([at(0.025), at(0.975)], blocks.len())
+    stats.sort_by(f64::total_cmp);
+    let at = |q: f64| stats[((BOOTSTRAP_REPS - 1) as f64 * q).round() as usize];
+    [at(0.025), at(0.975)]
 }
 
 impl ModelEval {

@@ -1198,6 +1198,77 @@ one expiry there is no out-of-period test to appeal to, so treat the label as
 provisional until the capture side supplies another expiry.
 
 
+## Intraday levels: a stock-only day-trading path
+
+`cargo run -- intraday [--config x.toml] [--trades]` (`src/intraday.rs`) trades
+the **stock** on 5-minute bars, flat by the close: break of the initial balance
+(first hour) or of the prior session's 70 % value area, then either a
+**breakout** (close clearly beyond, a later close back within `retest_band` of
+the level, target/stop in level-widths) or a **fade** (the excursion reaches
+`fade_min_extension` widths before any retest, RSI crosses back through 70/30
+while still beyond, target the level). Inside the range nothing trades. It shares
+no code with the option engine and keeps its rules: decide on a close, fill at
+the next bar's opening bid/ask, stops before targets when one bar reaches both,
+$0.005/share with a $1 minimum.
+
+Options are not the vehicle for this yet: the option tape is 15/30-minute and
+monthly-only, and a typical move past the IB (0.34 widths, ~0.6 % of spot) is a
+few crossings of an option's spread.
+
+**First run, 2026-09-26 snapshot (17 symbols, 1 357 sessions): every variant
+loses**, 4–18 bp a trade net of ~4 bp costs, across IB 30/60 min, value area,
+targets, stops, bands, RSI levels and entry cutoffs. The by-day-type split says
+why, and it is the user's own intuition measured:
+
+| IB, defaults | back inside by close | beyond, <1 width | trend day, ≥1 width |
+|---|---|---|---|
+| breakout | 290, **−56 bp**, 2 % win | 267, +32 bp | 19, +103 bp |
+| fade | 45, **+43 bp**, 82 % win | 149, −15 bp | 39, −47 bp |
+
+`day_close_beyond` is **hindsight** — a label, never an input. Both setups
+have edge on the right day type and give it all back on the wrong one, so the
+strategy *is* the day-type call. The textbook tell does not make it:
+`width_ratio` (today's IB over its trailing 20-session median) has narrow IBs
+**worse** for breakouts (−14 bp) than normal ones (−8 bp).
+
+### Context labels sort breakouts; the "sessions" claim does not survive the tape
+
+Every trade carries entry-time labels, each read against its direction (`with`,
+`against`, `neutral`, `unknown`): the open against the prior value area, SPY's
+close against SPY's own levels, the 10:30–11:00 "reaction" move (known from
+11:00), the 13:00–14:00 post-lunch move, and the entry window. `by_feature`
+buckets them with **day-block** intervals (`model::eval::bootstrap_interval`,
+shared with the CRPS gate) — 17 symbols on one day are one market, so ~80
+days, not ~800 trades, is the sample.
+
+Singly, every label moves breakouts the expected way and no interval separates.
+Counting how many of the three (open, SPY, reaction) agree is monotone:
+
+| breakout, labels `with` | 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| trades | 94 | 234 | 196 | 52 (32 days) |
+| avg net bp | **−30.7** | −9.9 | −2.6 | **+0.6** |
+
+That is a day-type classifier starting to work, not an edge: the best bucket is
+breakeven after costs. The count was built after the single-label table was
+seen, though the favourable direction of each label was fixed beforehand.
+Fades are not sorted by any label.
+
+**A window's move does not predict the rest of the day.** `session_windows`
+tests the expert claim directly on all 1 350 sessions: for every half hour (and
+13:00–14:00), the share of sessions whose window-end-to-close move follows the
+window's direction. All sit at 46–52 % with intervals spanning 50 %, 10:30–11:00
+included (48.4 %). The reaction does not call the day; it only helps
+**conditionally** — a breakout against it averages −17.7 bp, with it −3.3 bp.
+
+Two timing rules do hold. **Power hour**: IB breakouts decided 15:00–15:45
+(`last_entry = "15:45"`) average −19.5 bp [−27.8, −10.9], the one interval
+clear of zero, and 15:00–15:30 is the one window whose move tends to *reverse*
+(45.9 % [42.7, 49.3]). **Do not fade the reaction**: fades decided 10:30–11:00
+average −55.6 bp (IB, 14) and −20.7 bp (value area, 167). The first hour, which
+only value-area levels can trade, is *not* worse than the rest (breakout
++3.1 bp, fade −3.9 bp).
+
 ## Test fixtures generate their own options
 
 `engine::testing::snapshot_with` builds a real on-disk snapshot whose ladder is
