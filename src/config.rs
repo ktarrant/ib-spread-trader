@@ -378,6 +378,9 @@ pub struct ExitConfig {
     /// Close before earnings announcements to avoid the vol event.
     #[serde(default)]
     pub close_before_earnings: bool,
+    /// Hold through a release, then close on the first bar after it is priced.
+    #[serde(default)]
+    pub close_after_earnings: bool,
     /// Debit-spread give-up: close when the live probability of profit falls
     /// below this (0..1). Ranked mode only. Applies to debit spreads, not nakeds.
     #[serde(default)]
@@ -414,6 +417,7 @@ impl Default for ExitConfig {
             underlying_past_short_strike: false,
             max_time_pct: None,
             close_before_earnings: false,
+            close_after_earnings: false,
             live_pop_floor: None,
             naked_trailing_stop_pct: None,
             naked_momentum_exit: false,
@@ -1604,6 +1608,7 @@ impl StrategyConfig {
                     .then_some(model.model.horizon_days),
                 max_time_pct: exit.max_time_pct,
                 close_before_earnings: exit.close_before_earnings,
+                close_after_earnings: exit.close_after_earnings,
                 min_days_before_expiry: exit.min_days_before_expiry,
                 stock_bar_exits: exit.stock_bar_exits,
             },

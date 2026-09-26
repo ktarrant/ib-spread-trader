@@ -77,6 +77,10 @@ pub struct ExitRules {
     /// Close before earnings announcements. The position is closed on the last
     /// session before the earnings event would affect prices.
     pub close_before_earnings: bool,
+    /// The opposite policy: hold through the release, then close on the first
+    /// bar after it is priced. For a vol-timing position the release *is* the
+    /// trade, and once it has happened the reason to hold is gone.
+    pub close_after_earnings: bool,
     /// Watch the price-level exits (`price_triggered`) on every stock-only bar
     /// between option bars — the 5-minute tape — and queue the close for the
     /// position's next option bar, so a stop crossed just after a chain snapshot
@@ -106,6 +110,9 @@ pub struct ExitContext<'a> {
     pub expiry_instant: DateTime<Utc>,
     /// The next earnings event for this symbol, if any.
     pub next_earnings: Option<&'a EarningsEvent>,
+    /// The latest release this bar is past (its last clean session was an
+    /// earlier day), if any.
+    pub last_release: Option<&'a EarningsEvent>,
     /// The current forecast, for model-driven exits. `None` on the staged path.
     pub model: Option<ExitModel<'a>>,
 }
@@ -132,6 +139,11 @@ impl ExitRules {
             && ctx.gross_pnl >= max_profit * pct / 100.0
         {
             return Some(ExitReason::ProfitTarget);
+        }
+
+        // 1b. The release the position was held for has happened.
+        if self.close_after_earnings && past_a_held_release(position.opened_at, ctx.bar_ts, ctx.last_release) {
+            return Some(ExitReason::AfterEarnings);
         }
 
         // 2a. The adverse bound: the underlying has left the range the entry
@@ -236,10 +248,6 @@ impl ExitRules {
         None
     }
 
-    /// Exit conditions that need only the underlying price, not option quotes.
-    /// Called when `exit_credit` fails — the position's legs stopped quoting —
-    /// but the underlying still prints. Higher priority than time-based rules,
-    /// consistent with `triggered()`.
     /// The exits that read only the underlying's price against levels fixed at
     /// entry — the adverse-forecast stop, the forecast target, the short strike —
     /// in `triggered`'s order. They need no option quote and no fresh forecast,
@@ -258,6 +266,10 @@ impl ExitRules {
         self.underlying_price_triggered(position, spot)
     }
 
+    /// Exit conditions that need only the underlying price, not option quotes.
+    /// Called when `exit_credit` fails — the position's legs stopped quoting —
+    /// but the underlying still prints. Higher priority than time-based rules,
+    /// consistent with `triggered()`.
     pub fn underlying_price_triggered(
         &self,
         position: &OpenPosition,
@@ -284,7 +296,11 @@ impl ExitRules {
         bar_ts: DateTime<Utc>,
         expiry_instant: DateTime<Utc>,
         next_earnings: Option<&EarningsEvent>,
+        last_release: Option<&EarningsEvent>,
     ) -> Option<ExitReason> {
+        if self.close_after_earnings && past_a_held_release(opened_at, bar_ts, last_release) {
+            return Some(ExitReason::AfterEarnings);
+        }
         if let Some(reason) = forecast_horizon_exit(self, opened_at, bar_ts) {
             return Some(reason);
         }
@@ -312,6 +328,16 @@ impl ExitRules {
 
         None
     }
+}
+
+/// Whether a position opened at `opened_at` was held across `last` — opened on
+/// or before its last clean session — and `bar_ts` is past it.
+fn past_a_held_release(
+    opened_at: DateTime<Utc>,
+    bar_ts: DateTime<Utc>,
+    last: Option<&EarningsEvent>,
+) -> bool {
+    last.is_some_and(|e| opened_at.date_naive() <= e.close_on && bar_ts.date_naive() > e.close_on)
 }
 
 /// Close once `bar_ts` is at least `forecast_horizon_days` after `opened_at` —
@@ -482,6 +508,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 7, 15, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: None,
+            last_release: None,
             model: None,
         }
     }
@@ -987,6 +1014,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 7, 7, 13, 30, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: None,
+            last_release: None,
             model: None,
         };
         assert_eq!(rules.triggered(&p, &inside), None);
@@ -998,7 +1026,7 @@ mod tests {
         assert_eq!(rules.triggered(&p, &elapsed), Some(ExitReason::ForecastHorizon));
         // It also fires on the quote-unavailable path.
         assert_eq!(
-            rules.time_triggered(p.opened_at, elapsed.bar_ts, expiry_instant(), None),
+            rules.time_triggered(p.opened_at, elapsed.bar_ts, expiry_instant(), None, None),
             Some(ExitReason::ForecastHorizon)
         );
     }
@@ -1031,6 +1059,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 7, 25, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: None,
+            last_release: None,
             model: None,
         };
         assert_eq!(rules.triggered(&p, &before), None);
@@ -1058,6 +1087,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 8, 13, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: None,
+            last_release: None,
             model: None,
         };
         assert_eq!(rules.triggered(&position(), &safe), None);
@@ -1095,6 +1125,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 8, 10, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: None,
+            last_release: None,
             model: None,
         };
         assert_eq!(
@@ -1124,6 +1155,7 @@ mod tests {
                 Utc.with_ymd_and_hms(2026, 7, 15, 15, 0, 0).unwrap(),
                 expiry_instant(),
                 None,
+                None,
             ),
             None,
         );
@@ -1135,6 +1167,7 @@ mod tests {
                 Utc.with_ymd_and_hms(2026, 7, 27, 15, 0, 0).unwrap(),
                 expiry_instant(),
                 None,
+                None,
             ),
             Some(ExitReason::TimeDecay),
         );
@@ -1145,6 +1178,7 @@ mod tests {
                 p.opened_at,
                 Utc.with_ymd_and_hms(2026, 8, 18, 15, 0, 0).unwrap(),
                 expiry_instant(),
+                None,
                 None,
             ),
             Some(ExitReason::TimeDecay),
@@ -1165,6 +1199,7 @@ mod tests {
                 Utc.with_ymd_and_hms(2026, 7, 1, 13, 30, 0).unwrap(),
                 Utc.with_ymd_and_hms(2026, 8, 20, 19, 30, 0).unwrap(),
                 expiry_instant(),
+                None,
                 None,
             ),
             None,
@@ -1220,6 +1255,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 7, 29, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: Some(&event),
+            last_release: None,
             model: None,
         };
         assert_eq!(
@@ -1253,12 +1289,46 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 7, 28, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: Some(&event),
+            last_release: None,
             model: None,
         };
         assert_eq!(
             rules.triggered(&position(), &ctx),
             Some(ExitReason::BeforeEarnings)
         );
+    }
+
+    /// Held across an after-close release on 7/29 (last clean session 7/29): the
+    /// first bar of 7/30 closes it. A position opened after the release, or a
+    /// bar still on 7/29, does not.
+    #[test]
+    fn close_after_earnings_fires_once_the_held_release_is_priced() {
+        use crate::data::EarningsEvent;
+        let event = EarningsEvent {
+            date: chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
+            close_on: chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap(),
+        };
+        let rules = ExitRules {
+            close_after_earnings: true,
+            ..Default::default()
+        };
+        let ctx = |day, last| ExitContext {
+            gross_pnl: 0.0,
+            underlying_price: Some(751.0),
+            bar_ts: Utc.with_ymd_and_hms(2026, 7, day, 13, 30, 0).unwrap(),
+            expiry_instant: expiry_instant(),
+            next_earnings: None,
+            last_release: last,
+            model: None,
+        };
+        let held = position(); // opened 7/1
+        assert_eq!(rules.triggered(&held, &ctx(30, Some(&event))), Some(ExitReason::AfterEarnings));
+        assert_eq!(rules.triggered(&held, &ctx(29, None)), None, "still before the print");
+
+        let mut late = position();
+        late.opened_at = Utc.with_ymd_and_hms(2026, 7, 30, 13, 30, 0).unwrap();
+        assert_eq!(rules.triggered(&late, &ctx(31, Some(&event))), None, "never held it");
+        assert_eq!(ExitRules::default().triggered(&held, &ctx(30, Some(&event))), None);
     }
 
     #[test]
@@ -1275,6 +1345,7 @@ mod tests {
             bar_ts: Utc.with_ymd_and_hms(2026, 7, 29, 15, 0, 0).unwrap(),
             expiry_instant: expiry_instant(),
             next_earnings: Some(&event),
+            last_release: None,
             model: None,
         };
         assert_eq!(rules.triggered(&position(), &ctx), None);

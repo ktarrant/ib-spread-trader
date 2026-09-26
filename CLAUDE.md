@@ -1488,6 +1488,29 @@ every earnings strangle scored strongly positive (AMD +$1 355 expected, −$1 52
 realized) and the 15 of them lost $1 812. That multiplier is the number the
 multi-expiry term structure is meant to replace.
 
+### Vol-aware exits: close the morning after the release
+
+`exit.close_after_earnings` is the vol model's answer to `close_before_earnings`:
+hold through a release, then close on the first bar after it is priced
+(`ExitReason::AfterEarnings`, `ChainSeries::last_release_before`). Variants of the
+vol-timing exits, both months, one lot:
+
+| exits | Aug return | long vol | short vol | Oct return | long vol |
+|---|---|---|---|---|---|
+| base (target 50 %, horizon cap) | −4.7 % | 9, −$1 491 | 7, +$556 | −4.6 % | 6, −$321 |
+| **+ close after earnings** | **−2.8 %** | **10, −$1 107** | 7, +$556 | **−4.0 %** | **9, −$184** |
+| + target 25 % | −3.9 % | 10, −$1 107 | 9, +$327 | −4.0 % | 9, −$184 |
+| + no target | −2.5 % | 10, −$1 107 | 7, +$603 | −4.0 % | 9, −$184 |
+| + no horizon cap | −4.0 % | 9, −$1 115 | 6, +$309 | −10.7 % | 6, −$123 |
+
+Closing after the release helps long vol in both months — out before the rest of
+the crush and the post-event drift — so `exits/vol.toml` does it. It does not make
+the earnings trade pay: the flat ×2.0 multiplier still overprices the event.
+Short-vol profit-taking at 50 % and none are equivalent on 7 trades; 25 % gives
+up too much. Dropping the horizon cap leaves positions open, marked, at the end
+of the data. None of these is a sample; the direction of the long-vol change is
+the only part seen twice.
+
 **"Earnings" means "results release".** EDGAR Item 2.02 carries TSLA's quarterly
 deliveries too (52 near-pairs since 2013) and occasional pre-announcements
 elsewhere (AAPL's 2019-01-02 revenue warning). They move the stock, so a vol model

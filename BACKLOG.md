@@ -44,11 +44,10 @@ our crude benchmark (monthly IV scaled to 7 days) rather than a mispricing.
   earnings counted apart; `strategies/vol_timing.toml` with no earnings guards.
   The structures follow the model; the flat ×2.0 earnings multiplier does not
   pay (15 earnings strangles, −$1 812).
-- **Phase 3 — vol-aware exits.** The `exits/vol.toml` bundle (profit target on
-  capped structures, the forecast-horizon cap, no earnings guards) is the
-  minimum. Still to test: closing long vol on the first session after the
-  release (the move is realized, the crush has happened), and whether short vol
-  should hold to the horizon or take profit earlier.
+- **Phase 3 — vol-aware exits.** Done: `close_after_earnings` closes a position
+  held through a release on the first bar after it is priced; it helps long vol
+  on both months and is in `exits/vol.toml`. Short-vol profit-taking showed no
+  better setting than 50 % (CLAUDE.md, *Vol-aware exits*).
 - **Replace the earnings multiplier with the market's event pricing** once weekly
   multi-expiry captures land: the event-implied move from near-over-far IV, and
   a post-event IV read from the chains after it instead of the trailing median.

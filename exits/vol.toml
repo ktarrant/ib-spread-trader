@@ -1,9 +1,16 @@
-# Exits for direction-neutral structures under a vol-timing model. No earnings
-# guards: the release is what a long straddle is bought for and what an iron
-# condor is sized against — the model prices it (earnings_vol_multiplier) and the
-# crush after it (crush_to_median), and the report counts trades held through a
-# release apart. No forecast target or stop: they read a direction.
+# Exits for direction-neutral structures under a vol-timing model. No
+# close-before-earnings: the release is what a long straddle is bought for and
+# what an iron condor is sized against — the model prices it
+# (earnings_vol_multiplier) and the crush after it (crush_to_median), and the
+# report counts trades held through a release apart. Instead the position closes
+# on the first bar after the release is priced (the move has happened, and so has
+# the crush). No forecast target or stop: they read a direction.
+#
+# Measured on both months (CLAUDE.md, *Vol-aware exits*): closing after the
+# release helps long vol on both; the 50 % profit target and none are
+# equivalent on short vol, 25 % is worse; dropping the horizon cap is worse.
 profit_target_pct = 50.0
 stop_loss_pct = 100.0
 close_before_earnings = false
+close_after_earnings = true
 close_after_forecast_horizon = true

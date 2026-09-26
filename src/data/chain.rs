@@ -388,6 +388,12 @@ impl ChainSeries {
         self.earnings.iter().find(|e| e.date >= date)
     }
 
+    /// The latest release whose last clean session is before `date` — one the
+    /// bar is already past.
+    pub fn last_release_before(&self, date: NaiveDate) -> Option<&EarningsEvent> {
+        self.earnings.iter().rev().find(|e| e.close_on < date)
+    }
+
     /// The most recent earnings event on or before the given date — the other
     /// half of an earnings-distance feature. `None` before the first event in the
     /// window. `earnings` is sorted ascending, so scan from the back.

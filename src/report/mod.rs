@@ -537,6 +537,7 @@ fn reason_key(reason: ExitReason) -> &'static str {
         ExitReason::MomentumExit => "momentum_exit",
         ExitReason::TimeDecay => "time_decay",
         ExitReason::BeforeEarnings => "before_earnings",
+        ExitReason::AfterEarnings => "after_earnings",
         ExitReason::BeforeExpiry => "before_expiry",
         ExitReason::Expiry => "expiry_settlement",
     }

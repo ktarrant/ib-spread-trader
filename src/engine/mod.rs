@@ -539,7 +539,7 @@ pub fn run_symbol(
                 &portfolio,
                 &bar,
                 series.expiry_instant(),
-                next_earnings,
+                (next_earnings, series.last_release_before(bar.ts.date_naive())),
                 &config.exits,
                 ranked_ctx,
             );
@@ -1053,7 +1053,7 @@ pub fn run_shared(
                     &portfolio,
                     bar,
                     series.expiry_instant(),
-                    next_earnings,
+                    (next_earnings, series.last_release_before(ts.date_naive())),
                     &config.exits,
                     ranked_ctx,
                 );
@@ -1372,7 +1372,7 @@ fn compute_exits(
     portfolio: &Portfolio,
     bar: &ChainSnapshot,
     expiry_instant: DateTime<Utc>,
-    next_earnings: Option<&EarningsEvent>,
+    (next_earnings, last_release): (Option<&EarningsEvent>, Option<&EarningsEvent>),
     exits: &ExitRules,
     model: Option<&RankedContext>,
 ) -> (Vec<Intent>, Vec<(usize, ExitReason)>) {
@@ -1389,6 +1389,7 @@ fn compute_exits(
                     bar_ts: bar.ts,
                     expiry_instant,
                     next_earnings,
+                    last_release,
                     model: model.and_then(|ctx| ctx.exit_model(bar.expiry)),
                 };
                 if let Some(reason) = exits.triggered(position, &ctx) {
@@ -1409,6 +1410,7 @@ fn compute_exits(
                             bar.ts,
                             expiry_instant,
                             next_earnings,
+                            last_release,
                         )
                     });
                 if let Some(reason) = reason {
