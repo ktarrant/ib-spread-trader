@@ -1,0 +1,15 @@
+# The vol-timing model on direction-neutral structures, one lot each, with no
+# earnings guards — see rankers/vol.toml and exits/vol.toml.
+name      = "vol-timing"
+mode      = "ranked"
+model     = "vol-timing"
+ranker    = "vol"
+portfolio = "equal_weight_1"
+exit      = "vol"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+
+[costs]
+commission_per_contract = 0.65

@@ -38,17 +38,23 @@ our crude benchmark (monthly IV scaled to 7 days) rather than a mispricing.
   chain's IV is the wrong benchmark for a week with a release in it. Then the
   15-minute cadence (trend 20/60, RSI 28, ATR 28, `iv_median_lookback` 400,
   `bars_per_year` 6552). More weeks of data are what the interval needs most.
-- **Phase 2 — direction-neutral structures.** Straddles and strangles (long
-  vol), iron condors and butterflies (short vol) in `enumerate_verticals`' place
-  or beside it. `payoff_bounds` already handles any same-expiry legs; the fill
-  model crosses every leg, and a condor's four crossings are the hurdle the
-  forecast has to clear.
-- **Phase 3 — vol-aware exits.** Long vol closes after the event or once the
-  move has happened; short vol holds to its horizon. The directional give-ups
-  (forecast target/stop) do not transfer, and `close_before_earnings` plus the
-  entry blackout actively fight a long-vol position bought for the release —
-  vol-timing's first backtest closed all 8 of its earnings longs before the
-  print.
+- **Phase 2 — direction-neutral structures.** Done (CLAUDE.md,
+  *Direction-neutral structures*): straddles, strangles, iron condors and
+  butterflies; crush-aware revaluation across a release; trades held through
+  earnings counted apart; `strategies/vol_timing.toml` with no earnings guards.
+  The structures follow the model; the flat ×2.0 earnings multiplier does not
+  pay (15 earnings strangles, −$1 812).
+- **Phase 3 — vol-aware exits.** The `exits/vol.toml` bundle (profit target on
+  capped structures, the forecast-horizon cap, no earnings guards) is the
+  minimum. Still to test: closing long vol on the first session after the
+  release (the move is realized, the crush has happened), and whether short vol
+  should hold to the horizon or take profit earlier.
+- **Replace the earnings multiplier with the market's event pricing** once weekly
+  multi-expiry captures land: the event-implied move from near-over-far IV, and
+  a post-event IV read from the chains after it instead of the trailing median.
+- **Event data.** XOM has one event in the whole table (calc `events-sync` gap).
+  Live trading needs a forward earnings calendar: EDGAR only records a release
+  once filed, which a backtest reads in hindsight.
 - The existing directional work (RSI gates, 14-day models, trend sweeps) stays
   in git and CLAUDE.md as history; re-check any of it against the Phase 0 gate
   before relying on it.

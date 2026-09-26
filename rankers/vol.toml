@@ -1,0 +1,25 @@
+# Direction-neutral structures only, for a width-only (vol-timing) model: long
+# straddles and strangles buy the move, iron condors and butterflies sell it
+# inside long wings. All defined-risk. No forecast target — a neutral structure
+# has no side of the distribution to take profit on. An at-the-money straddle
+# costs ~$1 500 a contract on SPY, hence the wider loss cap.
+[candidates]
+rights = ["call", "put"]
+allow_debit = false
+allow_credit = false
+allow_naked_long = false
+allow_straddle = true
+allow_strangle = true
+allow_iron_condor = true
+allow_iron_butterfly = true
+wing_steps = 3
+min_width = 0.0
+max_relative_spread = 0.35
+max_loss = 2000.0
+quantity = 1
+
+[ranking]
+metric = "expected_value"
+min_score = 0.02
+min_expected_pl = 0.0
+scorer_sample_per_bar = 20

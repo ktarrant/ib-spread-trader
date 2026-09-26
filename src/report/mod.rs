@@ -68,6 +68,10 @@ pub struct Totals {
     /// P&L from positions the tape never priced an exit for — settled at
     /// intrinsic because the option bars stop before expiry.
     pub settled_pnl: f64,
+    /// Trades open across an earnings release, and their P&L — a handful of
+    /// binary events, apart so they can neither hide in nor swamp the rest.
+    pub earnings_trades: usize,
+    pub earnings_pnl: f64,
     pub commission_paid: f64,
     pub trades: usize,
     pub wins: usize,
@@ -253,6 +257,8 @@ fn assemble(
         },
         traded_pnl,
         settled_pnl,
+        earnings_trades: trades.iter().filter(|t| t.held_through_earnings).count(),
+        earnings_pnl: trades.iter().filter(|t| t.held_through_earnings).map(|t| t.pnl).sum(),
         commission_paid,
         trades: trades.len(),
         wins,
@@ -453,6 +459,13 @@ fn caveats(
             "${:.2} of P&L came from expiry settlement at intrinsic, not from a \
              quoted exit — the option tape stops the day before expiry.",
             totals.settled_pnl
+        ));
+    }
+    if totals.earnings_trades > 0 {
+        out.push(format!(
+            "{} trade(s) were held through an earnings release and made ${:.2} of the \
+             ${:.2} total — a few binary events, not a sample.",
+            totals.earnings_trades, totals.earnings_pnl, totals.total_pnl
         ));
     }
     let rejections = totals.census.rejections.values().sum::<usize>();

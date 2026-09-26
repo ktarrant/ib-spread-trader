@@ -157,6 +157,27 @@ impl Spread {
         Some((lo, hi))
     }
 
+    /// Worst outcome at expiry, in dollars, before entry cost — `None` only when
+    /// the loss runs away (a short call left uncovered). Unlike `payoff_bounds`
+    /// it accepts a runaway *gain*, which is what a long straddle's upside is:
+    /// its risk is still just the premium.
+    pub fn payoff_floor(&self) -> Option<f64> {
+        let points = self.breakpoints();
+        let far = *points.last()?;
+        if self.payoff_at(far + 1.0) < self.payoff_at(far) - 1e-9 {
+            return None;
+        }
+        points.iter().map(|&p| self.payoff_at(p)).reduce(f64::min)
+    }
+
+    /// Whether the structure holds both calls and puts — a straddle, strangle,
+    /// iron condor or butterfly: a view on the *size* of the move, not its sign.
+    /// Direction-reading rules (a forecast target, an adverse stop, a momentum
+    /// flip) mean nothing for it.
+    pub fn is_direction_neutral(&self) -> bool {
+        self.legs.iter().any(|l| l.right.is_call()) && self.legs.iter().any(|l| !l.right.is_call())
+    }
+
     /// The same structure sized up by an integer factor — every leg's quantity
     /// times `factor`. Entry cost, payoff, and max loss all scale linearly with
     /// it, so a position sizer can price one lot and multiply.
@@ -221,6 +242,30 @@ mod tests {
         )
     }
 
+
+    #[test]
+    fn the_floor_bounds_a_loss_and_ignores_a_runaway_gain() {
+        let leg = |strike, right, side| Leg { contract_id: 0, strike, right, side, quantity: 1 };
+        let straddle = Spread::new("T", vec![leg(100.0, OptionRight::Call, Side::Long), leg(100.0, OptionRight::Put, Side::Long)]);
+        assert_eq!(straddle.payoff_bounds(), None, "the upside runs away");
+        assert_eq!(straddle.payoff_floor(), Some(0.0), "the premium is all it risks");
+        assert!(straddle.is_direction_neutral());
+
+        let condor = Spread::new(
+            "T",
+            vec![
+                leg(90.0, OptionRight::Put, Side::Long),
+                leg(95.0, OptionRight::Put, Side::Short),
+                leg(105.0, OptionRight::Call, Side::Short),
+                leg(110.0, OptionRight::Call, Side::Long),
+            ],
+        );
+        assert_eq!(condor.payoff_floor(), Some(-500.0));
+
+        let naked_call = Spread::new("T", vec![leg(100.0, OptionRight::Call, Side::Short)]);
+        assert_eq!(naked_call.payoff_floor(), None);
+        assert!(!naked_call.is_direction_neutral());
+    }
     #[test]
     fn a_bull_call_pays_zero_below_and_the_width_above() {
         let s = bull_call();

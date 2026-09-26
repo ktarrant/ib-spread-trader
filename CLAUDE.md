@@ -1449,6 +1449,53 @@ of them before the release they were bought for (August: 12 trades, +25.7 %;
 October: 1 trade). Exits and structures have to follow the model (BACKLOG Phases
 2–3) before its trades mean anything.
 
+### Direction-neutral structures, the crush, and trades held through earnings
+
+`rankers/vol.toml` enumerates only structures that bet on the **size** of the move
+(`CandidateConfig::allow_straddle/strangle/iron_condor/iron_butterfly`): long
+straddles and strangles, and iron condors and butterflies with wings
+`1..=wing_steps` strikes out. All defined-risk — `Spread::payoff_floor` refuses
+only a runaway *loss*, so a long straddle's open upside is allowed and a naked
+short never is. `Spread::is_direction_neutral` (both rights present) keeps them
+out of every direction-reading rule: no forecast-target cap in scoring, no
+target/stop bounds at entry, no momentum exit.
+
+**Crush.** With `crush_to_median`, when a release falls inside the horizon the
+ranker revalues each leg at the symbol's trailing-median IV instead of its entry
+IV (`PriceModel::horizon_vol_scale`, never above 1). Black-76 here reads vol and
+time only through σ√τ, so the engine applies it as a k² factor on the chain
+forecast's remaining time — no signature anywhere changes. Sticky strike across a
+release overvalues every long-vol position; on August the crush alone moves the
+vol-timing run from −6.4 % to −4.7 %.
+
+**Held through earnings** is a flag on every closed trade (open on or before a
+release's last clean session, closed after) and a line in the totals
+(`earnings_trades`, `earnings_pnl`) and caveats — a few binary events, reported
+apart so they cannot hide in, or swamp, the rest. `strategies/vol_timing.toml`
+runs with no earnings guards (`exits/vol.toml`, no blackout).
+
+First runs, one lot each (guardrail, not evidence):
+
+| | trades | return | strangles through a release | iron condors/flies |
+|---|---|---|---|---|
+| August | 16 | −4.7 % | 9, −$1 491 | 7, +$557 (6 of 7 up) |
+| October | 7 | −4.6 % | 6, −$321 | 1, −$381 |
+
+The structures follow the model exactly — long vol 5–7 days before a release,
+short vol on ETFs and quiet megacaps — and the ranker orders them (scorer
+Spearman 0.41 / 0.46). What fails is the flat `earnings_vol_multiplier = 2.0`:
+every earnings strangle scored strongly positive (AMD +$1 355 expected, −$1 525
+realized) and the 15 of them lost $1 812. That multiplier is the number the
+multi-expiry term structure is meant to replace.
+
+**"Earnings" means "results release".** EDGAR Item 2.02 carries TSLA's quarterly
+deliveries too (52 near-pairs since 2013) and occasional pre-announcements
+elsewhere (AAPL's 2019-01-02 revenue warning). They move the stock, so a vol model
+should see them; they stay. Two real gaps: XOM has **one** event in the whole
+table (its history never synced), and EDGAR knows a release only once filed — a
+backtest reads dates in hindsight that live trading will need a forward earnings
+calendar for.
+
 The null-beating gate is the floor: a config that cannot beat a random walk
 out-of-sample is not a better forecaster, whatever P&L it posted. And the converse
 holds too — mean-reversion is adopted on its **forecast** merit, not its backtest

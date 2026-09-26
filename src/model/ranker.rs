@@ -106,7 +106,10 @@ pub fn expected_pl_and_score(
     // the target's value for any outcome that reaches it, and read at the horizon
     // otherwise. This makes far-OTM lottery tickets — whose target value is ~0 —
     // score poorly, and pulls selection toward strikes inside the forecast.
-    let expected_value = match forecast_target_quantile {
+    // A direction-neutral structure has no target to take profit at: the cap
+    // reads a direction it does not have.
+    let target_quantile = forecast_target_quantile.filter(|_| !candidate.spread.is_direction_neutral());
+    let expected_value = match target_quantile {
         None => dist.expected(value_at),
         Some(q) => {
             let bullish = candidate.spread.profits_from_a_rise();

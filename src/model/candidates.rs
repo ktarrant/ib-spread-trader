@@ -11,7 +11,7 @@
 //! its structural max profit/loss (net of a round-trip commission), and each
 //! leg's entry implied vol, so the ranker can mark it to model at a future spot.
 
-use crate::data::ChainSnapshot;
+use crate::data::{ChainSnapshot, OptionQuote};
 use crate::domain::OptionRight;
 use crate::execution::{Costs, entry_debit};
 use crate::spread::{CONTRACT_MULTIPLIER, Leg, Side, Spread};
@@ -44,6 +44,15 @@ pub struct CandidateConfig {
     pub min_reward_risk: Option<f64>,
     pub max_reward_risk: Option<f64>,
     pub quantity: u32,
+    /// Direction-neutral structures — see `enumerate_neutral`. Off by default,
+    /// so every directional ranker enumerates exactly what it always did.
+    pub allow_straddle: bool,
+    pub allow_strangle: bool,
+    pub allow_iron_condor: bool,
+    pub allow_iron_butterfly: bool,
+    /// How many strike steps out an iron structure's wings may sit (1..=this).
+    /// Bounds a four-leg enumeration that would otherwise be quartic.
+    pub wing_steps: usize,
 }
 
 impl Default for CandidateConfig {
@@ -60,6 +69,11 @@ impl Default for CandidateConfig {
             min_reward_risk: None,
             max_reward_risk: None,
             quantity: 1,
+            allow_straddle: false,
+            allow_strangle: false,
+            allow_iron_condor: false,
+            allow_iron_butterfly: false,
+            wing_steps: 3,
         }
     }
 }
@@ -335,7 +349,142 @@ pub fn enumerate_verticals(
         }
     }
 
+    candidates.extend(enumerate_neutral(chain, costs, cfg, funnel));
     candidates
+}
+
+/// Direction-neutral structures: a view on the *size* of the move, not its
+/// sign. Long straddles and strangles buy it (risk: the premium); iron
+/// butterflies and iron condors sell it inside long wings (risk: the wing less
+/// the credit). Every one is defined-risk — nothing here sells naked premium —
+/// and each clears the same funnel a vertical does.
+///
+/// Strangles and condors take their inner strikes on either side of the
+/// forward (put below, call above); iron wings sit 1..=`wing_steps` quoted
+/// strikes further out on each side.
+fn enumerate_neutral(
+    chain: &ChainSnapshot,
+    costs: &Costs,
+    cfg: &CandidateConfig,
+    funnel: &mut RankingFunnel,
+) -> Vec<Candidate> {
+    let ladder = |right| {
+        let mut v: Vec<&OptionQuote> = chain.selectable(right).collect();
+        v.sort_by(|a, b| a.strike.total_cmp(&b.strike));
+        v
+    };
+    let (calls, puts) = (ladder(OptionRight::Call), ladder(OptionRight::Put));
+    let (calls, puts) = (&calls, &puts);
+    let at = |side: &[&OptionQuote], strike: f64| side.iter().position(|q| q.strike == strike);
+    let width_ok = |w: f64| w >= cfg.min_width && w <= cfg.max_width;
+    let mut out = Vec::new();
+    let mut push = |legs: &[(&OptionQuote, Side)], out: &mut Vec<Candidate>| {
+        out.extend(neutral_candidate(chain, costs, cfg, legs, funnel));
+    };
+    // Wings `i` steps outside a short put at `p` and a short call at `c`.
+    let wings = |p: usize, c: usize| {
+        (1..=cfg.wing_steps).filter_map(move |i| {
+            let (lp, lc) = (puts.get(p.checked_sub(i)?)?, calls.get(c + i)?);
+            (width_ok(puts[p].strike - lp.strike) && width_ok(lc.strike - calls[c].strike))
+                .then_some((*lp, *lc))
+        })
+    };
+
+    for (c, call) in calls.iter().enumerate() {
+        let Some(p) = at(puts, call.strike) else {
+            continue;
+        };
+        if cfg.allow_straddle {
+            push(&[(call, Side::Long), (puts[p], Side::Long)], &mut out);
+        }
+        if cfg.allow_iron_butterfly {
+            for (lp, lc) in wings(p, c) {
+                let legs = [(lp, Side::Long), (puts[p], Side::Short), (*call, Side::Short), (lc, Side::Long)];
+                push(&legs, &mut out);
+            }
+        }
+    }
+    let below = puts.iter().enumerate().filter(|(_, q)| q.strike < chain.forward);
+    for (p, put) in below {
+        for (c, call) in calls.iter().enumerate().filter(|(_, q)| q.strike > chain.forward) {
+            if cfg.allow_strangle && width_ok(call.strike - put.strike) {
+                push(&[(put, Side::Long), (call, Side::Long)], &mut out);
+            }
+            if cfg.allow_iron_condor {
+                for (lp, lc) in wings(p, c) {
+                    let legs = [(lp, Side::Long), (*put, Side::Short), (*call, Side::Short), (lc, Side::Long)];
+                    push(&legs, &mut out);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One direction-neutral structure through the vertical's funnel.
+fn neutral_candidate(
+    chain: &ChainSnapshot,
+    costs: &Costs,
+    cfg: &CandidateConfig,
+    legs: &[(&OptionQuote, Side)],
+    funnel: &mut RankingFunnel,
+) -> Option<Candidate> {
+    let spread = Spread::new(
+        chain.symbol.clone(),
+        legs.iter()
+            .map(|(q, side)| Leg {
+                contract_id: q.contract_id,
+                strike: q.strike,
+                right: q.right,
+                side: *side,
+                quantity: cfg.quantity,
+            })
+            .collect(),
+    );
+    let debit = entry_debit(&spread, chain).ok()?;
+    // A zero debit/credit is stale or crossed data, not a free trade.
+    if debit.abs() < 1e-9 {
+        return None;
+    }
+    funnel.enumerated += 1;
+    let floor = spread.payoff_floor()?; // a runaway loss cannot be risk-ranked
+    funnel.priceable += 1;
+
+    let rel_spread = legs
+        .iter()
+        .map(|(q, _)| relative_spread(q.bid, q.ask))
+        .fold(0.0, f64::max);
+    if rel_spread > cfg.max_relative_spread {
+        return None;
+    }
+    funnel.liquid += 1;
+
+    let cost_basis = debit + 2.0 * costs.commission(&spread);
+    let max_loss = cost_basis - floor;
+    if max_loss <= 0.0 || max_loss > cfg.max_loss {
+        return None;
+    }
+    funnel.within_loss += 1;
+    let max_profit = spread.payoff_bounds().map(|(_, hi)| hi - cost_basis);
+    if !within_reward_risk(max_profit, max_loss, cfg) {
+        return None;
+    }
+    funnel.balanced += 1;
+
+    let size = cfg.quantity as f64 * CONTRACT_MULTIPLIER;
+    Some(Candidate {
+        leg_vols: legs
+            .iter()
+            .map(|(q, _)| q.implied_vol.expect("selectable leg has a vol"))
+            .collect(),
+        exit_spread_cost: 0.5 * legs.iter().map(|(q, _)| q.ask - q.bid).sum::<f64>() * size,
+        spread,
+        entry_debit: debit,
+        cost_basis,
+        max_profit,
+        max_loss,
+        rel_spread,
+    })
 }
 
 #[cfg(test)]
@@ -343,6 +492,66 @@ mod tests {
     use super::*;
     use crate::data::{OptionQuote, UnderlyingBar};
     use chrono::Utc;
+
+    /// Every neutral structure the ladder can form, each defined-risk and each
+    /// holding both rights: straddles at 95/100/105; strangles 90|95 × 105|110;
+    /// iron flies at 95 (±5), 100 (±5, ±10) and 105 (±5); one condor, 95/105
+    /// inside 90/110 — the only pair with a wing on both sides.
+    #[test]
+    fn the_neutral_structures_are_every_defined_risk_combination_the_ladder_quotes() {
+        let mut chain = chain();
+        chain.quotes.push(OptionQuote {
+            contract_id: 8,
+            strike: 90.0,
+            right: OptionRight::Put,
+            bid: 0.2,
+            ask: 0.3,
+            mid: 0.25,
+            implied_vol: Some(0.2),
+            delta: Some(-0.10),
+        });
+        let cfg = CandidateConfig {
+            allow_debit: false,
+            allow_credit: false,
+            allow_naked_long: false,
+            allow_straddle: true,
+            allow_strangle: true,
+            allow_iron_condor: true,
+            allow_iron_butterfly: true,
+            max_relative_spread: 1.0,
+            max_loss: 10_000.0,
+            ..CandidateConfig::default()
+        };
+        let got = enumerate_verticals(&chain, &Costs::default(), &cfg, &mut RankingFunnel::default());
+        let shape = |c: &Candidate| {
+            let longs = c.spread.legs.iter().filter(|l| l.side == Side::Long).count();
+            (c.spread.legs.len(), longs)
+        };
+        let count = |legs, longs| got.iter().filter(|c| shape(c) == (legs, longs)).count();
+        let straddles = got
+            .iter()
+            .filter(|c| shape(c) == (2, 2) && c.spread.legs[0].strike == c.spread.legs[1].strike)
+            .count();
+        assert_eq!(straddles, 3);
+        assert_eq!(count(2, 2) - straddles, 4, "strangles");
+        let flies = got
+            .iter()
+            .filter(|c| shape(c) == (4, 2) && c.spread.legs[1].strike == c.spread.legs[2].strike)
+            .count();
+        assert_eq!(flies, 4);
+        assert_eq!(count(4, 2) - flies, 1, "condors");
+        assert_eq!(got.len(), 12);
+
+        for c in &got {
+            assert!(c.spread.is_direction_neutral(), "{}", c.spread.describe());
+            assert!(c.max_loss > 0.0 && c.max_loss.is_finite());
+            if shape(c).0 == 2 {
+                assert!(c.entry_debit > 0.0 && c.max_profit.is_none(), "long vol: premium at risk, upside open");
+            } else {
+                assert!(c.entry_debit < 0.0 && c.max_profit.is_some(), "short vol: a credit, capped");
+            }
+        }
+    }
 
     /// A four-strike call ladder plus a four-strike put ladder around 100.
     fn chain() -> ChainSnapshot {

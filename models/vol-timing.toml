@@ -5,7 +5,9 @@
 #     months (the variance premium);
 #   - a week containing an earnings release moved ~2x what the *monthly* IV
 #     implied — partly because a monthly IV spreads the jump across the month.
-# Realized vol (1/5/22-day, 5-minute tape) added nothing beyond IV.
+# Realized vol (1/5/22-day, 5-minute tape) added nothing beyond IV. Across a
+# release inside the horizon the legs are revalued at the trailing-median IV
+# (crush_to_median) rather than their entry IV.
 [features]
 trend_fast = 10
 trend_slow = 30
@@ -25,3 +27,4 @@ grid_sigma = 4.0
 grid_points = 101
 vol_multiplier = 0.85
 earnings_vol_multiplier = 2.0
+crush_to_median = true

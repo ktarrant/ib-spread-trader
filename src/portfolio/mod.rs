@@ -157,6 +157,11 @@ pub struct ClosedTrade {
     /// The feature vector the entry decision was made on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entry_features: Option<crate::model::EntryFeatures>,
+    /// Open across an earnings release: opened on or before the last session
+    /// before it, closed after. Such a trade's P&L is one binary event's, so the
+    /// report counts it apart. Set by the engine once the run is over.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub held_through_earnings: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -289,6 +294,7 @@ impl Portfolio {
             forecast_target: position.forecast_target,
             forecast_stop: position.forecast_stop,
             entry_features: position.entry_features,
+            held_through_earnings: false,
         };
         self.closed.push(trade.clone());
         Ok(Some(trade))
@@ -335,6 +341,7 @@ impl Portfolio {
             forecast_target: position.forecast_target,
             forecast_stop: position.forecast_stop,
             entry_features: position.entry_features,
+            held_through_earnings: false,
         };
         self.closed.push(trade.clone());
         Some(trade)
@@ -382,6 +389,7 @@ impl Portfolio {
             forecast_target: position.forecast_target,
             forecast_stop: position.forecast_stop,
             entry_features: position.entry_features,
+            held_through_earnings: false,
         };
         self.closed.push(trade.clone());
         Some(trade)

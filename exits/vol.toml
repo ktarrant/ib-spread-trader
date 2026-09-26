@@ -1,0 +1,9 @@
+# Exits for direction-neutral structures under a vol-timing model. No earnings
+# guards: the release is what a long straddle is bought for and what an iron
+# condor is sized against — the model prices it (earnings_vol_multiplier) and the
+# crush after it (crush_to_median), and the report counts trades held through a
+# release apart. No forecast target or stop: they read a direction.
+profit_target_pct = 50.0
+stop_loss_pct = 100.0
+close_before_earnings = false
+close_after_forecast_horizon = true

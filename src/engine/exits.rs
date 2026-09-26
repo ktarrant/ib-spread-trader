@@ -194,6 +194,7 @@ impl ExitRules {
         // Naked long: momentum turned against the position.
         if self.naked_momentum_exit
             && is_naked_long(position)
+            && !position.spread.is_direction_neutral()
             && let Some(model) = &ctx.model
             && let Some(trend) = model.trend
             && momentum_against(&position.spread, trend)

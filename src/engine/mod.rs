@@ -755,6 +755,9 @@ pub fn run_symbol(
     }
 
     let final_equity = portfolio.cash;
+    for trade in &mut portfolio.closed {
+        trade.held_through_earnings = held_through_earnings(trade, &series.earnings);
+    }
     let signal_diagnostics = strategy.signal_diagnostics();
     Ok(SymbolRun {
         symbol: series.symbol.clone(),
@@ -1230,6 +1233,11 @@ pub fn run_shared(
             .iter()
             .filter_map(|p| marks.get(&p.id))
             .sum::<f64>();
+    for trade in &mut portfolio.closed {
+        if let Some(chains) = symbols.iter().find(|c| c[0].symbol == trade.symbol) {
+            trade.held_through_earnings = held_through_earnings(trade, &chains[0].earnings);
+        }
+    }
 
     let strategy_name = strategies
         .first()
@@ -1273,6 +1281,16 @@ pub fn run_shared(
         first_ts: global.first().map(|&(ts, ..)| ts),
         last_ts: global.last().map(|&(ts, ..)| ts),
     })
+}
+
+/// Whether a trade was open across an earnings release: opened on or before the
+/// release's last clean session, closed after it.
+fn held_through_earnings(trade: &crate::portfolio::ClosedTrade, events: &[EarningsEvent]) -> bool {
+    held_across(trade.opened_at.date_naive(), trade.closed_at.date_naive(), events)
+}
+
+fn held_across(opened: NaiveDate, closed: NaiveDate, events: &[EarningsEvent]) -> bool {
+    events.iter().any(|e| opened <= e.close_on && closed > e.close_on)
 }
 
 /// Queue a close for each open position of `symbol` whose price-level exit this
@@ -1422,7 +1440,8 @@ struct RankedContext {
 /// own expiry.
 struct ChainForecast {
     dist: PriceDistribution,
-    /// Years from the horizon to the chain's expiry (zero scores at expiry).
+    /// Years from the horizon to the chain's expiry (zero scores at expiry),
+    /// scaled by the square of the model's `horizon_vol_scale` — the crush.
     remaining_years: f64,
     /// Sampled-spot -> forward scale, preserving the chain's parity basis.
     forward_scale: f64,
@@ -1505,9 +1524,12 @@ fn ranked_observe(
         .iter()
         .map(|(_, chain)| {
             let horizon_years = full_horizon_years.min(chain.year_fraction).max(0.0);
+            // Black-76 here reads vol and time only through σ√τ, so revaluing
+            // every leg at k × its entry vol is exactly revaluing it at k²τ.
+            let crush = ranked.model.horizon_vol_scale(&features, horizon_years);
             let forecast = ChainForecast {
                 dist: ranked.model.forecast(&features, horizon_years),
-                remaining_years: (chain.year_fraction - horizon_years).max(0.0),
+                remaining_years: (chain.year_fraction - horizon_years).max(0.0) * crush * crush,
                 forward_scale: if features.spot > 0.0 {
                     chain.forward / features.spot
                 } else {
@@ -1602,6 +1624,10 @@ fn ranked_choose(
     // favourable quantile it takes profit at, and the adverse one past which the
     // forecast no longer covers it. Prices, so lot count never touches either.
     let dist = &ctx.forecast(expiry).expect("the choice came from a forecast chain").dist;
+    // A direction-neutral structure has no side of the distribution to aim at.
+    if choice.candidate.spread.is_direction_neutral() {
+        return Some((choice, ForecastBounds::default(), expiry));
+    }
     let rises = choice.candidate.spread.profits_from_a_rise();
     let quantile_toward = |q: f64| dist.quantile(if rises { q } else { 1.0 - q });
     let bounds = ForecastBounds {
@@ -2224,6 +2250,19 @@ mod tests {
     use super::*;
     use crate::portfolio::ExitReason;
     use crate::signal::{MarketView, Signal, Trigger};
+
+    /// A trade holds a release only if it is open when the release's session
+    /// opens: closing on the last clean session is getting out in time.
+    #[test]
+    fn held_through_earnings_means_open_across_the_release() {
+        let d = |day| NaiveDate::from_ymd_opt(2026, 7, day).unwrap();
+        // After-close on the 29th: its last clean session is the 29th itself.
+        let events = [EarningsEvent { date: d(29), close_on: d(29) }];
+        assert!(held_across(d(24), d(31), &events));
+        assert!(held_across(d(29), d(30), &events), "bought into the print");
+        assert!(!held_across(d(24), d(29), &events), "closed before the print");
+        assert!(!held_across(d(30), d(31), &events), "opened after it");
+    }
 
     /// On a 15-minute tape a 30-minute model advances once per window, at the
     /// close of the window's second bar, and decides only there — so every

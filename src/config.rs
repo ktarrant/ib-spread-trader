@@ -908,6 +908,8 @@ pub struct ModelConfig {
     pub vol_multiplier: f64,
     /// See `LognormalModelConfig::earnings_vol_multiplier`.
     pub earnings_vol_multiplier: f64,
+    /// See `LognormalModelConfig::crush_to_median`.
+    pub crush_to_median: bool,
 }
 
 impl Default for ModelConfig {
@@ -925,6 +927,7 @@ impl Default for ModelConfig {
             grid_points: d.grid_points,
             vol_multiplier: d.vol_multiplier,
             earnings_vol_multiplier: d.earnings_vol_multiplier,
+            crush_to_median: d.crush_to_median,
         }
     }
 }
@@ -949,6 +952,7 @@ impl ModelConfig {
             grid_points: self.grid_points,
             vol_multiplier: self.vol_multiplier,
             earnings_vol_multiplier: self.earnings_vol_multiplier,
+            crush_to_median: self.crush_to_median,
         })
     }
 }
@@ -1048,6 +1052,12 @@ pub struct CandidatesConfig {
     pub min_reward_risk: Option<f64>,
     pub max_reward_risk: Option<f64>,
     pub quantity: u32,
+    /// Direction-neutral structures. See `CandidateConfig`.
+    pub allow_straddle: bool,
+    pub allow_strangle: bool,
+    pub allow_iron_condor: bool,
+    pub allow_iron_butterfly: bool,
+    pub wing_steps: usize,
 }
 
 impl Default for CandidatesConfig {
@@ -1066,6 +1076,11 @@ impl Default for CandidatesConfig {
             min_reward_risk: d.min_reward_risk,
             max_reward_risk: d.max_reward_risk,
             quantity: d.quantity,
+            allow_straddle: d.allow_straddle,
+            allow_strangle: d.allow_strangle,
+            allow_iron_condor: d.allow_iron_condor,
+            allow_iron_butterfly: d.allow_iron_butterfly,
+            wing_steps: d.wing_steps,
         }
     }
 }
@@ -1075,8 +1090,12 @@ impl CandidatesConfig {
         if self.rights.is_empty() {
             bail!("`candidates.rights` is empty; nothing to enumerate");
         }
-        if !self.allow_debit && !self.allow_credit && !self.allow_naked_long {
-            bail!("`candidates` allows no structure at all (debit/credit/naked)");
+        let neutral = self.allow_straddle
+            || self.allow_strangle
+            || self.allow_iron_condor
+            || self.allow_iron_butterfly;
+        if !self.allow_debit && !self.allow_credit && !self.allow_naked_long && !neutral {
+            bail!("`candidates` allows no structure at all");
         }
         if self.quantity < 1 {
             bail!("`candidates.quantity` must be at least 1");
@@ -1101,6 +1120,11 @@ impl CandidatesConfig {
             min_reward_risk: self.min_reward_risk,
             max_reward_risk: self.max_reward_risk,
             quantity: self.quantity,
+            allow_straddle: self.allow_straddle,
+            allow_strangle: self.allow_strangle,
+            allow_iron_condor: self.allow_iron_condor,
+            allow_iron_butterfly: self.allow_iron_butterfly,
+            wing_steps: self.wing_steps,
         })
     }
 }

@@ -32,6 +32,20 @@ pub trait PriceModel {
     fn null_forecast(&self, features: &Features, horizon_years: f64) -> PriceDistribution {
         self.forecast(&null_features(features), horizon_years)
     }
+
+    /// The options' implied vol at the horizon as a multiple of today's — how
+    /// the ranker revalues each leg once the horizon is reached. 1.0 holds every
+    /// leg at its entry vol (sticky strike).
+    fn horizon_vol_scale(&self, _features: &Features, _horizon_years: f64) -> f64 {
+        1.0
+    }
+}
+
+/// Whether an earnings release falls inside a forecast of `horizon_years`.
+fn earnings_inside(features: &Features, horizon_years: f64) -> bool {
+    features
+        .days_to_earnings
+        .is_some_and(|d| d >= 0 && d as f64 <= horizon_years * 365.25)
 }
 
 /// A bar's features with every drift and non-IV vol input removed.
@@ -77,6 +91,13 @@ pub struct LognormalModelConfig {
     /// horizon. A monthly chain's IV spreads the release's jump over the whole
     /// month, so a week that contains it moves more than that IV implies.
     pub earnings_vol_multiplier: f64,
+    /// Revalue the legs at the symbol's trailing-median IV, not their entry IV,
+    /// when an earnings release falls inside the horizon — the crush. Sticky
+    /// strike across a release overvalues every long-vol position and
+    /// undervalues every short one, because the event's premium does not
+    /// survive the event. Never raises a vol: a bar already below its median
+    /// keeps its own.
+    pub crush_to_median: bool,
 }
 
 impl Default for LognormalModelConfig {
@@ -95,6 +116,7 @@ impl Default for LognormalModelConfig {
             grid_points: 101,
             vol_multiplier: 1.0,
             earnings_vol_multiplier: 1.0,
+            crush_to_median: false,
         }
     }
 }
@@ -147,12 +169,23 @@ impl PriceModel for LognormalDriftModel {
     }
 
     fn forecast(&self, features: &Features, horizon_years: f64) -> PriceDistribution {
-        let earnings_inside = features
-            .days_to_earnings
-            .is_some_and(|d| d >= 0 && d as f64 <= horizon_years * 365.25);
         let scale = self.config.vol_multiplier
-            * if earnings_inside { self.config.earnings_vol_multiplier } else { 1.0 };
+            * if earnings_inside(features, horizon_years) {
+                self.config.earnings_vol_multiplier
+            } else {
+                1.0
+            };
         self.distribution(features, horizon_years, scale)
+    }
+
+    fn horizon_vol_scale(&self, features: &Features, horizon_years: f64) -> f64 {
+        if !(self.config.crush_to_median && earnings_inside(features, horizon_years)) {
+            return 1.0;
+        }
+        features
+            .iv_vs_median
+            .filter(|ratio| *ratio > 0.0)
+            .map_or(1.0, |ratio| (1.0 / ratio).min(1.0))
     }
 
     fn null_forecast(&self, features: &Features, horizon_years: f64) -> PriceDistribution {
@@ -226,6 +259,28 @@ mod tests {
             days_to_earnings: None,
             days_since_earnings: None,
         }
+    }
+
+    /// Across a release the legs revert to the symbol's own median IV: a bar at
+    /// 1.25× its median revalues at 0.8×. Never upward, never without a release,
+    /// never when the model does not ask for it.
+    #[test]
+    fn the_crush_reverts_to_the_median_only_across_a_release() {
+        let model = |crush| LognormalDriftModel::new(LognormalModelConfig {
+            crush_to_median: crush,
+            ..Default::default()
+        });
+        let at = |days: Option<i64>, ratio: Option<f64>| Features {
+            days_to_earnings: days,
+            iv_vs_median: ratio,
+            ..features(None)
+        };
+        let week = 7.0 / 365.25;
+        assert!((model(true).horizon_vol_scale(&at(Some(3), Some(1.25)), week) - 0.8).abs() < 1e-12);
+        assert_eq!(model(true).horizon_vol_scale(&at(Some(3), Some(0.9)), week), 1.0, "never upward");
+        assert_eq!(model(true).horizon_vol_scale(&at(Some(12), Some(1.25)), week), 1.0, "past the horizon");
+        assert_eq!(model(true).horizon_vol_scale(&at(None, Some(1.25)), week), 1.0, "no release");
+        assert_eq!(model(false).horizon_vol_scale(&at(Some(3), Some(1.25)), week), 1.0, "not asked");
     }
 
     #[test]
