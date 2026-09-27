@@ -1,0 +1,26 @@
+# A rule-based skewed iron condor: short a put spread 4.5-6.5 % below spot (the
+# rich part of the index skew) and a call spread 1-3 % above (priced about
+# fairly, so it offsets the puts' direction at little cost). One candidate per
+# bar, at the quoted strikes nearest each target; the floors are off, so it is
+# taken whenever the entry gates allow — the ranker scores it but does not
+# choose. scripts/option_premium.py `structures` is the evidence and its limits.
+[candidates]
+rights = ["call", "put"]
+allow_debit = false
+allow_credit = false
+allow_naked_long = false
+fixed_legs = [
+    { right = "put",  side = "long",  distance = 0.065 },
+    { right = "put",  side = "short", distance = 0.045 },
+    { right = "call", side = "short", distance = 0.01 },
+    { right = "call", side = "long",  distance = 0.03 },
+]
+max_relative_spread = 1.0
+max_loss = 1500.0
+quantity = 1
+
+[ranking]
+metric = "expected_value"
+min_score = -1.0e9
+min_expected_pl = -1.0e12
+scorer_sample_per_bar = 0

@@ -92,6 +92,12 @@ pub struct RunConfig {
     /// Refuse entries unless RSI crossed up through its level within this many
     /// bars — "recovering" rather than "oversold".
     pub max_bars_since_rsi_cross_up: Option<u32>,
+    /// Refuse a symbol's entry until this many days after its last fill — the
+    /// spacing that turns a per-symbol cap above one into a ladder.
+    pub min_days_between_entries: Option<f64>,
+    /// Decide entries only on bars starting inside this New York window, as
+    /// minutes past midnight.
+    pub entry_window: Option<(u16, u16)>,
     /// Ranked allocation policy. `None` preserves fixed one-lot entries; shared
     /// ranked configs resolve to the score-weighted model by default.
     pub portfolio_model: Option<PortfolioModelKind>,
@@ -112,6 +118,8 @@ impl Default for RunConfig {
             max_entry_rsi: None,
             entry_rsi_zone: RsiZone::default(),
             max_bars_since_rsi_cross_up: None,
+            min_days_between_entries: None,
+            entry_window: None,
             portfolio_model: None,
         }
     }
@@ -245,6 +253,16 @@ fn entry_gate(
     } else {
         EntryGate::Open
     }
+}
+
+/// Whether a bar starting at `ts` falls inside the configured New York entry
+/// window (always, when there is none).
+fn inside_entry_window(config: &RunConfig, ts: DateTime<Utc>) -> bool {
+    config.entry_window.is_none_or(|(from, to)| {
+        let local = ts.with_timezone(&chrono_tz::America::New_York);
+        let minute = (chrono::Timelike::hour(&local) * 60 + chrono::Timelike::minute(&local)) as u16;
+        (from..=to).contains(&minute)
+    })
 }
 
 /// Whether a chain expiring at `expiry_instant` is too near to open a position in.
@@ -392,6 +410,10 @@ pub struct Census {
     pub rsi_out_of_band: usize,
     /// Refused because RSI had not recently crossed up through its level.
     pub no_recent_rsi_cross: usize,
+    /// Refused because the symbol's last entry was too recent.
+    pub entry_spacing: usize,
+    /// Refused because the bar fell outside the entry window.
+    pub outside_entry_window: usize,
     /// Closed at intrinsic because option quotes were unavailable.
     pub synthetic_exits: usize,
     /// A ranked choice was made but the capital left could not fund even one
@@ -859,6 +881,8 @@ pub fn run_shared(
     let mut equity_curve: Vec<EquityPoint> = Vec::new();
     // Each symbol's forecast from its last closed cadence window.
     let mut last_ctx: Vec<Option<RankedContext>> = (0..n).map(|_| None).collect();
+    // Each symbol's latest entry fill, for the ladder's spacing.
+    let mut last_entry: Vec<Option<DateTime<Utc>>> = vec![None; n];
 
     // Merged, ordered global timeline: (ts, symbol, chain, option_index?). The
     // stock-only bars are one tape per symbol, so they come from its first chain.
@@ -990,6 +1014,7 @@ pub fn run_shared(
                 let position = portfolio.open.last().expect("just opened");
                 opened_at_index.insert(position.id, sym_bars[si]);
                 marks.insert(position.id, mark_of(position, bar));
+                last_entry[si] = Some(position.opened_at);
             }
         }
 
@@ -1094,6 +1119,18 @@ pub fn run_shared(
                         EntryGate::EarningsBlackout => census[si].earnings_blackout += 1,
                         EntryGate::RsiOutOfBand => census[si].rsi_out_of_band += 1,
                         EntryGate::NoRecentRsiCross => census[si].no_recent_rsi_cross += 1,
+                        EntryGate::Open if !inside_entry_window(config, ts) => {
+                            census[si].outside_entry_window += 1
+                        }
+                        EntryGate::Open
+                            if config.min_days_between_entries.is_some_and(|days| {
+                                last_entry[si].is_some_and(|at| {
+                                    ((ts - at).num_seconds() as f64) < days * 86_400.0
+                                })
+                            }) =>
+                        {
+                            census[si].entry_spacing += 1
+                        }
                         EntryGate::Open => {
                             let open: Vec<(&ChainSeries, &ChainSnapshot)> = chains
                                 .iter()
@@ -2308,6 +2345,22 @@ min_days_before_expiry = 0
             opened.iter().all(|ts| (ts.timestamp() / 60) % 30 == 0),
             "{opened:?}"
         );
+    }
+
+    /// The window is New York time, so it holds across daylight saving: 14:00
+    /// UTC is 10:00 in September and 09:00 in December.
+    #[test]
+    fn the_entry_window_reads_new_york_time() {
+        let config = RunConfig {
+            entry_window: Some((10 * 60, 15 * 60)),
+            ..RunConfig::default()
+        };
+        let at = |m, d, h, min| chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, m, d, h, min, 0).unwrap();
+        assert!(inside_entry_window(&config, at(9, 1, 14, 0)));
+        assert!(!inside_entry_window(&config, at(9, 1, 13, 30)), "the opening bar");
+        assert!(!inside_entry_window(&config, at(9, 1, 19, 30)), "the last bar");
+        assert!(!inside_entry_window(&config, at(12, 1, 14, 0)), "09:00 in winter");
+        assert!(inside_entry_window(&RunConfig::default(), at(9, 1, 13, 30)), "no window, no gate");
     }
 
     #[test]

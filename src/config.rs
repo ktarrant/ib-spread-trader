@@ -21,7 +21,7 @@ use crate::engine::{
 };
 use crate::execution::{Costs, DeltaSelector};
 use crate::model::{
-    CandidateConfig, FeatureConfig, FeatureEngine, LognormalDriftModel, LognormalModelConfig,
+    CandidateConfig, FeatureConfig, FeatureEngine, FixedLeg, LognormalDriftModel, LognormalModelConfig,
     RankMetric, RankingConfig,
 };
 use crate::portfolio::{EqualWeightSizer, PortfolioModelKind, ScoreWeightedSizer};
@@ -313,6 +313,16 @@ pub struct ExecutionConfig {
     /// tape in either direction rather than acting on every bar.
     #[serde(default)]
     pub entry_rsi_zone: RsiZone,
+    /// Refuse a new entry in a symbol until this many days after its last one,
+    /// so `max_positions_per_symbol > 1` builds a ladder — positions opened a
+    /// week apart — rather than filling every slot on consecutive bars.
+    #[serde(default)]
+    pub min_days_between_entries: Option<f64>,
+    /// Decide entries only on bars starting inside this New York window, e.g.
+    /// `["10:00", "15:00"]`. The first and last bars of a session quote about
+    /// twice the spread of midday, and a decision fills on the next bar.
+    #[serde(default)]
+    pub entry_window: Option<[String; 2]>,
     /// announcement. Prevents opening positions that would be immediately
     /// closed by `close_before_earnings`.
     #[serde(default)]
@@ -321,6 +331,13 @@ pub struct ExecutionConfig {
 
 fn default_tolerance() -> f64 {
     0.07
+}
+
+/// "HH:MM" as minutes past midnight.
+fn minute_of_day(text: &str) -> Result<u16> {
+    let parsed = chrono::NaiveTime::parse_from_str(text, "%H:%M")
+        .with_context(|| format!("`{text}` is not an HH:MM time"))?;
+    Ok((chrono::Timelike::hour(&parsed) * 60 + chrono::Timelike::minute(&parsed)) as u16)
 }
 // Default expiry rules for every strategy: close well before the option tape
 // stops so a position exits on a real quote rather than settling at intrinsic,
@@ -347,6 +364,8 @@ impl Default for ExecutionConfig {
             max_entry_rsi: None,
             entry_rsi_zone: RsiZone::default(),
             max_bars_since_rsi_cross_up: None,
+            min_days_between_entries: None,
+            entry_window: None,
             earnings_blackout_days: None,
         }
     }
@@ -381,6 +400,10 @@ pub struct ExitConfig {
     /// Hold through a release, then close on the first bar after it is priced.
     #[serde(default)]
     pub close_after_earnings: bool,
+    /// Close once a position has been open this many days — a fixed holding
+    /// period, for a rule-based strategy with no forecast horizon to key off.
+    #[serde(default)]
+    pub max_hold_days: Option<f64>,
     /// Debit-spread give-up: close when the live probability of profit falls
     /// below this (0..1). Ranked mode only. Applies to debit spreads, not nakeds.
     #[serde(default)]
@@ -418,6 +441,7 @@ impl Default for ExitConfig {
             max_time_pct: None,
             close_before_earnings: false,
             close_after_earnings: false,
+            max_hold_days: None,
             live_pop_floor: None,
             naked_trailing_stop_pct: None,
             naked_momentum_exit: false,
@@ -1062,6 +1086,10 @@ pub struct CandidatesConfig {
     pub allow_iron_condor: bool,
     pub allow_iron_butterfly: bool,
     pub wing_steps: usize,
+    /// A rule-based structure. See `CandidateConfig::fixed_legs`.
+    pub fixed_legs: Vec<FixedLeg>,
+    /// See `CandidateConfig::fixed_tolerance`.
+    pub fixed_tolerance: f64,
 }
 
 impl Default for CandidatesConfig {
@@ -1085,6 +1113,8 @@ impl Default for CandidatesConfig {
             allow_iron_condor: d.allow_iron_condor,
             allow_iron_butterfly: d.allow_iron_butterfly,
             wing_steps: d.wing_steps,
+            fixed_legs: d.fixed_legs,
+            fixed_tolerance: d.fixed_tolerance,
         }
     }
 }
@@ -1097,7 +1127,8 @@ impl CandidatesConfig {
         let neutral = self.allow_straddle
             || self.allow_strangle
             || self.allow_iron_condor
-            || self.allow_iron_butterfly;
+            || self.allow_iron_butterfly
+            || !self.fixed_legs.is_empty();
         if !self.allow_debit && !self.allow_credit && !self.allow_naked_long && !neutral {
             bail!("`candidates` allows no structure at all");
         }
@@ -1129,6 +1160,8 @@ impl CandidatesConfig {
             allow_iron_condor: self.allow_iron_condor,
             allow_iron_butterfly: self.allow_iron_butterfly,
             wing_steps: self.wing_steps,
+            fixed_legs: self.fixed_legs.clone(),
+            fixed_tolerance: self.fixed_tolerance,
         })
     }
 }
@@ -1250,6 +1283,12 @@ impl StrategyConfig {
             self.mode == StrategyMode::Ranked && self.account_mode()? == AccountMode::Shared;
         if chains.len() > 1 && !shared_ranked {
             bail!("several `expiries` need `mode = \"ranked\"` and the shared account");
+        }
+        if self.execution.entry_window.is_some() && !shared_ranked {
+            bail!("`execution.entry_window` needs `mode = \"ranked\"` and the shared account");
+        }
+        if self.execution.min_days_between_entries.is_some() && !shared_ranked {
+            bail!("`execution.min_days_between_entries` needs `mode = \"ranked\"` and the shared account");
         }
         if self.exit.resolve()?.stock_bar_exits && !shared_ranked {
             bail!("`stock_bar_exits` needs `mode = \"ranked\"` and the shared account");
@@ -1609,6 +1648,7 @@ impl StrategyConfig {
                 max_time_pct: exit.max_time_pct,
                 close_before_earnings: exit.close_before_earnings,
                 close_after_earnings: exit.close_after_earnings,
+                max_hold_days: exit.max_hold_days,
                 min_days_before_expiry: exit.min_days_before_expiry,
                 stock_bar_exits: exit.stock_bar_exits,
             },
@@ -1620,6 +1660,11 @@ impl StrategyConfig {
             max_entry_rsi: self.execution.max_entry_rsi,
             entry_rsi_zone: self.execution.entry_rsi_zone,
             max_bars_since_rsi_cross_up: self.execution.max_bars_since_rsi_cross_up,
+            min_days_between_entries: self.execution.min_days_between_entries,
+            entry_window: match &self.execution.entry_window {
+                None => None,
+                Some([from, to]) => Some((minute_of_day(from)?, minute_of_day(to)?)),
+            },
             portfolio_model: portfolio.model,
         })
     }

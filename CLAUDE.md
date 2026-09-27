@@ -369,7 +369,8 @@ close together.
 **−0.0095** and a 50.7 % hit-rate, positive on only **5 of 15** symbols — below
 the gate's 10. The driftless null scores exactly 0.0000 with 53/83/93 coverage, so
 the evaluation itself is sound on 15-minute data; the August edge did not carry.
-PIT mean 0.55 again: a rising sample the model sits below.
+PIT mean 0.55 again: the model sits below where prices landed — driven by the
+high-beta single names, not the indices (see *The index put premium*).
 
 ### Several expiries: one forecast, a position per chain, never rolled
 
@@ -1646,6 +1647,61 @@ should see them; they stay. Two real gaps: XOM has **one** event in the whole
 table (its history never synced), and EDGAR knows a release only once filed — a
 backtest reads dates in hindsight that live trading will need a forward earnings
 calendar for.
+
+### The index put premium: real, thin, and only a skewed condor keeps it
+
+`scripts/option_premium.py` measures the premium straight off the quotes, with no
+model: every option entered at 15:00 UTC and held a fixed number of days. `map`
+delta-hedges each option at its entry delta, so the market's direction is taken
+out; `structures` prices defined-risk ETF structures leg by leg, crossing every
+leg both ways plus commission. Re-run it on each capture — each adds a period.
+
+**Correction to this file: the indices did not rally.** Jun 17 → Sep 25 SPY rose
+4.1 %, QQQ 3.0 % (after a −3.7 % dip to Jul 20), and IWM *fell* 2.7 % (−5.3 % from
+Aug 21 to Sep 18). Findings above that blame a "rising sample" — the RSI regime,
+the losing credit spreads, the PIT at 0.53–0.56 — were reading forecasts pooled
+across all symbols, where PLTR and COIN ran. The model underestimated high-beta
+upside; it was not fading an index rally.
+
+- **ETF puts are overpriced, delta-hedged, in every period** — the seller's
+  7-day return on premium at mid is about +7 % at 1–3 % out of the money, +11 % at
+  3–6 %, +14 % at 6–10 %, the same in the rising, the churning and IWM's falling
+  month (IWM's puts were richest in the month it fell: +15 to +27 %). ETF calls
+  near the money are about fair; further out they are cheap. Single-stock options
+  outside earnings are about fair at mid, and their 3–8 point spread leaves
+  nothing. In earnings weeks single-stock options were *cheap* (ATM −18 to −21 %
+  to the seller) — on one cluster of late-July prints.
+- **Hedging needs margin** (short stock against a short put), so it is out for a
+  $20k no-margin account. Defined-risk spreads are collateralised by max loss,
+  not borrowed — the backtester's `capital_at_risk` already models that.
+- **Put spreads keep none of it.** They are long the market, and their protective
+  wing is the most overpriced option on the board. At 21 days, −2.8 to −0.9 % per
+  trade, fills at mid or crossed.
+- **The crossing cost is the other half.** At mid the put spreads collect about
+  +1.3 % of max loss a week hedged; crossing two legs in and out costs the same
+  at 7 days, a third of it at 21–28 (cost per round trip, premium per week).
+- **The skewed condor keeps it**: short puts 4.5–6.5 % out (the rich skew), short
+  calls 1–3 % out (priced about fairly, so they offset the direction cheaply). At
+  21 days, +11.9 % per trade on max loss [+1.0, +22.4], at 28 days +16 to +21 %.
+  But QQQ carries it (IWM 0 to +6 %), September entries lost ~20 %, and it cannot
+  be placed on SPY at all — the capture band stops at about −5 %, so there is no
+  6.5 % put. `fixed_tolerance` refuses a leg more than 1 % of spot from its
+  target: before it, "nearest to −6.5 %" was the last strike quoted and SPY's
+  wing a $1 spread, which the first version of this analysis measured without
+  noticing.
+
+`strategies/skewed_condor.toml` trades it through the engine: `fixed_legs` in
+`rankers/skewed_condor.toml` (one candidate per bar, floors off, so it is taken
+whenever the gates allow), `max_hold_days = 21` (`exits/hold_21.toml`,
+`ExitReason::HoldPeriod`), a ladder of up to three per ETF spaced by
+`min_days_between_entries = 7`, and `entry_window = ["10:00", "15:00"]` New York
+time, since a session's first and last bars quote about twice the spread. On the
+ETF datasets, one lot each: August chain 10 trades, +3.5 %, 9 winners, drawdown
+10.6 %; October chain 10 closed (+$251) and four still open when the data ends,
+marked −$637 after QQQ jumped 3 % through their short calls — a rally through
+the near-money call spread is this structure's risk. A lead, not an edge: two
+ETFs, ~20 trades, and fill quality — the swing factor — only measurable with
+real orders.
 
 The null-beating gate is the floor: a config that cannot beat a random walk
 out-of-sample is not a better forecaster, whatever P&L it posted. And the converse

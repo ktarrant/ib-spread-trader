@@ -53,6 +53,26 @@ pub struct CandidateConfig {
     /// How many strike steps out an iron structure's wings may sit (1..=this).
     /// Bounds a four-leg enumeration that would otherwise be quartic.
     pub wing_steps: usize,
+    /// A rule-based structure: these legs at the quoted strikes nearest each
+    /// target distance from spot, enumerated as exactly one candidate. With the
+    /// ranking floors off, the ranker takes it whenever the gates allow — a
+    /// fixed strategy expressed through the same engine.
+    pub fixed_legs: Vec<FixedLeg>,
+    /// How far a fixed leg's strike may sit from its target, as a fraction of
+    /// spot. Past it the leg is refused rather than moved: a capture band that
+    /// ends at −5 % turns "the put nearest −6.5 %" into the last strike quoted,
+    /// and a 1-dollar wing into a different structure.
+    pub fixed_tolerance: f64,
+}
+
+/// One leg of a fixed structure: its right, its side, and how far out of the
+/// money its strike sits, as a fraction of spot (a put below, a call above).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixedLeg {
+    pub right: OptionRight,
+    pub side: Side,
+    pub distance: f64,
 }
 
 impl Default for CandidateConfig {
@@ -74,6 +94,8 @@ impl Default for CandidateConfig {
             allow_iron_condor: false,
             allow_iron_butterfly: false,
             wing_steps: 3,
+            fixed_legs: Vec::new(),
+            fixed_tolerance: 0.01,
         }
     }
 }
@@ -350,7 +372,43 @@ pub fn enumerate_verticals(
     }
 
     candidates.extend(enumerate_neutral(chain, costs, cfg, funnel));
+    candidates.extend(fixed_structure(chain, costs, cfg, funnel));
     candidates
+}
+
+/// `cfg.fixed_legs` at the quoted strikes nearest their targets — one
+/// candidate, or none when two legs land on the same strike or it fails the
+/// funnel (a runaway loss, a wide book, the loss cap).
+fn fixed_structure(
+    chain: &ChainSnapshot,
+    costs: &Costs,
+    cfg: &CandidateConfig,
+    funnel: &mut RankingFunnel,
+) -> Option<Candidate> {
+    if cfg.fixed_legs.is_empty() {
+        return None;
+    }
+    let spot = chain.reference_price();
+    let mut legs = Vec::with_capacity(cfg.fixed_legs.len());
+    for leg in &cfg.fixed_legs {
+        let target = match leg.right {
+            OptionRight::Put => spot * (1.0 - leg.distance),
+            OptionRight::Call => spot * (1.0 + leg.distance),
+        };
+        let quote = chain
+            .selectable(leg.right)
+            .min_by(|a, b| (a.strike - target).abs().total_cmp(&(b.strike - target).abs()))?;
+        if (quote.strike - target).abs() > cfg.fixed_tolerance * spot {
+            return None;
+        }
+        legs.push((quote, leg.side));
+    }
+    let distinct: std::collections::HashSet<_> =
+        legs.iter().map(|(q, _)| q.contract_id).collect();
+    if distinct.len() != legs.len() {
+        return None;
+    }
+    neutral_candidate(chain, costs, cfg, &legs, funnel)
 }
 
 /// Direction-neutral structures: a view on the *size* of the move, not its
@@ -421,7 +479,7 @@ fn enumerate_neutral(
     out
 }
 
-/// One direction-neutral structure through the vertical's funnel.
+/// A structure given as explicit legs, through the vertical's funnel.
 fn neutral_candidate(
     chain: &ChainSnapshot,
     costs: &Costs,
@@ -551,6 +609,49 @@ mod tests {
                 assert!(c.entry_debit < 0.0 && c.max_profit.is_some(), "short vol: a credit, capped");
             }
         }
+    }
+
+    /// A fixed structure takes the strikes nearest its targets — and refuses a
+    /// leg whose nearest strike is further than the tolerance from its target,
+    /// rather than quietly trading a different structure.
+    #[test]
+    fn a_fixed_structure_takes_its_nearest_strikes_or_nothing() {
+        let leg = |right, side, distance| FixedLeg { right, side, distance };
+        let cfg = |legs| CandidateConfig {
+            allow_debit: false,
+            allow_credit: false,
+            allow_naked_long: false,
+            max_relative_spread: 1.0,
+            max_loss: 10_000.0,
+            fixed_legs: legs,
+            ..CandidateConfig::default()
+        };
+        let condor = vec![
+            leg(OptionRight::Put, Side::Short, 0.05),
+            leg(OptionRight::Call, Side::Short, 0.05),
+            leg(OptionRight::Call, Side::Long, 0.10),
+            leg(OptionRight::Put, Side::Long, 0.10),
+        ];
+        let mut chain = chain();
+        chain.quotes.push(OptionQuote {
+            contract_id: 8,
+            strike: 90.0,
+            right: OptionRight::Put,
+            bid: 0.2,
+            ask: 0.3,
+            mid: 0.25,
+            implied_vol: Some(0.2),
+            delta: Some(-0.10),
+        });
+        let got = enumerate_verticals(&chain, &Costs::default(), &cfg(condor.clone()), &mut RankingFunnel::default());
+        assert_eq!(got.len(), 1);
+        let strikes: Vec<_> = got[0].spread.legs.iter().map(|l| (l.strike, l.side)).collect();
+        assert_eq!(strikes, [(95.0, Side::Short), (105.0, Side::Short), (110.0, Side::Long), (90.0, Side::Long)]);
+
+        // Nothing is quoted near 30 % out: the leg is refused, not moved.
+        let mut far = condor;
+        far[3] = leg(OptionRight::Put, Side::Long, 0.30);
+        assert!(enumerate_verticals(&chain, &Costs::default(), &cfg(far), &mut RankingFunnel::default()).is_empty());
     }
 
     /// A four-strike call ladder plus a four-strike put ladder around 100.

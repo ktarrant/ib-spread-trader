@@ -1,0 +1,23 @@
+# A rule-based ETF put-premium harvest: a skewed iron condor on SPY, QQQ and
+# IWM, one opened per symbol per week (up to three at once), each held three
+# weeks. No forecast — the driftless model is there only because the engine
+# ranks; the structure and its timing are fixed. See CLAUDE.md, *The index put
+# premium*.
+name      = "skewed-condor"
+mode      = "ranked"
+model     = "driftless"
+ranker    = "skewed_condor"
+portfolio = "ladder_20k"
+exit      = "hold_21"
+dataset   = "etf-2026-10-16"
+
+[execution]
+timing = "next_bar"
+# 21 days held + the 3-day before-expiry cutoff + a day's slack.
+min_entry_days_before_expiry = 25
+min_days_between_entries = 7
+# Midday only: the first and last bars quote about twice the spread.
+entry_window = ["10:00", "15:00"]
+
+[costs]
+commission_per_contract = 0.65

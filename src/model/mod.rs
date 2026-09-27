@@ -21,7 +21,7 @@ pub mod price_model;
 pub mod ranker;
 pub mod validation;
 
-pub use candidates::{Candidate, CandidateConfig, RankingFunnel, enumerate_verticals};
+pub use candidates::{FixedLeg, Candidate, CandidateConfig, RankingFunnel, enumerate_verticals};
 pub use distribution::PriceDistribution;
 pub use eval::{
     DecileStat, ForecastRecord, ModelEval, ScorerEval, ScorerRecord, decile_monotonicity,

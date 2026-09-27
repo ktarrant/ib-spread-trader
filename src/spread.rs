@@ -17,7 +17,7 @@ use crate::domain::OptionRight;
 /// it would need to change is findable.
 pub const CONTRACT_MULTIPLIER: f64 = 100.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
     Long,

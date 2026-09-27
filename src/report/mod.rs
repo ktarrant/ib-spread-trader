@@ -33,6 +33,10 @@ pub struct Census {
     pub rsi_out_of_band: usize,
     /// Bars refused because RSI had not recently turned up through its level.
     pub no_recent_rsi_cross: usize,
+    /// Bars refused because the symbol's last entry was too recent.
+    pub entry_spacing: usize,
+    /// Bars refused because they fell outside the entry window.
+    pub outside_entry_window: usize,
     pub signal_diagnostics: BTreeMap<String, usize>,
     pub rejections: BTreeMap<String, usize>,
     pub rejection_examples: BTreeMap<String, String>,
@@ -196,6 +200,8 @@ fn assemble(
         census.earnings_blackout += run.census.earnings_blackout;
         census.rsi_out_of_band += run.census.rsi_out_of_band;
         census.no_recent_rsi_cross += run.census.no_recent_rsi_cross;
+        census.entry_spacing += run.census.entry_spacing;
+        census.outside_entry_window += run.census.outside_entry_window;
         census.ranking.merge(&run.census.ranking);
         for (gate, count) in &run.signal_diagnostics {
             *census.signal_diagnostics.entry(gate.clone()).or_default() += count;
@@ -538,6 +544,7 @@ fn reason_key(reason: ExitReason) -> &'static str {
         ExitReason::TimeDecay => "time_decay",
         ExitReason::BeforeEarnings => "before_earnings",
         ExitReason::AfterEarnings => "after_earnings",
+        ExitReason::HoldPeriod => "hold_period",
         ExitReason::BeforeExpiry => "before_expiry",
         ExitReason::Expiry => "expiry_settlement",
     }

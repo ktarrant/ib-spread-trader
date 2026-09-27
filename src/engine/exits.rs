@@ -86,6 +86,9 @@ pub struct ExitRules {
     /// position's next option bar, so a stop crossed just after a chain snapshot
     /// is not left until the one after. Shared-account ranked runs only.
     pub stock_bar_exits: bool,
+    /// Close once the position has been open this many days — a fixed holding
+    /// period, for a rule-based strategy with no forecast horizon to key off.
+    pub max_hold_days: Option<f64>,
 }
 
 /// The current forecast, handed to the exit check so a model-driven exit (live
@@ -220,6 +223,9 @@ impl ExitRules {
         if let Some(reason) = forecast_horizon_exit(self, position.opened_at, ctx.bar_ts) {
             return Some(reason);
         }
+        if held_for(self, position.opened_at, ctx.bar_ts) {
+            return Some(ExitReason::HoldPeriod);
+        }
 
         // 7. Time decay — too much of the life has been consumed.
         if let Some(max_pct) = self.max_time_pct {
@@ -304,6 +310,9 @@ impl ExitRules {
         if let Some(reason) = forecast_horizon_exit(self, opened_at, bar_ts) {
             return Some(reason);
         }
+        if held_for(self, opened_at, bar_ts) {
+            return Some(ExitReason::HoldPeriod);
+        }
 
         if let Some(max_pct) = self.max_time_pct {
             let total = (expiry_instant - opened_at).num_seconds() as f64;
@@ -328,6 +337,13 @@ impl ExitRules {
 
         None
     }
+}
+
+/// Whether the position has been open its full `max_hold_days`.
+fn held_for(rules: &ExitRules, opened_at: DateTime<Utc>, bar_ts: DateTime<Utc>) -> bool {
+    rules
+        .max_hold_days
+        .is_some_and(|days| (bar_ts - opened_at).num_seconds() as f64 / 86_400.0 >= days)
 }
 
 /// Whether a position opened at `opened_at` was held across `last` — opened on
@@ -1329,6 +1345,21 @@ mod tests {
         late.opened_at = Utc.with_ymd_and_hms(2026, 7, 30, 13, 30, 0).unwrap();
         assert_eq!(rules.triggered(&late, &ctx(31, Some(&event))), None, "never held it");
         assert_eq!(ExitRules::default().triggered(&held, &ctx(30, Some(&event))), None);
+    }
+
+    #[test]
+    fn a_fixed_holding_period_closes_on_its_day() {
+        let rules = ExitRules {
+            max_hold_days: Some(21.0),
+            ..Default::default()
+        };
+        let p = position(); // opened 7/1 13:30
+        let at = |day, hour| Utc.with_ymd_and_hms(2026, 7, day, hour, 30, 0).unwrap();
+        assert_eq!(rules.time_triggered(p.opened_at, at(22, 12), expiry_instant(), None, None), None);
+        assert_eq!(
+            rules.time_triggered(p.opened_at, at(22, 13), expiry_instant(), None, None),
+            Some(ExitReason::HoldPeriod)
+        );
     }
 
     #[test]

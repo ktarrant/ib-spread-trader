@@ -1,0 +1,5 @@
+# Hold a rule-based position a fixed three weeks. At 7 days the crossing cost
+# of a four-leg structure equals the premium it collects; by 21 it is about a
+# third per week of it (scripts/option_premium.py). Nothing else closes it but
+# the before-expiry cutoff.
+max_hold_days = 21.0

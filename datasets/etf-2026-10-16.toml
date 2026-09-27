@@ -1,0 +1,4 @@
+# The index ETFs of the 2026-10-16 chain — the options whose put premium survives
+# delta hedging (scripts/option_premium.py).
+symbols = ["SPY", "QQQ", "IWM"]
+expiry = "2026-10-16"

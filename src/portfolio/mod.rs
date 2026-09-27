@@ -57,6 +57,8 @@ pub enum ExitReason {
     TimeDecay,
     /// Closed to avoid holding through an earnings announcement.
     BeforeEarnings,
+    /// Held its fixed holding period (`max_hold_days`).
+    HoldPeriod,
     /// Closed on the first bar after a release it was held through: the move a
     /// long-vol position was bought for has happened, and so has the crush a
     /// short-vol one was paid for.

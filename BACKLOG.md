@@ -58,6 +58,21 @@ our crude benchmark (monthly IV scaled to 7 days) rather than a mispricing.
   in git and CLAUDE.md as history; re-check any of it against the Phase 0 gate
   before relying on it.
 
+## The index put premium (the strongest lead, 2026-09-26)
+
+CLAUDE.md, *The index put premium*. `strategies/skewed_condor.toml` is the one
+structure that kept it after costs; its evidence is two ETFs and ~20 trades.
+
+- **Re-run `scripts/option_premium.py` on every capture** (`map` and
+  `structures --hold 21 28`). Each adds a period; the condor firms up or fades.
+- **Widen the ETF strike band in calc.** SPY's band ends near −5 %, so the
+  condor's 6.5 % put wing is never quoted and SPY cannot be traded as specified.
+- **Fill quality is the swing factor.** Recovering half the crossed spread moves
+  the condor from −1 % to +1 % in its worst month. Only real orders measure it.
+- **Size and the call side.** One lot uses ~$2k of the $20k; the risk that
+  appeared is a sharp rally through the 1–3 % short calls (QQQ, last week of
+  September), not a fall.
+
 ## Also next
 
 - **The viz chain pages (Events, Coverage) still read `30min` only.** The
