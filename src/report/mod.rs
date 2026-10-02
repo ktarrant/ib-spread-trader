@@ -650,7 +650,7 @@ pub fn write_csvs(
         let mut forecasts = String::from(
             "ts,symbol,spot,forward,atm_iv,horizon_years,mean,stddev,\
              q05,q10,q25,q50,q75,q90,q95,realized,model_crps,null_crps,pit,\
-             trend,vwap_distance,atr,realized_vol,skew,rsi,days_to_earnings,expiry\n",
+             trend,vwap_distance,atr,realized_vol,skew,rsi,days_to_earnings,expiry,prevailing_trend\n",
         );
         for run in runs {
             for f in &run.forecasts {
@@ -660,7 +660,7 @@ pub fn write_csvs(
                 let num = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_default();
                 let x = &f.features;
                 forecasts.push_str(&format!(
-                    "{},{},{:.4},{:.4},{},{:.6},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{},{},{},{},{},{},{},{}\n",
+                    "{},{},{:.4},{:.4},{},{:.6},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{},{},{},{},{},{},{},{},{}\n",
                     f.ts.to_rfc3339(), f.symbol, f.spot, f.forward, atm_iv, f.horizon_years,
                     f.mean, f.stddev,
                     f.quantiles[0], f.quantiles[1], f.quantiles[2], f.quantiles[3],
@@ -670,6 +670,7 @@ pub fn write_csvs(
                     num(x.skew), num(x.rsi),
                     x.days_to_earnings.map(|d| d.to_string()).unwrap_or_default(),
                     f.expiry,
+                    num(x.prevailing_trend),
                 ));
             }
         }
@@ -732,14 +733,14 @@ pub fn write_csvs(
         let mut predictions = String::from(
             "id,symbol,description,opened_at,expected_pl,score,prob_profit,\
              entry_spot,entry_trend,entry_vwap_distance,entry_atr,entry_realized_vol,\
-             entry_atm_iv,entry_skew,entry_rsi,entry_days_to_earnings,pnl,exit_reason\n",
+             entry_atm_iv,entry_skew,entry_rsi,entry_days_to_earnings,pnl,exit_reason,entry_prevailing_trend\n",
         );
         let num = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_default();
         for t in &report.trades {
             if let Some(p) = t.prediction {
                 let f = t.entry_features;
                 predictions.push_str(&format!(
-                    "{},{},\"{}\",{},{:.2},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.2},{}\n",
+                    "{},{},\"{}\",{},{:.2},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.2},{},{}\n",
                     t.id,
                     t.symbol,
                     t.description,
@@ -760,6 +761,7 @@ pub fn write_csvs(
                         .unwrap_or_default(),
                     t.pnl,
                     reason_key(t.exit_reason),
+                    num(f.and_then(|f| f.prevailing_trend)),
                 ));
             }
         }

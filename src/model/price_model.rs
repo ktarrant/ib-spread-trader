@@ -98,6 +98,10 @@ pub struct LognormalModelConfig {
     /// survive the event. Never raises a vol: a bar already below its median
     /// keeps its own.
     pub crush_to_median: bool,
+    /// Keep the trend drift only when it points the same way as the prevailing
+    /// trend: fade a spike against the trend, hold no view on one with it (or
+    /// while the prevailing trend is still warming).
+    pub trend_with_prevailing_only: bool,
 }
 
 impl Default for LognormalModelConfig {
@@ -117,6 +121,7 @@ impl Default for LognormalModelConfig {
             vol_multiplier: 1.0,
             earnings_vol_multiplier: 1.0,
             crush_to_median: false,
+            trend_with_prevailing_only: false,
         }
     }
 }
@@ -153,7 +158,10 @@ impl LognormalDriftModel {
 
     /// Horizon log-drift: `E[S_h] = spot · exp(drift)`.
     fn drift(&self, features: &Features) -> f64 {
-        self.config.trend_weight * features.trend.unwrap_or(0.0)
+        let trend = self.config.trend_weight * features.trend.unwrap_or(0.0);
+        let agrees = features.prevailing_trend.is_some_and(|p| p * trend > 0.0);
+        let trend = if self.config.trend_with_prevailing_only && !agrees { 0.0 } else { trend };
+        trend
             - self.config.vwap_reversion * features.vwap_distance.unwrap_or(0.0)
             - self.config.skew_weight * features.skew.unwrap_or(0.0)
     }
@@ -251,6 +259,7 @@ mod tests {
             year_fraction: 0.1,
             minute_of_day: 660,
             trend,
+            prevailing_trend: None,
             vwap_distance: None,
             atr: None,
             realized_vol: None,
@@ -281,6 +290,22 @@ mod tests {
         assert_eq!(model(true).horizon_vol_scale(&at(Some(12), Some(1.25)), week), 1.0, "past the horizon");
         assert_eq!(model(true).horizon_vol_scale(&at(None, Some(1.25)), week), 1.0, "no release");
         assert_eq!(model(false).horizon_vol_scale(&at(Some(3), Some(1.25)), week), 1.0, "not asked");
+    }
+
+    /// Fading a spike up (bearish drift) is kept in a falling prevailing trend
+    /// and dropped in a rising one or an unknown one.
+    #[test]
+    fn the_fade_is_kept_only_when_it_agrees_with_the_prevailing_trend() {
+        let model = |only| LognormalDriftModel::new(LognormalModelConfig {
+            trend_weight: -0.5,
+            trend_with_prevailing_only: only,
+            ..Default::default()
+        });
+        let spike_up = |prevailing| Features { prevailing_trend: prevailing, ..features(Some(0.02)) };
+        assert_eq!(model(true).drift(&spike_up(Some(-0.01))), -0.01, "against the trend: fade");
+        assert_eq!(model(true).drift(&spike_up(Some(0.01))), 0.0, "with the trend: no view");
+        assert_eq!(model(true).drift(&spike_up(None)), 0.0, "warming: no view");
+        assert_eq!(model(false).drift(&spike_up(Some(0.01))), -0.01, "off: always fade");
     }
 
     #[test]

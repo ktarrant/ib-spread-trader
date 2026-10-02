@@ -1,0 +1,20 @@
+{
+  "label": "mean-reversion-prevailing",
+  "dataset": "2026-08-21",
+  "horizon_days": 7.0,
+  "crps_skill": 0.0007204724438166776,
+  "crps_skill_interval": [
+    -0.008016694257828583,
+    0.009516903391598608
+  ],
+  "weeks": 10,
+  "pit_error": 0.10897539005951422,
+  "coverage_50": 0.5356281164548817,
+  "coverage_80": 0.8095544474827087,
+  "coverage_90": 0.8801672832555895,
+  "directional_hit_rate": 0.5243271221532091,
+  "symbols_with_skill": 5,
+  "symbols_total": 12,
+  "passed": false,
+  "evaluated_at": "2026-10-02T07:58:48.194276Z"
+}

@@ -1546,6 +1546,45 @@ BACKLOG.md records the resulting reframe — forecast move *size* against the
 option market's price for it, not direction. Every directional finding in this
 file predates the interval; re-check it against the gate before relying on it.
 
+### The trend measure was never the lever; fading only against the prevailing trend is
+
+`[features] trend_average` (`sma`, `ema`, `wma`, `vwma`) and a sweep of
+fast 5/10/20 × slow 30/50/80 × weight −0.25/−0.5/−1.0 at 7 days (108 cells per
+dataset, `scripts/sweep_model.py --jobs`): 84 cells beat the null on the
+Aug-expiry chain, **0 of 108** on the Oct-expiry chain, and the Oct-expiry
+"best" cells are just the smallest drift. The kind of average moves skill by
+~0.005 against intervals ~0.04 wide. Session VWAP (`vwap_reversion`, −1 to +2)
+adds nothing alone or on top of the trend, on either chain.
+
+What the 10/30 gap cannot see is *which way the move runs against*. A spike up
+in a rising market (AAPL drifting up through September) and a spike up in a
+falling one (AMZN in a downtrend) read the same, and both get faded.
+`prevailing_trend` is the slope of a 65-bar (5-session) SMA over 13 bars —
+algebraically, the last session's average price against the one five sessions
+earlier, divided by 5 — and `model.trend_with_prevailing_only` keeps the fade
+only when it points the way the prevailing trend does. A spike with the trend,
+or a warming prevailing trend (78 bars), gets no view. 65/13 was chosen before
+any result and never tuned.
+
+| | skill [interval] | dir % | sym+ | trades | return | max DD |
+|---|---|---|---|---|---|---|
+| Oct-expiry, `mean_reversion` | −0.0095 [−0.026, +0.006] | 52.2 | 5/15 | 52 | −28.8 % | |
+| Oct-expiry, `mean_reversion_prevailing` | +0.0011 [−0.004, +0.008] | 59.0 | 10/15 | 18 | **+70.7 %** | 12.4 % |
+| Aug-expiry, `mean_reversion` | +0.0133 [−0.009, +0.031] | 56.8 | 7/12 | 51 | −27.6 % | 54.8 % |
+| Aug-expiry, `mean_reversion_prevailing` | +0.0007 [−0.008, +0.010] | 52.4 | 5/12 | 22 | −17.7 % | 51.4 % |
+
+The Oct-expiry run is not one trade: 14 of 18 win, and it is +$7 499 without
+its best three. But the rule was read off Oct-expiry charts, so that chain is
+in-sample by construction; Aug-expiry is the test, and there P&L improves while
+forecast skill goes to zero — the with-trend fades are where Aug-expiry's skill
+lived (split across five prevailing definitions, Aug-expiry favours fading
+*with* the trend every time and Oct-expiry *against* it every time). Neither
+record passes the gate. A no-view bar is a driftless bar, so the ranker can
+still open a credit spread there (3 on Aug-expiry, +$814; none on Oct-expiry).
+The model reads only the sign of `prevailing_trend`; a dead zone around zero is
+the obvious next thing to test, and each weekly capture adds a period to check
+it on.
+
 ### The first vol-timing model: positive on both months, not yet significant
 
 Fitting ATM IV × a multiplier on one month and scoring it on the other (Gaussian
@@ -1729,6 +1768,7 @@ isolates that axis:
 | `prob_profit.toml` | scorer | `metric = "prob_profit"` — rewards hit-rate over magnitude. |
 | `exit_pop_trailing.toml` / `exit_momentum.toml` | exit | Structure-scoped give-ups: live-POP on debits, trailing vs momentum on nakeds. |
 | `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
+| `mean_reversion_prevailing.toml` | model | Fade a spike only against the 5-session prevailing trend. Oct-expiry +70.7 %, Aug-expiry −17.7 %; in the frontier. |
 | `mean_reversion_no_horizon.toml` | exit | The base without the forecast-horizon cap. Halves the loss; nakeds gain, debit spreads lose. |
 | `naked_rsi_trailing.toml` | model+ranker+exit | Nakeds at RSI extremes on a trailing stop. Loses 53.9 %; the overbought half is 9/10 of it. |
 | `naked_rsi_recovery.toml` / `_tight.toml` | execution | Enter after RSI turns up through 30, within N bars. First positive arms — and one trade is ~all of it. |

@@ -446,6 +446,7 @@ mod tests {
         crate::model::EntryFeatures {
             spot,
             trend: None,
+            prevailing_trend: None,
             vwap_distance: None,
             atr: None,
             realized_vol: None,

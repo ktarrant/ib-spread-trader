@@ -12,7 +12,7 @@
 //! than a fabricated value. The price model decides how to fall back.
 
 use crate::data::ChainSnapshot;
-use crate::indicators::{Atr, Cross, CrossDetector, RealizedVol, Rsi, Sma, Vwap};
+use crate::indicators::{AverageKind, Atr, Cross, CrossDetector, MovingAverage, RealizedVol, Rsi, Sma, Vwap};
 use anyhow::{Result, bail};
 use chrono::Timelike;
 use chrono_tz::America::New_York;
@@ -23,6 +23,12 @@ use chrono_tz::America::New_York;
 pub struct FeatureConfig {
     pub trend_fast: usize,
     pub trend_slow: usize,
+    /// Which moving average both trend legs use.
+    pub trend_average: AverageKind,
+    /// The prevailing trend: the slope of a `prevailing_period`-bar SMA over
+    /// the last `prevailing_slope_bars` bars — a longer view than `trend`.
+    pub prevailing_period: usize,
+    pub prevailing_slope_bars: usize,
     pub atr_period: usize,
     pub realized_vol_period: usize,
     /// Winsorize each return to this many robust sigmas before measuring realized
@@ -52,6 +58,9 @@ impl Default for FeatureConfig {
         Self {
             trend_fast: 10,
             trend_slow: 30,
+            trend_average: AverageKind::Sma,
+            prevailing_period: 65,
+            prevailing_slope_bars: 13,
             atr_period: 14,
             realized_vol_period: 20,
             realized_vol_winsor_k: 3.0,
@@ -86,6 +95,8 @@ pub struct EntryFeatures {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trend: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub prevailing_trend: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub vwap_distance: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub atr: Option<f64>,
@@ -106,6 +117,7 @@ impl From<&Features> for EntryFeatures {
         Self {
             spot: f.spot,
             trend: f.trend,
+            prevailing_trend: f.prevailing_trend,
             vwap_distance: f.vwap_distance,
             atr: f.atr,
             realized_vol: f.realized_vol,
@@ -130,6 +142,9 @@ pub struct Features {
     pub minute_of_day: u16,
     /// Fast-minus-slow SMA as a fraction of the slow SMA. Positive is an uptrend.
     pub trend: Option<f64>,
+    /// Change in the prevailing SMA over its slope window, as a fraction of
+    /// where it started. Positive is a rising prevailing trend.
+    pub prevailing_trend: Option<f64>,
     /// `(spot - vwap) / vwap`; positive when trading above the session VWAP.
     pub vwap_distance: Option<f64>,
     /// Average true range, in price units.
@@ -163,8 +178,12 @@ pub struct Features {
 /// [`observe`]: FeatureEngine::observe
 #[derive(Debug)]
 pub struct FeatureEngine {
-    trend_fast: Sma,
-    trend_slow: Sma,
+    trend_fast: MovingAverage,
+    trend_slow: MovingAverage,
+    prevailing: Sma,
+    /// The last `prevailing_slope_bars + 1` prevailing-SMA readings.
+    prevailing_history: std::collections::VecDeque<f64>,
+    prevailing_slope_bars: usize,
     atr: Atr,
     vwap: Vwap,
     realized_vol: RealizedVol,
@@ -196,8 +215,11 @@ impl FeatureEngine {
             bail!("skew_moneyness must be positive");
         }
         Ok(Self {
-            trend_fast: Sma::new(config.trend_fast)?,
-            trend_slow: Sma::new(config.trend_slow)?,
+            trend_fast: MovingAverage::new(config.trend_average, config.trend_fast)?,
+            trend_slow: MovingAverage::new(config.trend_average, config.trend_slow)?,
+            prevailing: Sma::new(config.prevailing_period)?,
+            prevailing_history: std::collections::VecDeque::with_capacity(config.prevailing_slope_bars + 1),
+            prevailing_slope_bars: config.prevailing_slope_bars.max(1),
             atr: Atr::new(config.atr_period)?,
             vwap: Vwap::new(),
             realized_vol: RealizedVol::with_winsor(
@@ -226,11 +248,22 @@ impl FeatureEngine {
 
         // Trend: advance both averages every bar; the gap is defined only once
         // the slow one is warm.
-        let fast = self.trend_fast.next(spot);
-        let slow = self.trend_slow.next(spot);
+        let volume = u.volume.unwrap_or(0.0);
+        let fast = self.trend_fast.next(spot, volume);
+        let slow = self.trend_slow.next(spot, volume);
         let trend = fast
             .zip(slow)
             .and_then(|(f, s)| (s != 0.0).then_some((f - s) / s));
+
+        let prevailing_trend = self.prevailing.next(spot).and_then(|now| {
+            if self.prevailing_history.len() > self.prevailing_slope_bars {
+                self.prevailing_history.pop_front();
+            }
+            self.prevailing_history.push_back(now);
+            let then = *self.prevailing_history.front()?;
+            (self.prevailing_history.len() > self.prevailing_slope_bars && then != 0.0)
+                .then(|| (now - then) / then)
+        });
 
         // VWAP: a bar with no real volume contributes nothing but still yields the
         // running mean; OHLC fall back to spot, which the zero-volume path ignores.
@@ -299,6 +332,7 @@ impl FeatureEngine {
             year_fraction: chain.year_fraction,
             minute_of_day,
             trend,
+            prevailing_trend,
             vwap_distance,
             atr,
             realized_vol,
@@ -364,6 +398,9 @@ mod tests {
             iv_median_lookback: 200,
             trend_fast: 2,
             trend_slow: 3,
+            trend_average: AverageKind::Sma,
+            prevailing_period: 3,
+            prevailing_slope_bars: 1,
             atr_period: 2,
             realized_vol_period: 2,
             realized_vol_winsor_k: 3.0,

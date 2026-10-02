@@ -77,6 +77,87 @@ impl Sma {
     }
 }
 
+/// Which moving average a trend gap is built from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AverageKind {
+    #[default]
+    Sma,
+    /// Exponential, `alpha = 2 / (period + 1)`, seeded at the first value.
+    Ema,
+    /// Linearly weighted: the newest bar weighs `period`, the oldest 1.
+    Wma,
+    /// Volume-weighted over the window — a rolling VWAP of the bar prices.
+    Vwma,
+}
+
+/// A moving average of any [`AverageKind`], silent until `period` bars are in.
+/// An EMA has no window to fill, so it waits the same `period` bars for its
+/// seed to wash out rather than reporting the first price as an average.
+#[derive(Debug, Clone)]
+pub struct MovingAverage {
+    kind: AverageKind,
+    period: usize,
+    seen: usize,
+    sma: Option<Sma>,
+    ema: Option<ta::indicators::ExponentialMovingAverage>,
+    window: VecDeque<(f64, f64)>,
+}
+
+impl MovingAverage {
+    pub fn new(kind: AverageKind, period: usize) -> Result<Self> {
+        if period == 0 {
+            bail!("{kind:?} period must be at least 1");
+        }
+        Ok(Self {
+            kind,
+            period,
+            seen: 0,
+            sma: (kind == AverageKind::Sma).then(|| Sma::new(period)).transpose()?,
+            ema: (kind == AverageKind::Ema)
+                .then(|| ta::indicators::ExponentialMovingAverage::new(period))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("EMA period {period}: {e}"))?,
+            window: VecDeque::with_capacity(period),
+        })
+    }
+
+    /// Feed one bar. `volume` is read only by `Vwma`, which reports `None` while
+    /// its window holds no real volume.
+    pub fn next(&mut self, price: f64, volume: f64) -> Option<f64> {
+        self.seen += 1;
+        let full = self.seen >= self.period;
+        match self.kind {
+            AverageKind::Sma => self.sma.as_mut()?.next(price),
+            AverageKind::Ema => {
+                let reading = self.ema.as_mut()?.next(price);
+                full.then_some(reading)
+            }
+            AverageKind::Wma | AverageKind::Vwma => {
+                if self.window.len() == self.period {
+                    self.window.pop_front();
+                }
+                let volume = if volume.is_finite() && volume > 0.0 { volume } else { 0.0 };
+                self.window.push_back((price, volume));
+                if !full {
+                    return None;
+                }
+                let weighted = |w: &dyn Fn(usize, f64) -> f64| {
+                    let (num, den) = self.window.iter().enumerate().fold((0.0, 0.0), |(n, d), (i, &(p, v))| {
+                        let w = w(i, v);
+                        (n + w * p, d + w)
+                    });
+                    (den > 0.0).then(|| num / den)
+                };
+                match self.kind {
+                    AverageKind::Wma => weighted(&|i, _| (i + 1) as f64),
+                    _ => weighted(&|_, v| v),
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cross {
     Up,
@@ -375,6 +456,23 @@ mod tests {
         assert_eq!(sma.next(2.0), None);
         assert_eq!(sma.next(3.0), Some(2.0));
         assert_eq!(sma.next(4.0), Some(3.0));
+    }
+
+    #[test]
+    fn each_average_kind_warms_then_weights_as_named() {
+        let feed = |kind, bars: &[(f64, f64)]| {
+            let mut ma = MovingAverage::new(kind, 3).unwrap();
+            bars.iter().map(|&(p, v)| ma.next(p, v)).collect::<Vec<_>>()
+        };
+        let bars = [(1.0, 100.0), (2.0, 100.0), (3.0, 100.0), (4.0, 300.0)];
+        assert_eq!(feed(AverageKind::Sma, &bars), [None, None, Some(2.0), Some(3.0)]);
+        // Weights 1,2,3 on (2,3,4): 20/6.
+        assert_eq!(feed(AverageKind::Wma, &bars)[3], Some(20.0 / 6.0));
+        // Volumes 100,100,300 on (2,3,4): 1700/500.
+        assert_eq!(feed(AverageKind::Vwma, &bars)[3], Some(3.4));
+        assert_eq!(feed(AverageKind::Vwma, &[(1.0, 0.0); 3])[2], None);
+        // alpha 0.5, seeded at 1: 1 -> 1.5 -> 2.25 -> 3.125, silent for 2 bars.
+        assert_eq!(feed(AverageKind::Ema, &bars), [None, None, Some(2.25), Some(3.125)]);
     }
 
     #[test]

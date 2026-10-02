@@ -870,6 +870,11 @@ impl Default for CostsConfig {
 pub struct FeaturesConfig {
     pub trend_fast: usize,
     pub trend_slow: usize,
+    /// `sma` (default), `ema`, `wma` or `vwma`, for both trend legs.
+    pub trend_average: crate::indicators::AverageKind,
+    /// See `FeatureConfig::prevailing_period`.
+    pub prevailing_period: usize,
+    pub prevailing_slope_bars: usize,
     pub atr_period: usize,
     pub realized_vol_period: usize,
     pub realized_vol_winsor_k: f64,
@@ -890,6 +895,9 @@ impl Default for FeaturesConfig {
         Self {
             trend_fast: d.trend_fast,
             trend_slow: d.trend_slow,
+            trend_average: d.trend_average,
+            prevailing_period: d.prevailing_period,
+            prevailing_slope_bars: d.prevailing_slope_bars,
             atr_period: d.atr_period,
             realized_vol_period: d.realized_vol_period,
             realized_vol_winsor_k: d.realized_vol_winsor_k,
@@ -907,6 +915,9 @@ impl FeaturesConfig {
         FeatureConfig {
             trend_fast: self.trend_fast,
             trend_slow: self.trend_slow,
+            trend_average: self.trend_average,
+            prevailing_period: self.prevailing_period,
+            prevailing_slope_bars: self.prevailing_slope_bars,
             atr_period: self.atr_period,
             realized_vol_period: self.realized_vol_period,
             realized_vol_winsor_k: self.realized_vol_winsor_k,
@@ -938,6 +949,8 @@ pub struct ModelConfig {
     pub earnings_vol_multiplier: f64,
     /// See `LognormalModelConfig::crush_to_median`.
     pub crush_to_median: bool,
+    /// See `LognormalModelConfig::trend_with_prevailing_only`.
+    pub trend_with_prevailing_only: bool,
 }
 
 impl Default for ModelConfig {
@@ -956,6 +969,7 @@ impl Default for ModelConfig {
             vol_multiplier: d.vol_multiplier,
             earnings_vol_multiplier: d.earnings_vol_multiplier,
             crush_to_median: d.crush_to_median,
+            trend_with_prevailing_only: d.trend_with_prevailing_only,
         }
     }
 }
@@ -981,6 +995,7 @@ impl ModelConfig {
             vol_multiplier: self.vol_multiplier,
             earnings_vol_multiplier: self.earnings_vol_multiplier,
             crush_to_median: self.crush_to_median,
+            trend_with_prevailing_only: self.trend_with_prevailing_only,
         })
     }
 }

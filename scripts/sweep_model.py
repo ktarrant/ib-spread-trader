@@ -29,6 +29,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,6 +49,7 @@ BASE_MODEL = {
 BASE_FEATURES = {
     "trend_fast": 10,
     "trend_slow": 30,
+    "trend_average": "sma",
     "atr_period": 14,
     "realized_vol_period": 20,
     "skew_moneyness": 0.05,
@@ -67,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", default="2026-08-21", help="a label under datasets/")
     parser.add_argument("--db", type=Path)
     parser.add_argument("--binary", type=Path, default=DEFAULT_BINARY)
+    parser.add_argument("--jobs", type=int, default=1, help="cells run in parallel")
     return parser.parse_args()
 
 
@@ -101,10 +104,25 @@ def run(binary: Path, config: Path, db: Path | None) -> dict | None:
         sys.stderr.write(f"  failed: {out.stderr.strip().splitlines()[-1:]}\n")
         return None
     report = json.loads(out.stdout)
-    pooled = (report.get("model_eval") or {}).get("pooled")
+    model_eval = report.get("model_eval") or {}
+    pooled = model_eval.get("pooled")
     if pooled:
         pooled["trades"] = report["totals"]["trades"]
+        per_symbol = model_eval.get("per_symbol") or []
+        pooled["symbols_positive"] = sum(s["crps_skill"] > 0 for s in per_symbol)
+        pooled["symbols"] = len(per_symbol)
     return pooled
+
+
+def parse_value(text: str) -> float | str:
+    try:
+        return float(text)
+    except ValueError:
+        return text.strip()
+
+
+def fmt(value: float | str) -> str:
+    return value if isinstance(value, str) else f"{value:g}"
 
 
 def main() -> None:
@@ -112,11 +130,11 @@ def main() -> None:
     axes: list[tuple[str, list[float]]] = []
     for spec in args.set:
         field, _, values = spec.partition("=")
-        axes.append((field.strip(), [float(v) for v in values.split(",")]))
+        axes.append((field.strip(), [parse_value(v) for v in values.split(",")]))
     if not axes:
         sys.exit("nothing to sweep: pass at least one --set FIELD=V1,V2")
 
-    rows = []
+    cells = []
     with tempfile.TemporaryDirectory(prefix="ib-model-sweep-") as temp_name:
         temp = Path(temp_name)
         for cell in itertools.product(*(values for _, values in axes)):
@@ -124,25 +142,28 @@ def main() -> None:
             model = dict(BASE_MODEL)
             features = dict(BASE_FEATURES)
             for field, value in assignment.items():
-                if field in features:
-                    features[field] = int(value) if float(value).is_integer() else value
-                else:
-                    model[field] = value
-            label = " ".join(f"{k}={v:g}" for k, v in assignment.items())
+                if isinstance(value, float) and value.is_integer() and field in features:
+                    value = int(value)
+                (features if field in features else model)[field] = value
+            label = " ".join(f"{k}={fmt(v)}" for k, v in assignment.items())
             config = temp / (label.replace(" ", "_").replace("=", "") + ".toml")
             config.write_text(render(model, features, args.horizon, args.dataset))
-            print(f"  {label}", file=sys.stderr)
-            pooled = run(args.binary, config, args.db)
-            if pooled:
-                rows.append((label, pooled))
+            cells.append((label, config))
+
+        def one(cell: tuple[str, Path]) -> tuple[str, dict | None]:
+            print(f"  {cell[0]}", file=sys.stderr)
+            return cell[0], run(args.binary, cell[1], args.db)
+
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            rows = [(label, p) for label, p in pool.map(one, cells) if p]
 
     if not rows:
         sys.exit("no cell produced a forecast")
     rows.sort(key=lambda r: -r[1]["crps_skill"])
     width = max(len(label) for label, _ in rows)
     header = (
-        f"{'cell':<{width}}{'crps skill':>12}{'dir%':>7}{'cov 50/80/90':>16}"
-        f"{'PIT err':>9}{'PIT mean':>10}{'trades':>8}"
+        f"{'cell':<{width}}{'crps skill':>12}{'interval':>20}{'sym+':>7}{'dir%':>7}"
+        f"{'cov 50/80/90':>16}{'PIT err':>9}{'PIT mean':>10}{'trades':>8}"
     )
     print(f"\n{args.dataset}, horizon {args.horizon:g}d, sorted by CRPS skill vs the random-walk null")
     print(header)
@@ -150,7 +171,10 @@ def main() -> None:
     for label, p in rows:
         cov = f"{p['coverage_50']*100:.0f}/{p['coverage_80']*100:.0f}/{p['coverage_90']*100:.0f}"
         print(
-            f"{label:<{width}}{p['crps_skill']:>+12.4f}{p['directional_hit_rate']*100:>7.1f}"
+            f"{label:<{width}}{p['crps_skill']:>+12.4f}"
+            f"{'[%+.4f, %+.4f]' % tuple(p['crps_skill_interval']):>20}"
+            f"{'%d/%d' % (p['symbols_positive'], p['symbols']):>7}"
+            f"{p['directional_hit_rate']*100:>7.1f}"
             f"{cov:>16}{p['pit_calibration_error']:>9.3f}{p['pit_mean']:>10.3f}{p['trades']:>8}"
         )
     print("\nA search overfits the set it searches. Put the top row through "

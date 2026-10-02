@@ -14,6 +14,8 @@ skewed_condor  etf-2026-08-21
 skewed_condor  etf-2026-10-16
 mean_reversion 2026-08-21
 mean_reversion 2026-10-16
+mean_reversion_prevailing 2026-08-21
+mean_reversion_prevailing 2026-10-16
 "
 
 cargo build -q --release
