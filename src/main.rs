@@ -165,16 +165,14 @@ fn main() -> Result<()> {
             }
             // One timeline needs one bar grid: a 15-minute and a 30-minute bar
             // starting together do not close together, so they cannot be marked
-            // as one instant.
-            let mut bar_minutes: Vec<i64> =
-                symbols.iter().flatten().map(|s| s.bar_minutes).collect();
-            bar_minutes.sort();
-            bar_minutes.dedup();
-            if bar_minutes.len() > 1 {
-                bail!(
-                    "these chains were captured at different bar sizes ({bar_minutes:?} minutes) \
-                     and cannot share a timeline; run them as separate datasets"
-                );
+            // as one instant. Finer chains are folded to the coarsest.
+            let bar_minutes = symbols.iter().flatten().map(|s| s.bar_minutes).max().unwrap_or(30);
+            let mut folded = Vec::new();
+            for series in symbols.iter_mut().flatten() {
+                if series.bar_minutes < bar_minutes {
+                    folded.push(format!("{} {} ({}-min)", series.symbol, series.expiry, series.bar_minutes));
+                    series.coarsen(bar_minutes);
+                }
             }
 
             // The shared account runs all symbols against one portfolio over a
@@ -187,13 +185,9 @@ fn main() -> Result<()> {
                     .map(|_| strategy_config.strategy())
                     .collect::<anyhow::Result<_>>()?;
                 let shared = engine::run_shared(&symbols, &mut strategies, &run_config)?;
-                let built =
-                    report::build_shared(&strategy_config.name, strategy_config.expiry, &shared);
-                let views = report::shared_views(
-                    &strategy_config.name,
-                    strategy_config.expiry,
-                    &shared,
-                );
+                // The earliest chain: `expiry` alone is unset when a dataset lists several.
+                let built = report::build_shared(&strategy_config.name, expiries[0], &shared);
+                let views = report::shared_views(&strategy_config.name, expiries[0], &shared);
                 (built, views, shared.equity_curve)
             } else {
                 // Single-expiry by validation: one chain per symbol.
@@ -219,7 +213,15 @@ fn main() -> Result<()> {
                     partial.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ")
                 ));
             }
-            built.bar_minutes = bar_minutes[0];
+            built.bar_minutes = bar_minutes;
+            if !folded.is_empty() {
+                built.caveats.push(format!(
+                    "{} chain(s) were folded to {bar_minutes}-minute bars to share one timeline \
+                     with coarser ones: {}.",
+                    folded.len(),
+                    folded.join(", ")
+                ));
+            }
             if !skipped.is_empty() {
                 built.caveats.push(format!(
                     "{} symbol(s) had no two-sided option bars and were not run: {}.",

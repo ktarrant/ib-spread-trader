@@ -57,7 +57,9 @@ scripts/run_frontier.sh         # rerun the frontier into out/, archive the rest
 
 `out/` holds only the **frontier** — the runs listed in `scripts/run_frontier.sh`,
 which is all the viz offers. Other runs are moved to `out_archive/`, not deleted.
-Add a row there when a new dataset lands.
+The frontier runs `datasets/all.toml` (and `etf-all.toml`): every **monthly** chain
+in one backtest. When a capture adds a month, add its expiry there; weeklies are
+not traded yet and stay out by not being listed.
 
 Every subcommand prints **JSON to stdout and nothing else** (a convention shared
 with `ib-option-calc`), so output pipes into `jq` and diffs cleanly between runs.
@@ -348,8 +350,13 @@ Captures from 2026-09 on take **15-minute option bars** and 5-minute stock bars
 do not reach the chain's last option bar, its underlying is **folded from the
 5-minute tape** (first open, extreme high/low, last close, summed volume, the last
 bar's mid). `catalog` lists each chain with its `bar_size`. A run whose chains
-differ in bar size is refused — a 15- and a 30-minute bar starting together do not
-close together.
+differ in bar size **folds the finer ones to the coarsest** (`ChainSeries::coarsen`)
+and says so in a caveat — a 15- and a 30-minute bar starting together do not close
+together, so they cannot share a timeline as they are. The 15-minute bar that
+closes on a 30-minute boundary carries the same close quote, so it is kept and
+relabelled; the rest are dropped. On the 2026-09-26 snapshot this is what lets the
+30-minute August and 15-minute October chains run as one dataset, at the cost of
+October filling 30 minutes after a decision rather than 15.
 
 - **Execution runs on every option bar**: fills, marks, P&L exits. A decision
   fills 15 minutes later instead of 30. `bars_held` counts option bars, so it
@@ -390,9 +397,11 @@ Per bar and symbol:
   structure, and `iv_vs_median`'s trailing window sees that step.
 - **Each chain gets its own forecast**: horizon capped at *that* chain's expiry,
   and a sampled spot mapped through *that* chain's forward.
-- **Every chain outside the entry blackout is ranked, and the best candidate
-  across them wins** by the ranker's own key (`ranker::choice_key`). The funnel
-  still counts at most one `chosen` per bar.
+- **Entries go to the front month**: the nearest chain outside the entry
+  blackout (`min_entry_days_before_expiry`), so a run trades August until it
+  blacks out and then October. `execution.expiry_choice = "best"` instead ranks
+  every open chain and takes the best candidate by the ranker's own key
+  (`ranker::choice_key`). The funnel counts at most one `chosen` per bar either way.
 - **A position lives in one chain.** `OpenPosition`/`ClosedTrade` carry `expiry`;
   marks, exits and closes read only that chain's bar. Read against another
   chain's bar a position looks unquoted and would be closed at intrinsic, so

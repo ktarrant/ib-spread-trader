@@ -17,7 +17,7 @@ use std::path::Path;
 
 use crate::domain::OptionRight;
 use crate::engine::{
-    ExitRules, RankedStrategy, RsiZone, RunConfig, StagedStrategy, Strategy, Timing,
+    ExitRules, ExpiryChoice, RankedStrategy, RsiZone, RunConfig, StagedStrategy, Strategy, Timing,
 };
 use crate::execution::{Costs, DeltaSelector};
 use crate::model::{
@@ -293,6 +293,10 @@ pub struct ExecutionConfig {
     /// immediately close. Set this to `min_days_before_expiry + buffer`.
     #[serde(default = "default_min_entry_days_before_expiry")]
     pub min_entry_days_before_expiry: Option<u32>,
+    /// With several expiries, which chain outside the blackout a new entry
+    /// uses: `front` (the default) or the `best` candidate across all of them.
+    #[serde(default)]
+    pub expiry_choice: ExpiryChoice,
     /// Refuse new entries within this many calendar days of an earnings
     /// Entry-timing band on RSI of the option-bar spot series. Ranked mode only
     /// — the staged path has no feature engine.
@@ -342,8 +346,8 @@ fn minute_of_day(text: &str) -> Result<u16> {
 // Default expiry rules for every strategy: close well before the option tape
 // stops so a position exits on a real quote rather than settling at intrinsic,
 // and refuse entries too close to expiry to open one that the before-expiry exit
-// would immediately close. With a single expiry this is a hard blackout; once
-// more expiries land, the honest alternative is rolling to the next month.
+// would immediately close. With a single expiry this is a hard blackout; with
+// several, new entries move to the next month (`ExpiryChoice::Front`).
 fn default_min_days_before_expiry() -> Option<u32> {
     Some(3)
 }
@@ -360,6 +364,7 @@ impl Default for ExecutionConfig {
             max_open_positions: None,
             max_positions_per_symbol: None,
             min_entry_days_before_expiry: default_min_entry_days_before_expiry(),
+            expiry_choice: ExpiryChoice::default(),
             min_entry_rsi: None,
             max_entry_rsi: None,
             entry_rsi_zone: RsiZone::default(),
@@ -1670,6 +1675,7 @@ impl StrategyConfig {
             max_open_positions: portfolio.max_open_positions,
             max_positions_per_symbol: portfolio.max_positions_per_symbol,
             min_entry_days_before_expiry: self.execution.min_entry_days_before_expiry,
+            expiry_choice: self.execution.expiry_choice,
             earnings_blackout_days: self.execution.earnings_blackout_days,
             min_entry_rsi: self.execution.min_entry_rsi,
             max_entry_rsi: self.execution.max_entry_rsi,

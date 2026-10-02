@@ -288,7 +288,10 @@ impl ChainSeries {
         } else {
             (resample(&five_minute, bar_minutes), five_minute_quality)
         };
-        let sessions = underlying.keys().map(|ts| ts.date_naive()).collect();
+        // Sessions from the widest tape: a chain's native bars can stop near its
+        // expiry, and a later chain's release must still map to its own session.
+        let sessions_tape = if five_minute.is_empty() { &underlying } else { &five_minute };
+        let sessions = sessions_tape.keys().map(|ts| ts.date_naive()).collect();
         let earnings = load_earnings(snapshot, &symbol, &sessions)?;
         let (signal_underlying, signal_quality, underlying_bar_size) = if !five_minute.is_empty() {
             (five_minute, five_minute_quality, "5min".to_string())
@@ -296,23 +299,11 @@ impl ChainSeries {
             (underlying.clone(), underlying_quality, bar_size.to_string())
         };
 
-        let mut blocks = Vec::new();
-        let mut start = 0usize;
-        while start < quotes.len() {
-            let ts = quotes[start].ts;
-            let mut end = start;
-            while end < quotes.len() && quotes[end].ts == ts {
-                end += 1;
-            }
-            blocks.push((ts, start, end));
-            start = end;
-        }
-
         Ok(Self {
             symbol,
             expiry,
+            blocks: blocks(&quotes),
             quotes,
-            blocks,
             underlying,
             signal_underlying,
             expiry_instant: pricing::expiry_instant(expiry)?,
@@ -322,6 +313,26 @@ impl ChainSeries {
             bar_minutes,
             earnings,
         })
+    }
+
+    /// Fold the option tape to `minutes`-wide bars, so a chain can share a
+    /// timeline with coarser ones. A bar's quote is its close, so the finer bar
+    /// that closes on a `minutes` boundary *is* the coarser bar's quote; it is
+    /// kept and relabelled to the coarser bar's start, and the rest are dropped.
+    /// The underlying is refolded from the finest stock tape to match.
+    pub fn coarsen(&mut self, minutes: i64) {
+        if minutes <= self.bar_minutes {
+            return;
+        }
+        let shift = chrono::Duration::minutes(minutes - self.bar_minutes);
+        let close = chrono::Duration::minutes(self.bar_minutes);
+        self.quotes.retain(|q| (q.ts + close).timestamp() % (minutes * 60) == 0);
+        for quote in &mut self.quotes {
+            quote.ts -= shift;
+        }
+        self.blocks = blocks(&self.quotes);
+        self.underlying = resample(&self.signal_underlying, minutes);
+        self.bar_minutes = minutes;
     }
 
     /// The stock bar for the `minutes`-wide window ending at `end` — what a
@@ -590,6 +601,22 @@ fn fold_bars<'a>(bars: impl IntoIterator<Item = &'a UnderlyingBar>) -> Option<Un
 
 /// Bucket a stock tape into `minutes`-wide bars keyed by their start, the way
 /// the capture keys its own.
+/// Offsets into `quotes` (sorted by `ts`) delimiting each timestamp's block.
+fn blocks(quotes: &[RawQuote]) -> Vec<(DateTime<Utc>, usize, usize)> {
+    let mut blocks = Vec::new();
+    let mut start = 0usize;
+    while start < quotes.len() {
+        let ts = quotes[start].ts;
+        let mut end = start;
+        while end < quotes.len() && quotes[end].ts == ts {
+            end += 1;
+        }
+        blocks.push((ts, start, end));
+        start = end;
+    }
+    blocks
+}
+
 fn resample(
     tape: &BTreeMap<DateTime<Utc>, UnderlyingBar>,
     minutes: i64,

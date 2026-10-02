@@ -74,6 +74,8 @@ pub struct RunConfig {
     /// expiry. Prevents opening positions the before-expiry exit would
     /// immediately close.
     pub min_entry_days_before_expiry: Option<u32>,
+    /// Which open chain a new entry may use when a symbol has several.
+    pub expiry_choice: ExpiryChoice,
     /// Refuse new entries within this many calendar days of an earnings
     /// announcement. Prevents the same open-close churn as the expiry gate.
     pub earnings_blackout_days: Option<u32>,
@@ -113,6 +115,7 @@ impl Default for RunConfig {
             max_open_positions: 1,
             max_positions_per_symbol: None,
             min_entry_days_before_expiry: None,
+            expiry_choice: ExpiryChoice::default(),
             earnings_blackout_days: None,
             min_entry_rsi: None,
             max_entry_rsi: None,
@@ -286,6 +289,18 @@ struct EntryTiming {
 /// `Inside` trades the middle and refuses the extremes; `Outside` is its mirror,
 /// refusing the middle so entries wait for a stretched tape in either direction.
 /// The same two bounds describe both — only the sense of the comparison differs.
+/// Which chains a new entry may open in, among those outside the entry
+/// blackout. `Front` ranks only the nearest, so a run trades the front month
+/// and moves to the next one once the front enters its blackout; `Best` ranks
+/// every open chain and takes the best candidate whatever its expiry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpiryChoice {
+    #[default]
+    Front,
+    Best,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RsiZone {
@@ -853,9 +868,10 @@ fn open_score(intent: &Intent) -> f64 {
 /// cap keeps it from piling into one name. Next-bar timing throughout.
 ///
 /// `symbols[i]` is every chain of one symbol, ascending by expiry. The symbol's
-/// features are read once per bar, each chain is ranked against the forecast
-/// capped at its own expiry, and the best candidate across them opens — so
-/// different positions sit in different expiries. A position is never rolled:
+/// features are read once per bar and each chain gets a forecast capped at its
+/// own expiry. Entries go to the front chain outside the entry blackout — or,
+/// with `ExpiryChoice::Best`, to the best candidate across every open chain —
+/// so different positions sit in different expiries. A position is never rolled:
 /// it is marked, exited and closed only in its own chain, and settles at its
 /// own expiry while the run carries on.
 pub fn run_shared(
@@ -1132,13 +1148,17 @@ pub fn run_shared(
                             census[si].entry_spacing += 1
                         }
                         EntryGate::Open => {
-                            let open: Vec<(&ChainSeries, &ChainSnapshot)> = chains
+                            let mut open: Vec<(&ChainSeries, &ChainSnapshot)> = chains
                                 .iter()
                                 .filter(|(series, _)| {
                                     !too_close_to_expiry(config, series.expiry_instant(), ts)
                                 })
                                 .copied()
                                 .collect();
+                            // Ascending by expiry, so the first is the front month.
+                            if config.expiry_choice == ExpiryChoice::Front {
+                                open.truncate(1);
+                            }
                             if let Some((choice, bounds, expiry)) = ranked_choose(
                                 ranked,
                                 ctx,
@@ -2303,6 +2323,32 @@ mod tests {
         assert!(!held_across(d(30), d(31), &events), "opened after it");
     }
 
+    /// Folding a 15-minute chain to 30 keeps the bar that closes on each
+    /// 30-minute boundary, relabelled to the 30-minute bar's start: the same
+    /// close quote, so the same instant a native 30-minute bar would mark.
+    #[test]
+    fn a_coarsened_chain_quotes_the_fine_bar_that_closes_with_it() {
+        let file = snapshot_with_chains("coarsen", &v_shaped_path(), 100.0, &[expiry()], 15);
+        let snapshot = crate::data::Snapshot::open(&file).unwrap();
+        let fine = ChainSeries::load(&snapshot, "TEST", expiry()).unwrap();
+        let mut coarse = ChainSeries::load(&snapshot, "TEST", expiry()).unwrap();
+        coarse.coarsen(30);
+
+        assert_eq!(coarse.bar_minutes, 30);
+        assert_eq!(coarse.len(), fine.len() / 2);
+        for index in 0..coarse.len() {
+            let bar = coarse.snapshot(index).unwrap();
+            assert_eq!(bar.ts.timestamp() % 1800, 0, "{}", bar.ts);
+            let closing = fine.snapshot_at(bar.ts + Duration::minutes(15)).unwrap();
+            assert_eq!(bar.quotes.len(), closing.quotes.len());
+            for quote in &bar.quotes {
+                let same = closing.quote(quote.contract_id).unwrap();
+                assert_eq!((quote.bid, quote.ask), (same.bid, same.ask));
+            }
+            assert_eq!(bar.underlying.close, closing.underlying.close);
+        }
+    }
+
     /// On a 15-minute tape a 30-minute model advances once per window, at the
     /// close of the window's second bar, and decides only there — so every
     /// entry fills on the bar after, which starts on a 30-minute boundary.
@@ -2462,6 +2508,56 @@ min_entry_days_before_expiry = 55
         assert_eq!(census.synthetic_exits, 0, "never read against the wrong chain");
         // At most one pick per bar, however many chains offered one.
         assert!(census.ranking.chosen <= v_shaped_path().len(), "{}", census.ranking.chosen);
+    }
+
+    /// Both chains open the whole run (the default 8-day blackout never bites
+    /// before the near expiry): the front month takes every entry, and only
+    /// its ladder is ranked — `best` ranks both.
+    #[test]
+    fn with_both_chains_open_the_front_month_takes_the_entry() {
+        let near = expiry();
+        let far = NaiveDate::from_ymd_opt(2026, 9, 18).unwrap();
+        let file = snapshot_with_chains("two-chains-open", &v_shaped_path(), 100.0, &[near, far], 30);
+        let snapshot = crate::data::Snapshot::open(&file).unwrap();
+        let run = |choice: &str| {
+            let chains: Vec<ChainSeries> = [near, far]
+                .iter()
+                .map(|&e| ChainSeries::load(&snapshot, "TEST", e).unwrap())
+                .collect();
+            let strategy_config: crate::config::StrategyConfig = toml::from_str(&format!(
+                r#"
+symbols = ["TEST"]
+expiries = ["2026-08-21", "2026-09-18"]
+model = "mean-reversion"
+[candidates]
+max_loss = 5000.0
+[ranking]
+min_score = -10.0
+min_expected_pl = -1.0e9
+[execution]
+expiry_choice = "{choice}"
+"#
+            ))
+            .unwrap();
+            strategy_config.validate().unwrap();
+            let run_config = strategy_config.run_config().unwrap();
+            let mut strategies = vec![strategy_config.strategy().unwrap()];
+            run_shared(&[chains], &mut strategies, &run_config).unwrap()
+        };
+        let front = run("front");
+        let best = run("best");
+
+        let opened: Vec<NaiveDate> = front
+            .portfolio
+            .closed
+            .iter()
+            .map(|t| t.expiry)
+            .chain(front.portfolio.open.iter().map(|p| p.expiry))
+            .collect();
+        assert!(!opened.is_empty(), "the near chain offered a trade");
+        assert!(opened.iter().all(|&e| e == near), "{opened:?}");
+        let enumerated = |r: &SharedRun| r.per_symbol[0].census.ranking.enumerated;
+        assert!(enumerated(&front) < enumerated(&best), "{} vs {}", enumerated(&front), enumerated(&best));
     }
 
     fn config() -> RunConfig {

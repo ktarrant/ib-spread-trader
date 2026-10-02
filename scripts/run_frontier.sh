@@ -6,16 +6,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# strategy  dataset — add a row per new dataset as captures land.
+# strategy  dataset — `all` / `etf-all` span every monthly chain, so a new
+# capture lands by adding its expiry to those datasets, not a row here.
 FRONTIER="
-vol_timing     2026-08-21
-vol_timing     2026-10-16
-skewed_condor  etf-2026-08-21
-skewed_condor  etf-2026-10-16
-mean_reversion 2026-08-21
-mean_reversion 2026-10-16
-mean_reversion_prevailing 2026-08-21
-mean_reversion_prevailing 2026-10-16
+vol_timing     all
+skewed_condor  etf-all
+mean_reversion all
+mean_reversion_prevailing all
 "
 
 cargo build -q --release

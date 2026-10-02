@@ -399,7 +399,7 @@ fn caveats(
     scorer_eval: Option<&ScorerEval>,
 ) -> Vec<String> {
     let mut out = vec![
-        "No Sharpe or annualised return is reported: one expiry and ~44 sessions \
+        "No Sharpe or annualised return is reported: a few months of monthly chains \
          cannot support one, and quoting it would make the result look more settled \
          than it is."
             .to_string(),
