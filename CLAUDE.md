@@ -52,7 +52,12 @@ cargo build
 cargo test
 cargo run -- catalog            # what is backtestable
 cargo run -- catalog --all      # including chains too thin to trade
+scripts/run_frontier.sh         # rerun the frontier into out/, archive the rest
 ```
+
+`out/` holds only the **frontier** — the runs listed in `scripts/run_frontier.sh`,
+which is all the viz offers. Other runs are moved to `out_archive/`, not deleted.
+Add a row there when a new dataset lands.
 
 Every subcommand prints **JSON to stdout and nothing else** (a convention shared
 with `ib-option-calc`), so output pipes into `jq` and diffs cleanly between runs.

@@ -102,8 +102,6 @@ show up the moment there are two:
   that do not overlap in time — weekly chains overlap heavily, so a second
   expiry over the same weeks is not independent evidence. (Aug-21 and Oct-16
   overlap 2026-07-20 → 08-20.)
-- Orphaned outputs: `out/mean_reversion_calibrated` has no strategy; four
-  strategies have no `out/` run.
 
 ## Multi-expiry follow-ups
 
