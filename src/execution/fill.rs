@@ -79,10 +79,24 @@ pub fn cash_flow(
 ) -> Result<f64, FillError> {
     let mut total = 0.0;
     for leg in &spread.legs {
-        let quote = bar.quote(leg.contract_id).ok_or(FillError::LegNotQuoted {
+        let not_quoted = FillError::LegNotQuoted {
             contract_id: leg.contract_id,
             strike: leg.strike,
-        })?;
+        };
+        // A strike the bar did not print but its smile spans is interpolated, and
+        // either side may trade it. Past the quoted wings only a close may price
+        // off the smile — the capture's strike set moves week to week.
+        let estimated;
+        let quote = match bar.quote_or_interpolated(leg.contract_id) {
+            Some(quote) => quote,
+            None if direction == Direction::Close => {
+                estimated = bar
+                    .estimate_quote(leg.contract_id, leg.strike, leg.right)
+                    .ok_or(not_quoted)?;
+                &estimated
+            }
+            None => return Err(not_quoted),
+        };
 
         // Acquiring a contract crosses to the ask; disposing of one crosses to
         // the bid. Opening a long and closing a short both acquire.
@@ -102,7 +116,14 @@ pub fn entry_debit(spread: &Spread, bar: &ChainSnapshot) -> Result<f64, FillErro
     cash_flow(spread, bar, Direction::Open).map(|flow| -flow)
 }
 
-/// What closing it right now would return, as a positive credit.
+/// Whether the bar quotes every leg, so a fill against it is a market price
+/// rather than partly an estimate.
+pub fn fully_quoted(spread: &Spread, bar: &ChainSnapshot) -> bool {
+    spread.legs.iter().all(|leg| bar.quote(leg.contract_id).is_some())
+}
+
+/// What closing it right now would return, as a positive credit. A leg the bar
+/// does not quote is estimated from its smile (see `fully_quoted`).
 pub fn exit_credit(spread: &Spread, bar: &ChainSnapshot) -> Result<f64, FillError> {
     cash_flow(spread, bar, Direction::Close)
 }
@@ -144,6 +165,7 @@ mod tests {
             residual_mad: 0.02,
             paired_strikes: 30,
             year_fraction: 0.006,
+            interpolated: Vec::new(),
             quotes: vec![
                 quote(1, 750.0, OptionRight::Call, 2.90, 3.10),
                 quote(2, 755.0, OptionRight::Call, 1.40, 1.60),

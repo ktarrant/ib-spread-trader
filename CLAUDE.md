@@ -52,7 +52,14 @@ cargo build
 cargo test
 cargo run -- catalog            # what is backtestable
 cargo run -- catalog --all      # including chains too thin to trade
+scripts/run_frontier.sh         # rerun the frontier into out/, archive the rest
 ```
+
+`out/` holds only the **frontier** — the runs listed in `scripts/run_frontier.sh`,
+which is all the viz offers. Other runs are moved to `out_archive/`, not deleted.
+The frontier runs `datasets/all.toml` (and `etf-all.toml`): every **monthly** chain
+in one backtest. When a capture adds a month, add its expiry there; weeklies are
+not traded yet and stay out by not being listed.
 
 Every subcommand prints **JSON to stdout and nothing else** (a convention shared
 with `ib-option-calc`), so output pipes into `jq` and diffs cleanly between runs.
@@ -176,9 +183,10 @@ Two consequences to expect rather than debug:
 - **Equity drops the instant a trade opens**, by the width of the book plus
   round-trip commission. A position entered at the ask and marked at the bid is
   genuinely worth less than it cost.
-- **A position the current bar cannot price is held at entry cost**, not marked
-  to zero. Wings stop printing; writing them off would invent a total loss the
-  market never showed.
+- **A leg the current bar does not quote is priced off that bar's smile**, not
+  marked to zero or held at cost (see *Unquoted strikes* below). Only a bar with
+  no smile at all falls back to entry cost for marks, and to intrinsic for a
+  time-forced exit.
 
 `Spread::payoff_bounds` derives max profit and max loss generically, by sampling
 the strikes and both tails, rather than special-casing verticals — so a butterfly
@@ -186,6 +194,66 @@ or condor added later gets correct bounds for free. It returns `None` for a
 structure with a runaway tail (a naked call, either side), because a profit
 target expressed as a percentage of max profit is meaningless there. Naked
 **puts** are bounded: the underlying cannot go below zero.
+
+## Unquoted strikes: interpolated to enter, estimated to close
+
+The captured strike set moves week to week — the tapered ladder in
+`ib-option-calc` takes every strike out to ±0.5σ√T, one in two to ±1σ, one in
+four to ±2σ — so a bar routinely lacks strikes a chain lists. On the 2026-10-03
+snapshot a bar quotes a median **7 of 13** registered strikes within ±0.5σ√T of
+the forward (p10: 4), and 13 of 24 within ±1σ√T. Near spot, the ladder the
+ranker chose from was about half the real one.
+
+`ChainSnapshot::estimate_quote` prices a strike off the bar's own OTM smile:
+Black-76 at the smile's IV for that log-moneyness, crossed by the nearest quoted
+same-right strike's absolute spread. `examples/estimate_profile.rs` holds real
+quotes out and measures it, in units of the real half-spread:
+
+| held out | position | median error | p90 |
+|---|---|---|---|
+| one strike | inside the smile, \|z\| 0–2 | 0.18–0.28 | 0.66–0.90 |
+| it and both neighbours | inside the smile | 0.24–0.39 | 0.92–1.75 |
+| one strike | past the quoted wings | 0.56–2.99 | 4.4–58 |
+
+The estimated spread over the real one has median 1.00. So the rule splits on
+interpolation:
+
+- **Entry**: `ChainSnapshot::interpolated` holds every registered strike the bar
+  did not print but its smile spans, and `selectable` offers them beside the real
+  quotes. Nothing past the quoted wings is ever opened — META quoting only to
+  +1 % still has no 0.30-delta call. A trade opened on one is `estimated_entry`.
+- **Close and mark**: any unquoted leg, extrapolated if need be
+  (`ponytail:` the smile is flat past the wings). Such a close is
+  `estimated_price`. Both flags are counted in the caveats.
+- **Features never see them.** Forward, ATM IV, skew and the smile itself read
+  `quotes` only; `interpolated` is a separate field so no estimate can feed the
+  surface it was drawn from.
+
+Two consequences worth knowing. Every intrinsic exit on the reference snapshot
+had been **flattering**: a TSLA call spread paid its full width a week before
+expiry, a SPY credit spread called worth $0 because its strike was off an
+odd-strike ladder (the smile prices the buy-back at ~$2.42). And "not quoted"
+used to mean "not this chain" — `update_peaks` relied on another chain's bar
+failing to price a position. An estimate does not fail, so every per-position
+loop must filter on `(symbol, expiry)` itself.
+
+On `mean_reversion` about half the entries take an interpolated leg — roughly
+the share of interpolated strikes in the ladder, so the ranker does not favour
+them. Interpolation does **not** pull the ranker toward the money: the median
+trade still has a leg ~10 % from spot. `candidates.min_leg_delta` is that lever,
+and **0.20 is the default for every ranker**: each leg's |delta| must sit in
+0.20–0.80. The floor keeps entries on the near-money ladder every weekly capture
+collects; the ceiling keeps a short leg from opening deep in the money, where
+early assignment lives. `fixed_legs` (the skewed condor) are exempt — their
+strikes are the rule. A ranker opts out with `min_leg_delta = 0.0`.
+
+It was adopted on that structural argument, not on P&L. The P&L agreed, at 0.20
+on the 2026-10-03 snapshot over every monthly chain: `mean_reversion` −$11 409 →
++$1 138 (legs >8 % out 50 → 25), `mean_reversion_prevailing` +$5 313 → +$7 237,
+`vol_timing` −$1 226 → +$3 620 — three of three, on 16–94 trades. The ranker
+records still pass with the band on; `credit_pop`'s Spearman falls most (0.45 →
+0.38 August, 0.56 → 0.44 October), since its far-OTM shorts were the easiest
+candidates to order and the band removes them.
 
 ## Expiry settlement is reported apart from traded P&L
 
@@ -343,8 +411,25 @@ Captures from 2026-09 on take **15-minute option bars** and 5-minute stock bars
 do not reach the chain's last option bar, its underlying is **folded from the
 5-minute tape** (first open, extreme high/low, last close, summed volume, the last
 bar's mid). `catalog` lists each chain with its `bar_size`. A run whose chains
-differ in bar size is refused — a 15- and a 30-minute bar starting together do not
-close together.
+differ in bar size **folds the finer ones to the coarsest** (`ChainSeries::coarsen`)
+and says so in a caveat — a 15- and a 30-minute bar starting together do not close
+together, so they cannot share a timeline as they are. The 15-minute bar that
+closes on a 30-minute boundary carries the same close quote, so it is kept and
+relabelled; the rest are dropped. On the 2026-09-26 snapshot this is what lets the
+30-minute August and 15-minute October chains run as one dataset, at the cost of
+October filling 30 minutes after a decision rather than 15.
+
+**15 minutes is the operating cadence; 30-minute option captures are legacy.**
+The 2026-10-03 capture was taken at 30 minutes by mistake, so the October chain
+holds 15-minute bars to 09-25 and 30-minute bars to 10-01. A chain with both
+keeps its finest tape when that tape spans the coarser one; otherwise the finer
+tape is folded onto the coarser grid at load and the coarser fills its gaps, so
+no captured week is dropped. The 30-minute pass also took a *different* strike
+set (IWM 250–310 against 265–305), so legs opened on the 15-minute ladder can go
+unquoted across the seam and exit at intrinsic. The report counts those as
+synthetic exits. A variable-cadence timeline (15 where captured, 30 elsewhere)
+was judged not worth its cost while every dataset still includes a 30-minute
+chain.
 
 - **Execution runs on every option bar**: fills, marks, P&L exits. A decision
   fills 15 minutes later instead of 30. `bars_held` counts option bars, so it
@@ -385,9 +470,11 @@ Per bar and symbol:
   structure, and `iv_vs_median`'s trailing window sees that step.
 - **Each chain gets its own forecast**: horizon capped at *that* chain's expiry,
   and a sampled spot mapped through *that* chain's forward.
-- **Every chain outside the entry blackout is ranked, and the best candidate
-  across them wins** by the ranker's own key (`ranker::choice_key`). The funnel
-  still counts at most one `chosen` per bar.
+- **Entries go to the front month**: the nearest chain outside the entry
+  blackout (`min_entry_days_before_expiry`), so a run trades August until it
+  blacks out and then October. `execution.expiry_choice = "best"` instead ranks
+  every open chain and takes the best candidate by the ranker's own key
+  (`ranker::choice_key`). The funnel counts at most one `chosen` per bar either way.
 - **A position lives in one chain.** `OpenPosition`/`ClosedTrade` carry `expiry`;
   marks, exits and closes read only that chain's bar. Read against another
   chain's bar a position looks unquoted and would be closed at intrinsic, so
@@ -1492,7 +1579,8 @@ interim worst case.
 enumerated -> priceable -> liquid -> within-loss -> positive-EV -> above-min-score
 -> above-min-pop -> chosen — and the report surfaces it beside the trade log, the way
 `signal_diagnostics` surfaces the staged gates. On the reference snapshot,
-`mean_reversion.toml` prices 8 732 187 candidate verticals down to 51 taken. The
+`mean_reversion.toml` prices 18 501 657 candidate verticals (8 732 187 before
+interpolated strikes and the 0.20 leg-delta band) down to 49 taken. The
 model decides how many bars hold a position and so are *not* enumerating, which
 is why a more-selective model can enumerate more, not less. A ranked run whose
 `chosen` is a rounding error against `enumerated` has been floored, not
@@ -1540,6 +1628,45 @@ October): ordering candidates within a bar works even where direction does not.
 BACKLOG.md records the resulting reframe — forecast move *size* against the
 option market's price for it, not direction. Every directional finding in this
 file predates the interval; re-check it against the gate before relying on it.
+
+### The trend measure was never the lever; fading only against the prevailing trend is
+
+`[features] trend_average` (`sma`, `ema`, `wma`, `vwma`) and a sweep of
+fast 5/10/20 × slow 30/50/80 × weight −0.25/−0.5/−1.0 at 7 days (108 cells per
+dataset, `scripts/sweep_model.py --jobs`): 84 cells beat the null on the
+Aug-expiry chain, **0 of 108** on the Oct-expiry chain, and the Oct-expiry
+"best" cells are just the smallest drift. The kind of average moves skill by
+~0.005 against intervals ~0.04 wide. Session VWAP (`vwap_reversion`, −1 to +2)
+adds nothing alone or on top of the trend, on either chain.
+
+What the 10/30 gap cannot see is *which way the move runs against*. A spike up
+in a rising market (AAPL drifting up through September) and a spike up in a
+falling one (AMZN in a downtrend) read the same, and both get faded.
+`prevailing_trend` is the slope of a 65-bar (5-session) SMA over 13 bars —
+algebraically, the last session's average price against the one five sessions
+earlier, divided by 5 — and `model.trend_with_prevailing_only` keeps the fade
+only when it points the way the prevailing trend does. A spike with the trend,
+or a warming prevailing trend (78 bars), gets no view. 65/13 was chosen before
+any result and never tuned.
+
+| | skill [interval] | dir % | sym+ | trades | return | max DD |
+|---|---|---|---|---|---|---|
+| Oct-expiry, `mean_reversion` | −0.0095 [−0.026, +0.006] | 52.2 | 5/15 | 52 | −28.8 % | |
+| Oct-expiry, `mean_reversion_prevailing` | +0.0011 [−0.004, +0.008] | 59.0 | 10/15 | 18 | **+70.7 %** | 12.4 % |
+| Aug-expiry, `mean_reversion` | +0.0133 [−0.009, +0.031] | 56.8 | 7/12 | 51 | −27.6 % | 54.8 % |
+| Aug-expiry, `mean_reversion_prevailing` | +0.0007 [−0.008, +0.010] | 52.4 | 5/12 | 22 | −17.7 % | 51.4 % |
+
+The Oct-expiry run is not one trade: 14 of 18 win, and it is +$7 499 without
+its best three. But the rule was read off Oct-expiry charts, so that chain is
+in-sample by construction; Aug-expiry is the test, and there P&L improves while
+forecast skill goes to zero — the with-trend fades are where Aug-expiry's skill
+lived (split across five prevailing definitions, Aug-expiry favours fading
+*with* the trend every time and Oct-expiry *against* it every time). Neither
+record passes the gate. A no-view bar is a driftless bar, so the ranker can
+still open a credit spread there (3 on Aug-expiry, +$814; none on Oct-expiry).
+The model reads only the sign of `prevailing_trend`; a dead zone around zero is
+the obvious next thing to test, and each weekly capture adds a period to check
+it on.
 
 ### The first vol-timing model: positive on both months, not yet significant
 
@@ -1724,6 +1851,7 @@ isolates that axis:
 | `prob_profit.toml` | scorer | `metric = "prob_profit"` — rewards hit-rate over magnitude. |
 | `exit_pop_trailing.toml` / `exit_momentum.toml` | exit | Structure-scoped give-ups: live-POP on debits, trailing vs momentum on nakeds. |
 | `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
+| `mean_reversion_prevailing.toml` | model | Fade a spike only against the 5-session prevailing trend. Oct-expiry +70.7 %, Aug-expiry −17.7 %; in the frontier. |
 | `mean_reversion_no_horizon.toml` | exit | The base without the forecast-horizon cap. Halves the loss; nakeds gain, debit spreads lose. |
 | `naked_rsi_trailing.toml` | model+ranker+exit | Nakeds at RSI extremes on a trailing stop. Loses 53.9 %; the overbought half is 9/10 of it. |
 | `naked_rsi_recovery.toml` / `_tight.toml` | execution | Enter after RSI turns up through 30, within N bars. First positive arms — and one trade is ~all of it. |

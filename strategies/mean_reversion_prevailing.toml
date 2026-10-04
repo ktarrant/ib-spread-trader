@@ -1,0 +1,15 @@
+# mean_reversion with the fade restricted to spikes against the prevailing trend.
+name      = "mean-reversion-prevailing"
+mode      = "ranked"
+model     = "mean-reversion-prevailing"
+ranker    = "ev"
+portfolio = "shared_20k"
+exit      = "base"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+
+[costs]
+commission_per_contract = 0.65

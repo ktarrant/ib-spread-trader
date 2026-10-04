@@ -5,3 +5,4 @@
 *.sqlite3-shm
 /out
 .DS_Store
+/out_archive

@@ -127,6 +127,13 @@ pub struct ChainSnapshot {
     /// Calendar year fraction to the 16:00 ET expiry.
     pub year_fraction: f64,
     pub quotes: Vec<OptionQuote>,
+    /// Registered strikes this bar did not print but its quoted smile spans,
+    /// priced off it (`estimate_quote`). Interpolated only, never past the quoted
+    /// wings: held out on real bars, an interpolated mid lands a median 0.2
+    /// half-spreads from the real one, an extrapolated one 0.6–3. Kept apart from
+    /// `quotes` so the forward, ATM IV and skew stay real-only.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interpolated: Vec<OptionQuote>,
 }
 
 impl ChainSnapshot {
@@ -144,12 +151,19 @@ impl ChainSnapshot {
         self.quotes.iter().find(|q| q.contract_id == contract_id)
     }
 
-    /// Quotes of one right, ascending by strike, restricted to those a delta
+    /// A real quote, else an interpolated one — what a position can be opened at.
+    pub fn quote_or_interpolated(&self, contract_id: i64) -> Option<&OptionQuote> {
+        self.quote(contract_id)
+            .or_else(|| self.interpolated.iter().find(|q| q.contract_id == contract_id))
+    }
+
+    /// Quotes of one right — real and interpolated — restricted to those a delta
     /// actually solved for. Deep-ITM strikes quoting at or below intrinsic are
     /// excluded here rather than defaulted downstream.
     pub fn selectable(&self, right: OptionRight) -> impl Iterator<Item = &OptionQuote> {
         self.quotes
             .iter()
+            .chain(&self.interpolated)
             .filter(move |q| q.right == right && q.delta.is_some())
     }
 
@@ -180,6 +194,50 @@ impl ChainSnapshot {
     /// at zero log-moneyness.
     pub fn atm_implied_vol(&self) -> Option<f64> {
         interp_smile_iv(&self.otm_smile(), 0.0)
+    }
+
+    /// A quote for a strike this bar did not print, estimated from the ones it
+    /// did: Black-76 at the OTM smile's vol for that strike, crossed by the
+    /// absolute bid/ask spread of the nearest quoted strike of the same right.
+    /// `None` when the bar has no smile. Only ever used to mark or close — a
+    /// position cannot be opened against a price nobody quoted.
+    // ponytail: the smile is held flat past the quoted wings, which underprices a
+    // far-OTM put on a steep skew; extrapolate the wing slope if that shows up.
+    pub fn estimate_quote(
+        &self,
+        contract_id: i64,
+        strike: f64,
+        right: OptionRight,
+    ) -> Option<OptionQuote> {
+        self.estimate_on(&self.otm_smile(), contract_id, strike, right)
+    }
+
+    fn estimate_on(
+        &self,
+        smile: &[(f64, f64)],
+        contract_id: i64,
+        strike: f64,
+        right: OptionRight,
+    ) -> Option<OptionQuote> {
+        let vol = interp_smile_iv(smile, (strike / self.forward).ln())?;
+        let nearest = self
+            .quotes
+            .iter()
+            .filter(|q| q.right == right)
+            .min_by(|a, b| (a.strike - strike).abs().total_cmp(&(b.strike - strike).abs()))?;
+        let half = 0.5 * (nearest.ask - nearest.bid);
+        let (t, is_call) = (self.year_fraction, right.is_call());
+        let mid = pricing::black76(self.forward, strike, t, vol, is_call);
+        Some(OptionQuote {
+            contract_id,
+            strike,
+            right,
+            bid: (mid - half).max(0.0),
+            ask: mid + half,
+            mid,
+            implied_vol: Some(vol),
+            delta: pricing::delta(self.forward, strike, t, vol, is_call),
+        })
     }
 
     /// Put/call skew: OTM put IV minus OTM call IV at a symmetric distance from
@@ -258,11 +316,16 @@ pub struct ChainSeries {
     pub underlying_quality: Quality,
     /// "5min" or "30min" — resolution of `signal_underlying`.
     pub underlying_bar_size: String,
-    /// Minutes per option bar: 15 or 30, whichever the capture took. The finest
-    /// wins when a chain has both. Execution runs at this resolution.
+    /// Minutes per option bar: 15 or 30, whichever the capture took. When a chain
+    /// has both, the finest wins if it spans the coarser tape; otherwise it is
+    /// folded to the coarser one, which fills its gaps. Execution runs at this
+    /// resolution.
     pub bar_minutes: i64,
     /// Earnings dates within the backtest window, sorted ascending.
     pub earnings: Vec<EarningsEvent>,
+    /// Every option contract registered for this chain — the strikes a bar
+    /// that did not print them can still interpolate.
+    registered: Vec<(i64, f64, OptionRight)>,
 }
 
 impl ChainSeries {
@@ -270,10 +333,36 @@ impl ChainSeries {
         let symbol = normalize_symbol(symbol);
         let expiry_text = expiry.format("%Y-%m-%d").to_string();
 
-        let bar_size = option_bar_size(snapshot, &symbol, &expiry_text)?;
-        let bar_minutes: i64 = bar_size.trim_end_matches("min").parse()?;
-        let (quotes, option_quality) =
-            load_option_quotes(snapshot, &symbol, &expiry_text, bar_size)?;
+        let mut sizes = option_bar_sizes(snapshot, &symbol, &expiry_text)?.into_iter();
+        let finest = sizes.next().unwrap_or(OPTION_BAR_SIZES[OPTION_BAR_SIZES.len() - 1]);
+        let mut bar_minutes = bar_minutes_of(finest)?;
+        let (mut quotes, mut option_quality) =
+            load_option_quotes(snapshot, &symbol, &expiry_text, finest)?;
+        // A coarser tape reaching bars the finer one does not (a capture taken at
+        // the wrong size) is not discarded: the finer tape folds onto its grid and
+        // it fills the gaps. One spanning the finer tape adds nothing and is skipped.
+        for size in sizes {
+            let (coarse, quality) = load_option_quotes(snapshot, &symbol, &expiry_text, size)?;
+            let span = |q: &[RawQuote]| q.first().zip(q.last()).map(|(a, b)| (a.ts, b.ts));
+            let covered = match (span(&quotes), span(&coarse)) {
+                (_, None) => true,
+                (Some((a, b)), Some((c, d))) => a <= c && b >= d,
+                (None, Some(_)) => false,
+            };
+            if covered {
+                continue;
+            }
+            let minutes = bar_minutes_of(size)?;
+            fold_quotes(&mut quotes, bar_minutes, minutes);
+            let have: BTreeSet<DateTime<Utc>> = quotes.iter().map(|q| q.ts).collect();
+            quotes.extend(coarse.into_iter().filter(|q| !have.contains(&q.ts)));
+            // Stable: each source is already ordered by strike within a timestamp.
+            quotes.sort_by_key(|q| q.ts);
+            option_quality.add(&quality);
+            bar_minutes = minutes;
+        }
+        let bar_size = format!("{bar_minutes}min");
+        let bar_size = bar_size.as_str();
         let (native, native_quality) = load_underlying(snapshot, &symbol, bar_size)?;
         let (five_minute, five_minute_quality) = load_underlying(snapshot, &symbol, "5min")?;
         // Native stock bars when they reach the chain's last option bar; else the
@@ -288,31 +377,23 @@ impl ChainSeries {
         } else {
             (resample(&five_minute, bar_minutes), five_minute_quality)
         };
-        let sessions = underlying.keys().map(|ts| ts.date_naive()).collect();
+        // Sessions from the widest tape: a chain's native bars can stop near its
+        // expiry, and a later chain's release must still map to its own session.
+        let sessions_tape = if five_minute.is_empty() { &underlying } else { &five_minute };
+        let sessions = sessions_tape.keys().map(|ts| ts.date_naive()).collect();
         let earnings = load_earnings(snapshot, &symbol, &sessions)?;
+        let registered = load_registered(snapshot, &symbol, &expiry_text)?;
         let (signal_underlying, signal_quality, underlying_bar_size) = if !five_minute.is_empty() {
             (five_minute, five_minute_quality, "5min".to_string())
         } else {
             (underlying.clone(), underlying_quality, bar_size.to_string())
         };
 
-        let mut blocks = Vec::new();
-        let mut start = 0usize;
-        while start < quotes.len() {
-            let ts = quotes[start].ts;
-            let mut end = start;
-            while end < quotes.len() && quotes[end].ts == ts {
-                end += 1;
-            }
-            blocks.push((ts, start, end));
-            start = end;
-        }
-
         Ok(Self {
             symbol,
             expiry,
+            blocks: blocks(&quotes),
             quotes,
-            blocks,
             underlying,
             signal_underlying,
             expiry_instant: pricing::expiry_instant(expiry)?,
@@ -321,7 +402,21 @@ impl ChainSeries {
             underlying_bar_size,
             bar_minutes,
             earnings,
+            registered,
         })
+    }
+
+    /// Fold the option tape to `minutes`-wide bars, so a chain can share a
+    /// timeline with coarser ones (see `fold_quotes`). The underlying is refolded
+    /// from the finest stock tape to match.
+    pub fn coarsen(&mut self, minutes: i64) {
+        if minutes <= self.bar_minutes {
+            return;
+        }
+        fold_quotes(&mut self.quotes, self.bar_minutes, minutes);
+        self.blocks = blocks(&self.quotes);
+        self.underlying = resample(&self.signal_underlying, minutes);
+        self.bar_minutes = minutes;
     }
 
     /// The stock bar for the `minutes`-wide window ending at `end` — what a
@@ -439,6 +534,7 @@ impl ChainSeries {
             paired_strikes: 0,
             year_fraction: pricing::year_fraction(ts, self.expiry_instant),
             quotes: Vec::new(),
+            interpolated: Vec::new(),
         })
     }
 
@@ -496,7 +592,7 @@ impl ChainSeries {
             })
             .collect();
 
-        Some(ChainSnapshot {
+        let mut bar = ChainSnapshot {
             symbol: self.symbol.clone(),
             expiry: self.expiry,
             ts,
@@ -506,7 +602,22 @@ impl ChainSeries {
             paired_strikes: ladder.len(),
             year_fraction,
             quotes,
-        })
+            interpolated: Vec::new(),
+        };
+        let smile = bar.otm_smile();
+        if let (Some(&(lo, _)), Some(&(hi, _))) = (smile.first(), smile.last()) {
+            let quoted: BTreeSet<i64> = bar.quotes.iter().map(|q| q.contract_id).collect();
+            bar.interpolated = self
+                .registered
+                .iter()
+                .filter(|(id, strike, _)| {
+                    let x = (strike / bar.forward).ln();
+                    !quoted.contains(id) && lo < x && x < hi
+                })
+                .filter_map(|&(id, strike, right)| bar.estimate_on(&smile, id, strike, right))
+                .collect();
+        }
+        Some(bar)
     }
 
     /// Resolve the ladder at a specific timestamp.
@@ -551,21 +662,58 @@ GROUP BY b.ts
 ORDER BY b.ts
 "#;
 
-/// The finest option bar size the capture took for this chain, or the coarsest
+fn load_registered(
+    snapshot: &Snapshot,
+    symbol: &str,
+    expiry: &str,
+) -> Result<Vec<(i64, f64, OptionRight)>> {
+    let mut stmt = snapshot.conn().prepare(
+        "SELECT id, strike, right FROM contracts
+         WHERE kind = 'option' AND symbol = ?1 AND expiry = ?2",
+    )?;
+    let rows = stmt.query_map((symbol, expiry), |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, String>(2)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, strike, right) = row?;
+        out.push((id, strike, right.parse()?));
+    }
+    Ok(out)
+}
+
+/// The option bar sizes the capture took for this chain, finest first. Empty
 /// when it took none (an empty chain loads empty either way).
-fn option_bar_size(snapshot: &Snapshot, symbol: &str, expiry: &str) -> Result<&'static str> {
+fn option_bar_sizes(snapshot: &Snapshot, symbol: &str, expiry: &str) -> Result<Vec<&'static str>> {
     let mut stmt = snapshot.conn().prepare(
         "SELECT 1 FROM bars b JOIN contracts c ON c.id = b.contract_id
          WHERE c.kind = 'option' AND c.symbol = ?1 AND c.expiry = ?2
            AND b.bar_size = ?3 AND b.data_type = 'bid'
          LIMIT 1",
     )?;
+    let mut sizes = Vec::new();
     for size in OPTION_BAR_SIZES {
         if stmt.exists((symbol, expiry, size))? {
-            return Ok(size);
+            sizes.push(size);
         }
     }
-    Ok(OPTION_BAR_SIZES[OPTION_BAR_SIZES.len() - 1])
+    Ok(sizes)
+}
+
+fn bar_minutes_of(size: &str) -> Result<i64> {
+    Ok(size.trim_end_matches("min").parse()?)
+}
+
+/// Fold an option tape from `from`- to `to`-minute bars. A bar's quote is its
+/// close, so the finer bar that closes on a `to` boundary *is* the coarser bar's
+/// quote: it is kept and relabelled to the coarser bar's start, the rest dropped.
+fn fold_quotes(quotes: &mut Vec<RawQuote>, from: i64, to: i64) {
+    let shift = chrono::Duration::minutes(to - from);
+    let close = chrono::Duration::minutes(from);
+    quotes.retain(|q| (q.ts + close).timestamp() % (to * 60) == 0);
+    for quote in quotes.iter_mut() {
+        quote.ts -= shift;
+    }
 }
 
 /// Fold consecutive stock bars into one: first open, extreme high and low, last
@@ -590,6 +738,22 @@ fn fold_bars<'a>(bars: impl IntoIterator<Item = &'a UnderlyingBar>) -> Option<Un
 
 /// Bucket a stock tape into `minutes`-wide bars keyed by their start, the way
 /// the capture keys its own.
+/// Offsets into `quotes` (sorted by `ts`) delimiting each timestamp's block.
+fn blocks(quotes: &[RawQuote]) -> Vec<(DateTime<Utc>, usize, usize)> {
+    let mut blocks = Vec::new();
+    let mut start = 0usize;
+    while start < quotes.len() {
+        let ts = quotes[start].ts;
+        let mut end = start;
+        while end < quotes.len() && quotes[end].ts == ts {
+            end += 1;
+        }
+        blocks.push((ts, start, end));
+        start = end;
+    }
+    blocks
+}
+
 fn resample(
     tape: &BTreeMap<DateTime<Utc>, UnderlyingBar>,
     minutes: i64,
@@ -913,6 +1077,66 @@ mod tests {
         NaiveDate::from_ymd_opt(2026, 8, 21).unwrap()
     }
 
+    /// Add 15-minute quotes for the strike-100 pair at the given bar starts.
+    fn add_fifteen(path: &std::path::Path, starts: &[&str]) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        for ts in starts {
+            for id in [2, 3] {
+                for (kind, close) in [("bid", 4.9), ("ask", 5.1)] {
+                    conn.execute(
+                        "INSERT INTO bars (contract_id, ts, bar_size, data_type, open, high, low, close, volume)
+                         VALUES (?1, ?2, '15min', ?3, ?4, ?4, ?4, ?4, 0)",
+                        rusqlite::params![id, ts, kind, close],
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn registered_strikes_inside_the_smile_are_interpolated_and_none_past_it() {
+        let path = fixture("interpolated");
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO contracts (id, symbol, kind, exchange, currency, expiry, strike, right)
+                 VALUES (6, 'TEST', 'option', 'SMART', 'USD', '2026-08-21', 102.5, 'C'),
+                        (7, 'TEST', 'option', 'SMART', 'USD', '2026-08-21', 102.5, 'P'),
+                        (8, 'TEST', 'option', 'SMART', 'USD', '2026-08-21', 120.0, 'C');",
+            )
+            .unwrap();
+        let series = ChainSeries::load(&Snapshot::open(&path).unwrap(), "test", expiry()).unwrap();
+        let bar = series.snapshot(0).unwrap();
+        let ids: Vec<i64> = bar.interpolated.iter().map(|q| q.contract_id).collect();
+        assert_eq!(ids, [6, 7], "102.5 sits inside the quoted 100-105 smile; 120 does not");
+        assert!(bar.quote(6).is_none() && bar.quote_or_interpolated(6).is_some());
+        // The smile is built from real quotes only, so registering strikes moves nothing.
+        let plain = fixture("not-interpolated");
+        let plain = ChainSeries::load(&Snapshot::open(&plain).unwrap(), "test", expiry()).unwrap();
+        assert_eq!(bar.atm_implied_vol(), plain.snapshot(0).unwrap().atm_implied_vol());
+        assert_eq!(bar.selectable(OptionRight::Call).count(), 3);
+    }
+
+    #[test]
+    fn a_fine_tape_that_stops_short_folds_into_the_coarse_one() {
+        // 15-minute bars end before the 30-minute tape begins: the 13:15 bar
+        // closes at 13:30, so it is the 13:00 thirty-minute quote; 13:00 is dropped.
+        let path = fixture("mixed-short");
+        add_fifteen(&path, &["2026-07-01T13:00:00+00:00", "2026-07-01T13:15:00+00:00"]);
+        let series = ChainSeries::load(&Snapshot::open(&path).unwrap(), "test", expiry()).unwrap();
+        assert_eq!(series.bar_minutes, 30);
+        let ts: Vec<String> = series.timestamps().map(|t| t.format("%H:%M").to_string()).collect();
+        assert_eq!(ts, ["13:00", "13:30", "14:00"]);
+
+        // 15-minute bars spanning the 30-minute tape keep the chain at 15.
+        let path = fixture("mixed-spanning");
+        add_fifteen(&path, &["2026-07-01T13:30:00+00:00", "2026-07-01T14:15:00+00:00"]);
+        let series = ChainSeries::load(&Snapshot::open(&path).unwrap(), "test", expiry()).unwrap();
+        assert_eq!(series.bar_minutes, 15);
+        assert_eq!(series.len(), 2);
+    }
+
     #[test]
     fn loads_a_chain_and_resolves_its_ladder() {
         let path = fixture("basic");
@@ -967,6 +1191,7 @@ mod tests {
                 quote(99.0, OptionRight::Call, 0.90),
                 quote(101.0, OptionRight::Put, 0.90),
             ],
+            interpolated: Vec::new(),
         };
 
         let lo = (99.0_f64 / 100.0).ln();
@@ -997,6 +1222,7 @@ mod tests {
             paired_strikes: 4,
             year_fraction: 0.1,
             quotes,
+            interpolated: Vec::new(),
         };
 
         // Puts bid richer than calls: a positive equity skew of roughly the raw

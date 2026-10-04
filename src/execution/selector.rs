@@ -258,6 +258,7 @@ mod tests {
             residual_mad: 0.02,
             paired_strikes: strikes.len(),
             year_fraction: t,
+            interpolated: Vec::new(),
             quotes,
         }
     }

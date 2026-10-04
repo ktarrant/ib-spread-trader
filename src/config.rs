@@ -17,7 +17,7 @@ use std::path::Path;
 
 use crate::domain::OptionRight;
 use crate::engine::{
-    ExitRules, RankedStrategy, RsiZone, RunConfig, StagedStrategy, Strategy, Timing,
+    ExitRules, ExpiryChoice, RankedStrategy, RsiZone, RunConfig, StagedStrategy, Strategy, Timing,
 };
 use crate::execution::{Costs, DeltaSelector};
 use crate::model::{
@@ -293,6 +293,10 @@ pub struct ExecutionConfig {
     /// immediately close. Set this to `min_days_before_expiry + buffer`.
     #[serde(default = "default_min_entry_days_before_expiry")]
     pub min_entry_days_before_expiry: Option<u32>,
+    /// With several expiries, which chain outside the blackout a new entry
+    /// uses: `front` (the default) or the `best` candidate across all of them.
+    #[serde(default)]
+    pub expiry_choice: ExpiryChoice,
     /// Refuse new entries within this many calendar days of an earnings
     /// Entry-timing band on RSI of the option-bar spot series. Ranked mode only
     /// — the staged path has no feature engine.
@@ -342,8 +346,8 @@ fn minute_of_day(text: &str) -> Result<u16> {
 // Default expiry rules for every strategy: close well before the option tape
 // stops so a position exits on a real quote rather than settling at intrinsic,
 // and refuse entries too close to expiry to open one that the before-expiry exit
-// would immediately close. With a single expiry this is a hard blackout; once
-// more expiries land, the honest alternative is rolling to the next month.
+// would immediately close. With a single expiry this is a hard blackout; with
+// several, new entries move to the next month (`ExpiryChoice::Front`).
 fn default_min_days_before_expiry() -> Option<u32> {
     Some(3)
 }
@@ -360,6 +364,7 @@ impl Default for ExecutionConfig {
             max_open_positions: None,
             max_positions_per_symbol: None,
             min_entry_days_before_expiry: default_min_entry_days_before_expiry(),
+            expiry_choice: ExpiryChoice::default(),
             min_entry_rsi: None,
             max_entry_rsi: None,
             entry_rsi_zone: RsiZone::default(),
@@ -870,6 +875,11 @@ impl Default for CostsConfig {
 pub struct FeaturesConfig {
     pub trend_fast: usize,
     pub trend_slow: usize,
+    /// `sma` (default), `ema`, `wma` or `vwma`, for both trend legs.
+    pub trend_average: crate::indicators::AverageKind,
+    /// See `FeatureConfig::prevailing_period`.
+    pub prevailing_period: usize,
+    pub prevailing_slope_bars: usize,
     pub atr_period: usize,
     pub realized_vol_period: usize,
     pub realized_vol_winsor_k: f64,
@@ -890,6 +900,9 @@ impl Default for FeaturesConfig {
         Self {
             trend_fast: d.trend_fast,
             trend_slow: d.trend_slow,
+            trend_average: d.trend_average,
+            prevailing_period: d.prevailing_period,
+            prevailing_slope_bars: d.prevailing_slope_bars,
             atr_period: d.atr_period,
             realized_vol_period: d.realized_vol_period,
             realized_vol_winsor_k: d.realized_vol_winsor_k,
@@ -907,6 +920,9 @@ impl FeaturesConfig {
         FeatureConfig {
             trend_fast: self.trend_fast,
             trend_slow: self.trend_slow,
+            trend_average: self.trend_average,
+            prevailing_period: self.prevailing_period,
+            prevailing_slope_bars: self.prevailing_slope_bars,
             atr_period: self.atr_period,
             realized_vol_period: self.realized_vol_period,
             realized_vol_winsor_k: self.realized_vol_winsor_k,
@@ -938,6 +954,8 @@ pub struct ModelConfig {
     pub earnings_vol_multiplier: f64,
     /// See `LognormalModelConfig::crush_to_median`.
     pub crush_to_median: bool,
+    /// See `LognormalModelConfig::trend_with_prevailing_only`.
+    pub trend_with_prevailing_only: bool,
 }
 
 impl Default for ModelConfig {
@@ -956,6 +974,7 @@ impl Default for ModelConfig {
             vol_multiplier: d.vol_multiplier,
             earnings_vol_multiplier: d.earnings_vol_multiplier,
             crush_to_median: d.crush_to_median,
+            trend_with_prevailing_only: d.trend_with_prevailing_only,
         }
     }
 }
@@ -981,6 +1000,7 @@ impl ModelConfig {
             vol_multiplier: self.vol_multiplier,
             earnings_vol_multiplier: self.earnings_vol_multiplier,
             crush_to_median: self.crush_to_median,
+            trend_with_prevailing_only: self.trend_with_prevailing_only,
         })
     }
 }
@@ -1074,6 +1094,8 @@ pub struct CandidatesConfig {
     pub allow_naked_long: bool,
     pub min_width: f64,
     pub max_width: Option<f64>,
+    /// See `CandidateConfig::min_leg_delta`.
+    pub min_leg_delta: f64,
     pub max_relative_spread: f64,
     pub max_loss: f64,
     /// Band on `max_profit / max_loss`. See `CandidateConfig`.
@@ -1103,6 +1125,7 @@ impl Default for CandidatesConfig {
             min_width: d.min_width,
             // The runtime default is unbounded; expose that as "no cap".
             max_width: None,
+            min_leg_delta: d.min_leg_delta,
             max_relative_spread: d.max_relative_spread,
             max_loss: d.max_loss,
             min_reward_risk: d.min_reward_risk,
@@ -1138,6 +1161,9 @@ impl CandidatesConfig {
         if self.max_loss.is_nan() || self.max_loss <= 0.0 {
             bail!("`candidates.max_loss` must be positive");
         }
+        if !(0.0..0.5).contains(&self.min_leg_delta) {
+            bail!("`candidates.min_leg_delta` must be in [0, 0.5)");
+        }
         if let (Some(lo), Some(hi)) = (self.min_reward_risk, self.max_reward_risk)
             && lo > hi
         {
@@ -1150,6 +1176,7 @@ impl CandidatesConfig {
             allow_naked_long: self.allow_naked_long,
             min_width: self.min_width,
             max_width: self.max_width.unwrap_or(f64::INFINITY),
+            min_leg_delta: self.min_leg_delta,
             max_relative_spread: self.max_relative_spread,
             max_loss: self.max_loss,
             min_reward_risk: self.min_reward_risk,
@@ -1655,6 +1682,7 @@ impl StrategyConfig {
             max_open_positions: portfolio.max_open_positions,
             max_positions_per_symbol: portfolio.max_positions_per_symbol,
             min_entry_days_before_expiry: self.execution.min_entry_days_before_expiry,
+            expiry_choice: self.execution.expiry_choice,
             earnings_blackout_days: self.execution.earnings_blackout_days,
             min_entry_rsi: self.execution.min_entry_rsi,
             max_entry_rsi: self.execution.max_entry_rsi,

@@ -2,8 +2,8 @@
   "label": "credit_pop",
   "model_label": "mean-reversion",
   "dataset": "2026-10-16",
-  "spearman": 0.5625835395402355,
+  "spearman": 0.4407091915977258,
   "decile_monotonicity": 1.0,
   "passed": true,
-  "evaluated_at": "2026-09-26T19:08:36.583502Z"
+  "evaluated_at": "2026-10-04T05:54:18.765252Z"
 }

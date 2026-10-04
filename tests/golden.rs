@@ -252,8 +252,8 @@ fn a_shared_account_respects_its_pool_cap_and_per_symbol_limit() {
     // One $20k pool, and the forecast beats the null (it is the mean-reversion
     // model). Trade P&L on ~51 trades is noise; the invariants are the point.
     assert!((totals.capital_deployed - 20_000.0).abs() < 1e-6);
-    assert_eq!(totals.trades, 51);
-    assert!((totals.total_pnl - -5510.10).abs() < 0.01, "{}", totals.total_pnl);
+    assert_eq!(totals.trades, 49);
+    assert!((totals.total_pnl - -3504.12).abs() < 0.01, "{}", totals.total_pnl);
     assert!(built.model_eval.as_ref().unwrap().pooled.crps_skill > 0.0);
     // The directional forecast diversifies the mix beyond credit-only.
     let naked = built.trades.iter().filter(|t| !t.description.contains('-')).count();
@@ -299,6 +299,16 @@ fn a_shared_account_respects_its_pool_cap_and_per_symbol_limit() {
 /// The driftless model — the honest random-walk null — as a shared account. With
 /// no directional view the only edge is theta: it holds a few credit spreads
 /// their full forecast window, and the single account funds only a handful.
+///
+/// Re-pinned when unquoted legs began closing off the smile instead of at
+/// intrinsic: 1346.20 -> 378.34. Deliberate. One SPY 770/779 bear call closed
+/// with its short strike off the (odd-strike) ladder; intrinsic called it worth
+/// $0 and booked a full win, where the smile prices the buy-back at ~$2.42.
+///
+/// And again when registered strikes a bar did not print became tradeable at
+/// interpolated prices: the ladder roughly doubles (8 732 187 -> 36 056 719
+/// candidates), the same four slots take different strikes, 378.34 -> -770.04.
+/// The 0.20 leg-delta band (18 501 657 candidates) leaves this run unchanged.
 #[test]
 fn the_driftless_model_reproduces_its_recorded_run() {
     let snapshot = snapshot_or_skip!();
@@ -306,8 +316,8 @@ fn the_driftless_model_reproduces_its_recorded_run() {
     let totals = &built.totals;
 
     assert_eq!(totals.trades, 4);
-    assert_eq!(totals.census.ranking.enumerated, 8_732_187);
-    assert!((totals.total_pnl - 1346.20).abs() < 0.01, "{}", totals.total_pnl);
+    assert_eq!(totals.census.ranking.enumerated, 18_501_657);
+    assert!((totals.total_pnl - -770.04).abs() < 0.01, "{}", totals.total_pnl);
     // A random walk has ~no directional edge.
     assert!(built.model_eval.as_ref().unwrap().pooled.crps_skill.abs() < 0.01);
     // All four are credit spreads, each held to the end of its forecast window.
@@ -318,15 +328,22 @@ fn the_driftless_model_reproduces_its_recorded_run() {
 /// The mean-reversion model — the main strategy — as a shared account. The
 /// directional forecast beats the null and diversifies the mix into debit spreads
 /// and naked longs, not the driftless model's credit-only theta harvest.
+///
+/// Re-pinned with the smile-estimated closes: -5510.10 -> -7420.57, same 51
+/// trades. Its two intrinsic exits (a TSLA spread paid full width a week before
+/// expiry, a SPY spread with an off-ladder strike) now close at a model price.
+/// Then -7420.57 -> -6548.12, still 51 trades, once interpolated strikes could
+/// be entered: 24 of the 51 open with an interpolated leg. Then 51 -> 49 trades,
+/// -6548.12 -> -3504.12, when every leg was held to |delta| 0.20-0.80.
 #[test]
 fn the_mean_reversion_model_reproduces_its_recorded_run() {
     let snapshot = snapshot_or_skip!();
     let (built, _) = shared_run(&snapshot, "strategies/mean_reversion.toml");
     let totals = &built.totals;
 
-    assert_eq!(totals.trades, 51);
-    assert_eq!(totals.census.ranking.enumerated, 8_732_187);
-    assert!((totals.total_pnl - -5510.10).abs() < 0.01, "{}", totals.total_pnl);
+    assert_eq!(totals.trades, 49);
+    assert_eq!(totals.census.ranking.enumerated, 18_501_657);
+    assert!((totals.total_pnl - -3504.12).abs() < 0.01, "{}", totals.total_pnl);
     let pooled = &built.model_eval.as_ref().unwrap().pooled;
     assert!(pooled.crps_skill > 0.0, "skill {}", pooled.crps_skill);
     // ...and within noise of zero. Ten weekly blocks put the interval across it,
@@ -353,6 +370,14 @@ fn the_mean_reversion_model_reproduces_its_recorded_run() {
 /// credit spreads (3 of the 30), and because the account is shared, closing them
 /// early frees capital that funds trades the old run never took — which is why
 /// the debit give-ups moved too (25 -> 27) and the trade count rose.
+///
+/// Re-pinned again with the smile-estimated closes: 76 -> 77 trades, -8571.20 ->
+/// -10721.83, pop_floor 30 -> 31. An IWM put spread whose legs left the ladder
+/// could not be read by the floor before; now it is, and it gives up earlier.
+/// Then 77 -> 81 trades and -10721.83 -> -15058.83 with interpolated entries;
+/// pop_floor 31 -> 33, of which credit 3 -> 2, trailing 21 -> 22. Then 81 -> 75
+/// trades, -15058.83 -> -10634.40, pop_floor 33 -> 25, trailing 22 -> 21 under
+/// the 0.20 leg-delta band.
 #[test]
 fn the_pop_trailing_exit_variant_reproduces_its_recorded_run() {
     use ib_spread_trader::portfolio::ExitReason;
@@ -360,10 +385,10 @@ fn the_pop_trailing_exit_variant_reproduces_its_recorded_run() {
     let (built, _) = shared_run(&snapshot, "strategies/exit_pop_trailing.toml");
     let totals = &built.totals;
 
-    assert_eq!(totals.trades, 76);
-    assert!((totals.total_pnl - -8571.20).abs() < 0.01, "{}", totals.total_pnl);
+    assert_eq!(totals.trades, 75);
+    assert!((totals.total_pnl - -10634.40).abs() < 0.01, "{}", totals.total_pnl);
     // The two structure-scoped give-ups actually fire on the real chain.
-    assert_eq!(totals.exits_by_reason["pop_floor"], 30, "vertical give-ups");
+    assert_eq!(totals.exits_by_reason["pop_floor"], 25, "vertical give-ups");
     assert_eq!(totals.exits_by_reason["trailing_stop"], 21, "naked let-it-run");
     // The floor reaches credit spreads now, which is the point of the change.
     let credit_give_ups = built
@@ -371,7 +396,7 @@ fn the_pop_trailing_exit_variant_reproduces_its_recorded_run() {
         .iter()
         .filter(|t| t.exit_reason == ExitReason::PopFloor && t.entry_debit < 0.0)
         .count();
-    assert_eq!(credit_give_ups, 3, "the floor closes credit spreads too");
+    assert_eq!(credit_give_ups, 2, "the floor closes credit spreads too");
     // POP-floor never closes a naked long, trailing never closes a spread.
     for t in &built.trades {
         let naked = !t.description.contains('-');

@@ -11,7 +11,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 
 use crate::data::ChainSnapshot;
-use crate::execution::{Costs, FillError, entry_debit, exit_credit};
+use crate::execution::{Costs, FillError, entry_debit, exit_credit, fully_quoted};
 use crate::spread::{CONTRACT_MULTIPLIER, Side, Spread};
 
 pub mod model;
@@ -118,6 +118,8 @@ pub struct OpenPosition {
     /// Running peak unrealized P&L since entry, updated each bar. Drives the
     /// naked-long trailing stop. `None` until the first mark.
     pub peak_value: Option<f64>,
+    /// Opened with a leg the bar did not quote, at an interpolated price.
+    pub estimated_entry: bool,
 }
 
 impl OpenPosition {
@@ -147,6 +149,15 @@ pub struct ClosedTrade {
     /// unavailable. The P&L is an estimate, not a market observation.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub synthetic_price: bool,
+    /// True when a leg the closing bar did not quote was priced off its smile
+    /// (`ChainSnapshot::estimate_quote`) — common once the captured strike set
+    /// moves week to week. A model price, not a market one.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub estimated_price: bool,
+    /// Opened with a leg the entry bar did not quote, at a price interpolated
+    /// off its smile (`ChainSnapshot::interpolated`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub estimated_entry: bool,
     /// Structural worst case at entry, net of cost — the capital at risk, and the
     /// denominator of realized P/L-per-risk. `None` for an unbounded structure.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -216,12 +227,12 @@ impl Portfolio {
     }
 
     /// Update each open position's running peak gross P&L against `bar` — the
-    /// state the naked-long trailing stop reads. A position whose legs are not
-    /// quoted on this bar (a different symbol, or a gap in the tape) keeps its
-    /// last peak, so calling this with one symbol's bar only touches that
-    /// symbol's positions.
+    /// state the naked-long trailing stop reads. Only positions in `bar`'s own
+    /// chain are touched: another chain's smile would happily estimate legs it
+    /// does not quote. A position the bar cannot price keeps its last peak.
     pub fn update_peaks(&mut self, bar: &ChainSnapshot, _costs: &Costs) {
-        for p in &mut self.open {
+        let in_chain = |p: &&mut OpenPosition| p.spread.symbol == bar.symbol && p.expiry == bar.expiry;
+        for p in self.open.iter_mut().filter(in_chain) {
             if let Ok(credit) = exit_credit(&p.spread, bar) {
                 let gross = credit - p.entry_debit;
                 p.peak_value = Some(p.peak_value.map_or(gross, |peak| peak.max(gross)));
@@ -237,6 +248,7 @@ impl Portfolio {
         costs: &Costs,
     ) -> Result<usize, FillError> {
         let debit = entry_debit(&spread, bar)?;
+        let estimated_entry = !fully_quoted(&spread, bar);
         let commission = costs.commission(&spread);
         let bounds = spread.payoff_bounds();
 
@@ -260,6 +272,7 @@ impl Portfolio {
             entry_features: None,
             leg_vols: Vec::new(),
             peak_value: None,
+            estimated_entry,
         });
         Ok(id)
     }
@@ -277,6 +290,7 @@ impl Portfolio {
             return Ok(None);
         };
         let credit = exit_credit(&self.open[index].spread, bar)?;
+        let estimated_price = !fully_quoted(&self.open[index].spread, bar);
         let position = self.open.remove(index);
         let commission = position.entry_commission + costs.commission(&position.spread);
 
@@ -295,6 +309,8 @@ impl Portfolio {
             pnl: credit - position.entry_debit - commission,
             exit_reason: reason,
             synthetic_price: false,
+            estimated_price,
+            estimated_entry: position.estimated_entry,
             max_loss: position.max_loss,
             prediction: position.prediction,
             forecast_target: position.forecast_target,
@@ -342,6 +358,8 @@ impl Portfolio {
             pnl: credit - position.entry_debit - commission,
             exit_reason: reason,
             synthetic_price: true,
+            estimated_price: false,
+            estimated_entry: position.estimated_entry,
             max_loss: position.max_loss,
             prediction: position.prediction,
             forecast_target: position.forecast_target,
@@ -390,6 +408,8 @@ impl Portfolio {
             pnl: credit - position.entry_debit - position.entry_commission,
             exit_reason: ExitReason::Expiry,
             synthetic_price: false,
+            estimated_price: false,
+            estimated_entry: position.estimated_entry,
             max_loss: position.max_loss,
             prediction: position.prediction,
             forecast_target: position.forecast_target,
@@ -487,6 +507,7 @@ mod tests {
             residual_mad: 0.02,
             paired_strikes: 30,
             year_fraction: 0.006,
+            interpolated: Vec::new(),
             quotes: vec![
                 quote(1, 750.0, long.0, long.1),
                 quote(2, 755.0, short.0, short.1),
