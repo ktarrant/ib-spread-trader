@@ -47,7 +47,7 @@ SCHEMA = Path(__file__).resolve().parent / "news_schema.json"
 CACHE = Path.home() / "Documents/Options Database/news-llm.sqlite3"
 MODEL = "gpt-5.6-sol"
 EFFORT = "low"
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v3"
 CONTEXT_HOURS = 72
 CONTEXT_PER_SYMBOL = 25
 CHUNK = 40
@@ -66,6 +66,10 @@ For each NEW headline (by id):
   materiality 0-3 (0 none, 1 minor, 2 notable: could move the stock about a normal
   day's range, 3 major: guidance change, M&A, regulatory action, large contract),
   direction -1..1 (expected effect on the price over the horizon, 0 if unclear),
+  sentiment -1..1 (the tone of the news for that stock: how good or bad it reads,
+  whether or not the price will respond — good news already priced in, or a
+  "falls despite strong results" headline, is positive sentiment with a
+  non-positive direction),
   vol: whether the next days' moves should be larger than usual for that stock
   (none / elevated / high), and horizon (intraday / days / weeks).
   A routine price-target change or maintained rating is materiality 1 and vol
@@ -79,6 +83,11 @@ For each NEW headline (by id):
   decisions, shareholder votes, index changes, macro releases). date is
   YYYY-MM-DD, the first day of the period when precision is week/month/quarter.
   Empty when nothing dated is announced.
+
+Then, under "symbols", one entry for each tracked symbol tagged on a NEW
+headline: sentiment -1..1, the overall tone of that symbol's news flow across
+the context and the new headlines together, weighting recent and material news
+more. 0 is neutral or mixed.
 """
 
 
@@ -195,24 +204,34 @@ def open_cache(path: Path) -> sqlite3.Connection:
     return db
 
 
-def scored(cache: Path = CACHE, model: str = MODEL, version: str = PROMPT_VERSION) -> list[dict]:
-    """Every cached item with its scores; `available_at` is the window end.
-    Ids the model returned that match no item, or symbols outside the item's
-    universe, are dropped here rather than trusted."""
+def _calls(cache: Path, model: str, version: str):
     db = sqlite3.connect(f"file:{cache}?mode=ro", uri=True)
-    out = []
     for end, items, raw in db.execute(
         "SELECT window_end, items_json, raw_json FROM calls WHERE model = ? AND prompt_version = ?", (model, version)
     ):
-        items = json.loads(items)
-        for s in json.loads(raw)["items"]:
+        yield dt.datetime.fromisoformat(end), json.loads(items), json.loads(raw)
+
+
+def scored(cache: Path = CACHE, model: str = MODEL, version: str = PROMPT_VERSION) -> list[dict]:
+    """Every cached item with its scores; `available_at` is the window end.
+    An id the model returned that matches no item is dropped, not trusted."""
+    out = []
+    for end, items, raw in _calls(cache, model, version):
+        for s in raw["items"]:
             try:
                 it = items[int(s["id"])]
             except (ValueError, IndexError):
                 continue
-            out.append(dict(it, available_at=dt.datetime.fromisoformat(end), event_type=s["event_type"],
-                            is_repeat=s["is_repeat"], effects=s["effects"], future_events=s["future_events"]))
+            out.append(dict(it, available_at=end, event_type=s["event_type"], is_repeat=s["is_repeat"],
+                            effects=s["effects"], future_events=s["future_events"]))
     return out
+
+
+def symbol_sentiment(cache: Path = CACHE, model: str = MODEL, version: str = PROMPT_VERSION) -> list[dict]:
+    """The model's read of the tone around each symbol a call named, as of its
+    window end. A window split into chunks gives one reading per chunk."""
+    return [dict(symbol=s["symbol"], available_at=end, sentiment=s["sentiment"])
+            for end, _items, raw in _calls(cache, model, version) for s in raw["symbols"]]
 
 
 def main() -> None:

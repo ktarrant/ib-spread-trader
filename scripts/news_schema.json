@@ -1,34 +1,95 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["items"],
+  "required": [
+    "items",
+    "symbols"
+  ],
   "properties": {
     "items": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "event_type", "is_repeat", "effects", "future_events"],
+        "required": [
+          "id",
+          "event_type",
+          "is_repeat",
+          "effects",
+          "future_events"
+        ],
         "properties": {
-          "id": {"type": "string"},
+          "id": {
+            "type": "string"
+          },
           "event_type": {
             "type": "string",
-            "enum": ["earnings", "guidance", "m_and_a", "analyst", "product", "legal_regulatory",
-                     "management", "capital", "macro", "market_recap", "other", "noise"]
+            "enum": [
+              "earnings",
+              "guidance",
+              "m_and_a",
+              "analyst",
+              "product",
+              "legal_regulatory",
+              "management",
+              "capital",
+              "macro",
+              "market_recap",
+              "other",
+              "noise"
+            ]
           },
-          "is_repeat": {"type": "boolean"},
+          "is_repeat": {
+            "type": "boolean"
+          },
           "effects": {
             "type": "array",
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["symbol", "materiality", "direction", "vol", "horizon"],
+              "required": [
+                "symbol",
+                "materiality",
+                "direction",
+                "sentiment",
+                "vol",
+                "horizon"
+              ],
               "properties": {
-                "symbol": {"type": "string"},
-                "materiality": {"type": "integer", "enum": [0, 1, 2, 3]},
-                "direction": {"type": "number"},
-                "vol": {"type": "string", "enum": ["none", "elevated", "high"]},
-                "horizon": {"type": "string", "enum": ["intraday", "days", "weeks"]}
+                "symbol": {
+                  "type": "string"
+                },
+                "materiality": {
+                  "type": "integer",
+                  "enum": [
+                    0,
+                    1,
+                    2,
+                    3
+                  ]
+                },
+                "direction": {
+                  "type": "number"
+                },
+                "sentiment": {
+                  "type": "number"
+                },
+                "vol": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "elevated",
+                    "high"
+                  ]
+                },
+                "horizon": {
+                  "type": "string",
+                  "enum": [
+                    "intraday",
+                    "days",
+                    "weeks"
+                  ]
+                }
               }
             }
           },
@@ -37,19 +98,70 @@
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["symbols", "date", "date_precision", "kind", "title"],
+              "required": [
+                "symbols",
+                "date",
+                "date_precision",
+                "kind",
+                "title"
+              ],
               "properties": {
-                "symbols": {"type": "array", "items": {"type": "string"}},
-                "date": {"type": "string"},
-                "date_precision": {"type": "string", "enum": ["day", "week", "month", "quarter"]},
+                "symbols": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "date": {
+                  "type": "string"
+                },
+                "date_precision": {
+                  "type": "string",
+                  "enum": [
+                    "day",
+                    "week",
+                    "month",
+                    "quarter"
+                  ]
+                },
                 "kind": {
                   "type": "string",
-                  "enum": ["earnings", "investor_day", "product_launch", "regulatory_decision",
-                           "court", "shareholder_vote", "index_change", "macro", "other"]
+                  "enum": [
+                    "earnings",
+                    "investor_day",
+                    "product_launch",
+                    "regulatory_decision",
+                    "court",
+                    "shareholder_vote",
+                    "index_change",
+                    "macro",
+                    "other"
+                  ]
                 },
-                "title": {"type": "string"}
+                "title": {
+                  "type": "string"
+                }
               }
             }
+          }
+        }
+      }
+    },
+    "symbols": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "symbol",
+          "sentiment"
+        ],
+        "properties": {
+          "symbol": {
+            "type": "string"
+          },
+          "sentiment": {
+            "type": "number"
           }
         }
       }
