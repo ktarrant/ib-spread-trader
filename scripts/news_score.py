@@ -126,12 +126,32 @@ def check_windows() -> None:
         assert window_end(u(at)) == u(end), (at, window_end(u(at)), end)
 
 
+# Formats that are never news, by measurement: on 995 headlines the model had
+# scored, these rules drop 169 (a third of its materiality-0s) and not one of
+# the 280 it rated 2 or 3. Market wraps ("Stock Market Today", "Dow Jones
+# Futures") are left in: they caught one material headline, and they are the
+# only place a sector move gets named. Price-target changes score 1 every time
+# but stay in, for the direction study. A filtered headline is never sent —
+# not as an item, not as context — and counts as materiality 0.
+NOISE = re.compile("|".join([
+    r"\b(Registers|Sells|Acquires|Buys|Disposes Of|Exercises)\b[\d,. ]* Of .+>[A-Z.]+\s*$",  # insider Form 4
+    r"Insider Review For Week",
+    r"Files 8K - Other Events",
+    r"\bIs Maintained at\b|\bPrice Target Maintained\b|\bReiterated at\b",
+    r"(Outperforms|Underperforms) (Peers|Competitors)",  # auto-written price recaps
+    r"Stocks That Explain Today'?s Market",
+    r"Morning (Risk )?Report|Need to Know|Money Quote",
+]))
+
+
 def build_items(rows: list[dict]) -> list[dict]:
     """One item per story across feeds *and* tickers (`news_profile.stories`
     over every symbol at once), carrying every symbol it was tagged with. A
     reissue in a later window is not scored again: it is the same headline."""
     items = []
     for st in stories(sorted(rows, key=lambda r: r["at"])):
+        if all(NOISE.search(r["title"]) for r in st):
+            continue
         first, end = st[0], window_end(st[0]["at"])
         # A full headline over a "-2-" page, from the same window only.
         title = next((r["title"] for r in st if window_end(r["at"]) == end
