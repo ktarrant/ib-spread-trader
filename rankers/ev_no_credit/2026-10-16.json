@@ -1,0 +1,9 @@
+{
+  "label": "ev_no_credit",
+  "model_label": "mean-reversion",
+  "dataset": "2026-10-16",
+  "spearman": 0.4544654038107308,
+  "decile_monotonicity": 1.0,
+  "passed": true,
+  "evaluated_at": "2026-10-04T06:58:12.286880Z"
+}

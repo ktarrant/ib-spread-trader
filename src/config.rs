@@ -1946,7 +1946,7 @@ horizon_days = 10.0
         assert_eq!(config.symbols.len(), 12);
         assert_eq!(config.expiry, NaiveDate::from_ymd_opt(2026, 8, 21).unwrap());
         assert!(matches!(&config.model, ModelBlock::Label(label) if label == "mean-reversion"));
-        assert!(matches!(&config.ranker, Some(RankerBlock::Label(label)) if label == "ev"));
+        assert!(matches!(&config.ranker, Some(RankerBlock::Label(label)) if label == "ev_no_credit"));
         assert!(matches!(&config.exit, ExitBlock::Label(label) if label == "base"));
         assert!(matches!(&config.portfolio, Some(PortfolioBlock::Label(label)) if label == "shared_20k"));
         assert!(matches!(&config.dataset, Some(DatasetBlock::Label(label)) if label == "2026-08-21"));

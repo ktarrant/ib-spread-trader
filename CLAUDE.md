@@ -860,6 +860,25 @@ the floors. What the losers share is how they end: 59 of `mean_reversion`'s 81
 trades close at the forecast horizon for −$23 386, the 12 that reach the forecast
 target make +$25 393. A loser is a trade that never moved.
 
+**Every mean-reversion strategy now runs credit-free** (`ev_no_credit`, and
+`prob_profit` with `allow_credit = false`); `driftless` keeps `ev` and the
+`credit_pop` family stays the credit experiment it is. And the debit sleeve is
+not the steady earner it looks like — per dollar at risk, on the credit-free
+runs:
+
+| sleeve | n | win % | mean | median | avg win | avg loss | stdev |
+|---|---|---|---|---|---|---|---|
+| `mean_reversion` debit | 45 | 49 | −7.1 % | −1.1 % | +32 % | −44 % | 47 % |
+| `mean_reversion` naked | 36 | 39 | +12.9 % | −17.3 % | +87 % | −34 % | 71 % |
+| prevailing debit | 26 | 50 | −2.9 % | +0.1 % | +35 % | −41 % | 50 % |
+| prevailing naked | 9 | 89 | +66.7 % | +68.1 % | +77 % | −12 % | 56 % |
+
+Debits are tighter, and they win half the time with wins smaller than losses —
+the cap takes the target exit's tail, and a timeout near the money still costs
+most of the premium. Positive only on the Oct/Nov chains; nakeds positive on
+both for `mean_reversion`. Naked calls have no `max_loss` (unbounded upside), so
+their risk here is premium plus commission.
+
 ### ATM IV is already the whole vol input; what is missing is *elevation*
 
 Worth knowing before proposing IV as a model input, because it is not merely an

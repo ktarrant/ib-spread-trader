@@ -2,7 +2,7 @@
 [candidates]
 rights = ["call", "put"]
 allow_debit = true
-allow_credit = true
+allow_credit = false
 min_width = 0.0
 max_relative_spread = 0.35
 max_loss = 500.0

@@ -253,7 +253,7 @@ fn a_shared_account_respects_its_pool_cap_and_per_symbol_limit() {
     // model). Trade P&L on ~51 trades is noise; the invariants are the point.
     assert!((totals.capital_deployed - 20_000.0).abs() < 1e-6);
     assert_eq!(totals.trades, 40);
-    assert!((totals.total_pnl - -2327.73).abs() < 0.01, "{}", totals.total_pnl);
+    assert!((totals.total_pnl - -1987.37).abs() < 0.01, "{}", totals.total_pnl);
     assert!(built.model_eval.as_ref().unwrap().pooled.crps_skill > 0.0);
     // The directional forecast diversifies the mix beyond credit-only.
     let naked = built.trades.iter().filter(|t| !t.description.contains('-')).count();
@@ -336,7 +336,8 @@ fn the_driftless_model_reproduces_its_recorded_run() {
 /// be entered: 24 of the 51 open with an interpolated leg. Then 51 -> 49 trades,
 /// -6548.12 -> -3504.12, when every leg was held to |delta| 0.20-0.80. Then
 /// 49 -> 40 trades, -3504.12 -> -2327.73, with no entry in the five sessions
-/// after a release (559 bars refused).
+/// after a release (559 bars refused). Then -2327.73 -> -1987.37, still 40
+/// trades, on the credit-free `ev_no_credit` ranker (9 191 325 candidates).
 #[test]
 fn the_mean_reversion_model_reproduces_its_recorded_run() {
     let snapshot = snapshot_or_skip!();
@@ -344,8 +345,8 @@ fn the_mean_reversion_model_reproduces_its_recorded_run() {
     let totals = &built.totals;
 
     assert_eq!(totals.trades, 40);
-    assert_eq!(totals.census.ranking.enumerated, 17_777_901);
-    assert!((totals.total_pnl - -2327.73).abs() < 0.01, "{}", totals.total_pnl);
+    assert_eq!(totals.census.ranking.enumerated, 9_191_325);
+    assert!((totals.total_pnl - -1987.37).abs() < 0.01, "{}", totals.total_pnl);
     let pooled = &built.model_eval.as_ref().unwrap().pooled;
     assert!(pooled.crps_skill > 0.0, "skill {}", pooled.crps_skill);
     // ...and within noise of zero. Ten weekly blocks put the interval across it,
@@ -381,6 +382,8 @@ fn the_mean_reversion_model_reproduces_its_recorded_run() {
 /// trades, -15058.83 -> -10634.40, pop_floor 33 -> 25, trailing 22 -> 21 under
 /// the 0.20 leg-delta band. Then 75 -> 61 trades, -10634.40 -> -7918.27,
 /// pop_floor 25 -> 20, trailing 21 -> 17, under the post-earnings blackout.
+/// Then 61 -> 62 trades, -7918.27 -> -4515.57, on the credit-free ranker; the
+/// floor's reach to credit spreads is now pinned by its unit test alone.
 #[test]
 fn the_pop_trailing_exit_variant_reproduces_its_recorded_run() {
     use ib_spread_trader::portfolio::ExitReason;
@@ -388,18 +391,13 @@ fn the_pop_trailing_exit_variant_reproduces_its_recorded_run() {
     let (built, _) = shared_run(&snapshot, "strategies/exit_pop_trailing.toml");
     let totals = &built.totals;
 
-    assert_eq!(totals.trades, 61);
-    assert!((totals.total_pnl - -7918.27).abs() < 0.01, "{}", totals.total_pnl);
+    assert_eq!(totals.trades, 62);
+    assert!((totals.total_pnl - -4515.57).abs() < 0.01, "{}", totals.total_pnl);
     // The two structure-scoped give-ups actually fire on the real chain.
     assert_eq!(totals.exits_by_reason["pop_floor"], 20, "vertical give-ups");
     assert_eq!(totals.exits_by_reason["trailing_stop"], 17, "naked let-it-run");
-    // The floor reaches credit spreads now, which is the point of the change.
-    let credit_give_ups = built
-        .trades
-        .iter()
-        .filter(|t| t.exit_reason == ExitReason::PopFloor && t.entry_debit < 0.0)
-        .count();
-    assert_eq!(credit_give_ups, 2, "the floor closes credit spreads too");
+    // Mean-reversion strategies open no credit spreads at all.
+    assert!(built.trades.iter().all(|t| t.entry_debit > 0.0), "a credit spread opened");
     // POP-floor never closes a naked long, trailing never closes a spread.
     for t in &built.trades {
         let naked = !t.description.contains('-');
