@@ -1,0 +1,9 @@
+{
+  "label": "ev_conservative",
+  "model_label": "mean-reversion-prevailing",
+  "dataset": "2026-10-16",
+  "spearman": 0.44674751208147373,
+  "decile_monotonicity": 1.0,
+  "passed": true,
+  "evaluated_at": "2026-10-04T07:19:03.137943Z"
+}
