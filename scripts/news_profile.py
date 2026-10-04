@@ -28,7 +28,11 @@ import statistics
 from option_premium import default_db
 
 CAP = 255
-DEDUP_MINUTES = 10
+DEDUP_HOURS = 24
+# Wire markers that reissue a headline without changing it: "Update: ...",
+# "... -- Update" / "-- 2nd Update", and "-2-" continuation pages.
+REISSUE = [re.compile(p, re.I) for p in (r"^\s*update:\s*", r"\s*--\s*(\d+(st|nd|rd|th)\s+)?update\s*$",
+                                         r"\s*-\d+-\s*$")]
 
 
 def parse(ts: str) -> dt.datetime:
@@ -37,6 +41,16 @@ def parse(ts: str) -> dt.datetime:
 
 def norm(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+
+
+def story_key(title: str) -> str:
+    """A headline's identity across feeds and reissues."""
+    prev = None
+    while prev != title:
+        prev = title
+        for rx in REISSUE:
+            title = rx.sub("", title)
+    return norm(title)
 
 
 def load(db) -> list[dict]:
@@ -51,17 +65,23 @@ def load(db) -> list[dict]:
 
 
 def stories(rows: list[dict]) -> list[list[dict]]:
-    """One symbol's headlines grouped into stories: same normalised title
-    within DEDUP_MINUTES, whichever provider carried it."""
-    out, last = [], {}
+    """Headlines (time-sorted) grouped into stories: the same `story_key`
+    within DEDUP_HOURS of its last showing, whichever provider or ticker
+    carried it. A "-2-" continuation page, whose title is the start of its
+    story's cut short, joins the latest story it is a prefix of."""
+    out, keys, last = [], [], {}
     for r in rows:
-        key = norm(r["title"])
+        key = story_key(r["title"])
         s = last.get(key)
-        if s and (r["at"] - s[-1]["at"]).total_seconds() <= DEDUP_MINUTES * 60:
+        if s is None and re.search(r"-\d+-\s*$", r["title"]):
+            n = len(out)
+            s = next((out[i] for i in range(n - 1, max(-1, n - 200), -1) if keys[i].startswith(key)), None)
+        if s and (r["at"] - s[-1]["at"]).total_seconds() <= DEDUP_HOURS * 3600:
             s.append(r)
         else:
             s = [r]
             out.append(s)
+            keys.append(key)
             last[key] = s
     return out
 

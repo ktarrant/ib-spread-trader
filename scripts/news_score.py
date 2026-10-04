@@ -35,6 +35,7 @@ import datetime as dt
 import difflib
 import functools
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -43,7 +44,7 @@ import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from news_profile import load, norm, DEDUP_MINUTES
+from news_profile import load, norm, stories
 from option_premium import default_db
 
 NY = ZoneInfo("America/New_York")
@@ -51,7 +52,7 @@ SCHEMA = Path(__file__).resolve().parent / "news_schema.json"
 CACHE = Path.home() / "Documents/Options Database/news-llm.sqlite3"
 MODEL = "gpt-5.6-sol"
 EFFORT = "low"
-PROMPT_VERSION = "v4"
+PROMPT_VERSION = "v5"
 CONTEXT_HOURS = 72
 CONTEXT_PER_SYMBOL = 25
 CHUNK = 40
@@ -123,23 +124,18 @@ def check_windows() -> None:
 
 
 def build_items(rows: list[dict]) -> list[dict]:
-    """Stories across feeds *and* tickers: one item per normalised title within
-    DEDUP_MINUTES, carrying every symbol it was tagged with."""
-    items, last = [], {}
-    for r in sorted(rows, key=lambda r: r["at"]):
-        key = norm(r["title"])
-        it = last.get(key)
-        if it and (r["at"] - it["last"]).total_seconds() <= DEDUP_MINUTES * 60:
-            it["symbols"].add(r["symbol"])
-            it["providers"].add(r["provider"])
-            it["last"] = r["at"]
-            continue
-        it = dict(key=r["article_id"], at=r["at"], last=r["at"], title=r["title"],
-                  symbols={r["symbol"]}, providers={r["provider"]})
-        items.append(it)
-        last[key] = it
-    for it in items:
-        it["window"] = window_end(it["at"])
+    """One item per story across feeds *and* tickers (`news_profile.stories`
+    over every symbol at once), carrying every symbol it was tagged with. A
+    reissue in a later window is not scored again: it is the same headline."""
+    items = []
+    for st in stories(sorted(rows, key=lambda r: r["at"])):
+        first, end = st[0], window_end(st[0]["at"])
+        # A full headline over a "-2-" page, from the same window only.
+        title = next((r["title"] for r in st if window_end(r["at"]) == end
+                      and not re.search(r"-\d+-\s*$", r["title"])), first["title"])
+        items.append(dict(key=first["article_id"], at=first["at"], title=title,
+                          symbols={r["symbol"] for r in st}, providers={r["provider"] for r in st},
+                          window=window_end(first["at"])))
     return items
 
 
