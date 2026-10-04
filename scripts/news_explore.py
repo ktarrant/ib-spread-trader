@@ -18,7 +18,7 @@ before the symbol's complete news coverage (news_profile.complete_from) are
 dropped as unknown rather than counted as quiet. ETFs are left out: they carry
 almost no company headlines.
 
-With a news_score.py cache present, LLM tables follow: vol by materiality,
+With ib-option-calc's news-score cache present (scripts/fetch_news_cache.sh), LLM tables follow: vol by materiality,
 vol flag and cross-symbol read-through, and **direction** — headline
 sentiment, the model's direction, and its per-symbol tone, each bucketed
 negative/neutral/positive against the share of rows that went up and the mean
@@ -42,7 +42,7 @@ import sqlite3
 from pathlib import Path
 
 from news_profile import complete_from, load, parse, stories
-from news_score import CACHE, scored, symbol_sentiment
+from news_scores import CACHE, scored, symbol_sentiment
 from option_premium import ETFS, default_db, weekly_interval
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,7 +55,7 @@ def llm_index(cache: Path):
     """Per symbol, time-sorted effects on it (cross-symbol included) and the
     model's tone readings; plus the first and last scored window. Rows outside
     that range are unknown. ponytail: assumes the scored range is contiguous
-    (a finished news_score.py run); a failed call inside it reads as quiet."""
+    (a caught-up news-score cache); a failed call inside it reads as quiet."""
     effects, tone = collections.defaultdict(list), collections.defaultdict(list)
     items = scored(cache)
     for it in items:

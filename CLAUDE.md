@@ -22,10 +22,17 @@ seams exist so it can be added without rework.
 
 ## Sibling repos
 
-**`~/ib-option-calc` is read-only. `~/ib-option-viz` is writable.** The capture
+**`~/ib-option-calc` is read-only — except its headline scorer. `~/ib-option-viz` is writable.** The capture
 tool owns data this repo can never regenerate, so nothing here touches it. The
 viz is the read side for the reports this repo writes, and the two halves of a
 change — a new field and the panel that renders it — belong together.
+
+The one exception in the capture tool, agreed 2026-10-04: the headline scorer
+(`news-score`: `src/events/score.rs`, `src/store/scores.rs`) lives there so it
+runs after each sync on the capture box. Changing it (prompt, batching,
+filters) is a change in that repo, on a branch. It opens the capture DB
+read-only and writes only its own cache file; the rest of the repo stays
+hands-off.
 
 When changing the viz: it has its own `CLAUDE.md`, its own conventions and its own
 golden tests (`uv run pytest`, 69 of them, skipping cleanly without a snapshot).
@@ -56,11 +63,10 @@ scripts/run_frontier.sh         # rerun the frontier into out/, archive the rest
 ```
 
 Headlines are scored by an LLM on the capture server, not here:
-`scripts/news_score.py` runs after each daily headline sync
-(`deploy/systemd/`), scoring only windows that sync closed, and
-`scripts/fetch_news_cache.sh` copies its cache (`news-llm.sqlite3`) beside the
-snapshots for `scripts/news_explore.py` and the viz. Running it locally works
-the same way, but a full backfill spends a whole Codex usage window.
+ib-option-calc's `news-score` runs after each daily headline sync, scoring only
+windows that sync closed, and `scripts/fetch_news_cache.sh` copies its cache
+(`news-llm.sqlite3`) beside the snapshots, where `scripts/news_explore.py`
+(through `scripts/news_scores.py`) and the viz read it.
 
 `out/` holds only the **frontier** — the runs listed in `scripts/run_frontier.sh`,
 which is all the viz offers. Other runs are moved to `out_archive/`, not deleted.
