@@ -104,6 +104,18 @@ def window_end(t: dt.datetime) -> dt.datetime:
     return day.astimezone(dt.timezone.utc)
 
 
+def check_windows() -> None:
+    """The point-in-time guarantee rests on this boundary rule; pin it."""
+    u = dt.datetime.fromisoformat
+    for at, end in (("2026-09-15T13:31:00+00:00", "2026-09-15T13:45:00+00:00"),  # 09:31 NY
+                    ("2026-09-15T13:45:00+00:00", "2026-09-15T13:45:00+00:00"),  # (start, end]
+                    ("2026-09-15T13:30:00+00:00", "2026-09-15T13:30:00+00:00"),  # 09:30 closes the night
+                    ("2026-09-15T20:01:00+00:00", "2026-09-16T13:30:00+00:00"),  # after the close
+                    ("2026-09-18T21:00:00+00:00", "2026-09-21T13:30:00+00:00"),  # Friday night
+                    ("2026-09-19T15:00:00+00:00", "2026-09-21T13:30:00+00:00")):  # Saturday
+        assert window_end(u(at)) == u(end), (at, window_end(u(at)), end)
+
+
 def build_items(rows: list[dict]) -> list[dict]:
     """Stories across feeds *and* tickers: one item per normalised title within
     DEDUP_MINUTES, carrying every symbol it was tagged with."""
@@ -246,6 +258,7 @@ def main() -> None:
     ap.add_argument("--jobs", type=int, default=2)
     ap.add_argument("--dry-run", action="store_true", help="print the first prompt and the call count")
     args = ap.parse_args()
+    check_windows()
 
     snap = sqlite3.connect(f"file:{args.db or default_db()}?mode=ro", uri=True)
     rows = load(snap)

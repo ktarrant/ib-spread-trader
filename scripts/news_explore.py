@@ -18,6 +18,14 @@ before the symbol's complete news coverage (news_profile.complete_from) are
 dropped as unknown rather than counted as quiet. ETFs are left out: they carry
 almost no company headlines.
 
+With a news_score.py cache present, LLM tables follow: vol by materiality,
+vol flag and cross-symbol read-through, and **direction** — headline
+sentiment, the model's direction, and its per-symbol tone, each bucketed
+negative/neutral/positive against the share of rows that went up and the mean
+return in implied-move units (z) at 1 and 7 days. Compare buckets with each
+other, not with 50 %: the sample has its own drift. A score is read only once
+its window has closed (`available_at <= decision`).
+
     python3 scripts/news_explore.py [--forecasts out/vol_timing_all/forecasts.csv]
 """
 
@@ -34,10 +42,53 @@ import sqlite3
 from pathlib import Path
 
 from news_profile import complete_from, load, parse, stories
+from news_score import CACHE, scored, symbol_sentiment
 from option_premium import ETFS, default_db, weekly_interval
 
 ROOT = Path(__file__).resolve().parent.parent
 YEAR = 365 * 86400
+HALF_LIFE_H = 24
+LEAN = 0.15  # |signal| below this is neutral
+
+
+def llm_index(cache: Path):
+    """Per symbol, time-sorted effects on it (cross-symbol included) and the
+    model's tone readings; plus the first and last scored window. Rows outside
+    that range are unknown. ponytail: assumes the scored range is contiguous
+    (a finished news_score.py run); a failed call inside it reads as quiet."""
+    effects, tone = collections.defaultdict(list), collections.defaultdict(list)
+    items = scored(cache)
+    for it in items:
+        for e in it["effects"]:
+            cross = e["symbol"] not in it["symbols"]
+            effects[e["symbol"]].append(dict(e, at=it["available_at"], cross=cross, repeat=it["is_repeat"]))
+    for t in symbol_sentiment(cache):
+        tone[t["symbol"]].append(t)
+    for d in (effects, tone):
+        for v in d.values():
+            v.sort(key=lambda e: e["available_at"] if "available_at" in e else e["at"])
+    span = (min(it["available_at"] for it in items), max(it["available_at"] for it in items)) if items else None
+    return effects, tone, span
+
+
+def llm_features(sym, t, effects, tone) -> dict:
+    window = [e for e in effects.get(sym, []) if t - dt.timedelta(hours=72) < e["at"] <= t]
+    assert all(e["at"] <= t for e in window)
+    live = [e for e in window if e["materiality"] >= 1]
+
+    def lean(key):
+        w = [e["materiality"] * 0.5 ** ((t - e["at"]).total_seconds() / 3600 / HALF_LIFE_H) for e in live]
+        return sum(wi * e[key] for wi, e in zip(w, live)) / sum(w) if live else None
+
+    readings = [x for x in tone.get(sym, []) if t - dt.timedelta(hours=72) < x["available_at"] <= t]
+    last = [x["sentiment"] for x in readings if x["available_at"] == readings[-1]["available_at"]] if readings else []
+    return dict(
+        mat=max((e["materiality"] for e in window if not e["repeat"]), default=0),
+        volflag=any(e["vol"] != "none" and e["materiality"] >= 1 and not e["repeat"] for e in window),
+        cross=any(e["cross"] and e["materiality"] >= 2 for e in window),
+        sent=lean("sentiment"), dirn=lean("direction"),
+        tone=sum(last) / len(last) if last else None,
+    )
 
 
 def releases(db) -> dict[str, list[dt.date]]:
@@ -74,6 +125,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", default=None)
     ap.add_argument("--forecasts", default=ROOT / "out/vol_timing_all/forecasts.csv", type=Path)
+    ap.add_argument("--cache", default=CACHE, type=Path)
     args = ap.parse_args()
     db = sqlite3.connect(f"file:{args.db or default_db()}?mode=ro", uri=True)
 
@@ -86,6 +138,7 @@ def main() -> None:
         story_at[sym] = [s[0]["at"] for s in stories(rs)]
         ratings[sym] = sorted(r["at"] for r in rs if r["provider"] == "BRFUPDN")
     rel = releases(db)
+    effects, tone, span = llm_index(args.cache) if args.cache.exists() else ({}, {}, None)
 
     rows = []
     for r in forecast_rows(args.forecasts):
@@ -102,7 +155,12 @@ def main() -> None:
         day = t.date()
         earn = any(-5 <= (d - day).days <= h * 365 for d in rel.get(sym, []))
         nxt = r["next"]
-        rows.append(dict(
+        llm = (llm_features(sym, t, effects, tone)
+               if span and span[0] <= t - dt.timedelta(hours=72) and t <= span[1] else None)
+        r1 = math.log(float(nxt["spot"]) / spot) if nxt else None
+        rows.append(dict(llm=llm,
+            z7=math.log(float(r["realized"]) / spot) / (iv * math.sqrt(h)),
+            z1=r1 / (iv * math.sqrt((nxt["at"] - r["at"]).total_seconds() / YEAR)) if nxt else None,
             symbol=sym, day=day, n24=n24, n72=n72, rated=rated > 0, earnings=earn,
             m7=math.log(float(r["realized"]) / spot) ** 2, i7=iv * iv * h,
             m1=math.log(float(nxt["spot"]) / spot) ** 2 if nxt else None,
@@ -161,6 +219,41 @@ def main() -> None:
     ])
     table("ex-earnings, analyst rating change (Briefing) in prior 72h", [
         ("yes", [r for r in quiet if r["rated"]]), ("no", [r for r in quiet if not r["rated"]])])
+
+    scoredq = [r for r in quiet if r["llm"]]
+    if not scoredq:
+        return
+    print(f"\n=== LLM features: {len(scoredq)} ex-earnings rows scored {span[0]:%Y-%m-%d}..{span[1]:%Y-%m-%d} ===")
+    L = lambda k: (lambda r: r["llm"][k])
+    table("ex-earnings, max materiality of fresh news in prior 72h", [
+        (f"{m}", [r for r in scoredq if L("mat")(r) == m]) for m in range(4)])
+    table("ex-earnings, LLM vol flag in prior 72h", [
+        ("elevated/high", [r for r in scoredq if L("volflag")(r)]), ("none", [r for r in scoredq if not L("volflag")(r)])])
+    table("ex-earnings, material read-through from another symbol's news, 72h", [
+        ("yes", [r for r in scoredq if L("cross")(r)]), ("no", [r for r in scoredq if not L("cross")(r)])])
+
+    def direction(title, key):
+        rnd = random.Random(1)
+        print(f"\n{title}")
+        print(f"  {'bucket':28}{'rows':>7}{'wks':>5}  {'up 7d [95%]':>22}  {'z1 [95%]':>24}  {'z7 [95%]':>24}")
+        get = L(key)
+        for name, rs in (("negative", [r for r in scoredq if get(r) is not None and get(r) < -LEAN]),
+                         ("neutral", [r for r in scoredq if get(r) is not None and abs(get(r)) <= LEAN]),
+                         ("positive", [r for r in scoredq if get(r) is not None and get(r) > LEAN]),
+                         ("no reading", [r for r in scoredq if get(r) is None])):
+            if len(rs) < 30:
+                print(f"  {name:28}{len(rs):7}  (too few)")
+                continue
+            one = [r for r in rs if r["z1"] is not None]
+            up = weekly_interval(rs, lambda r: float(r["z7"] > 0), lambda r: 1.0, rnd)
+            z1 = weekly_interval(one, lambda r: r["z1"], lambda r: 1.0, rnd)
+            z7 = weekly_interval(rs, lambda r: r["z7"], lambda r: 1.0, rnd)
+            f = lambda p, lo, hi, _w, d=2: f"{p:+.{d}f} [{lo:+.{d}f}, {hi:+.{d}f}]"
+            print(f"  {name:28}{len(rs):7}{z7[3]:5}  {f(*up):>22}  {f(*z1):>24}  {f(*z7):>24}")
+
+    direction("ex-earnings, headline sentiment (materiality-weighted, 24h half-life)", "sent")
+    direction("ex-earnings, LLM direction (same weighting)", "dirn")
+    direction("ex-earnings, LLM per-symbol tone (latest reading in 72h)", "tone")
 
 
 if __name__ == "__main__":
