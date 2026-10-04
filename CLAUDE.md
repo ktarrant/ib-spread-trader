@@ -829,6 +829,37 @@ check against, which is the same limit the 14-day model ran into. What the gate
 is honestly built on is narrower than "RSI times entries well": it is "do not act
 where this model has no measured skill."
 
+**Correction, 2026-10-04: the skill gap did not survive more data, and the gate's
+P&L is substitution.** On the 2026-10-03 snapshot over every monthly chain,
+`mean_reversion`'s skill at RSI ≥ 70 is **+0.009** [−0.026, +0.044] (weekly
+blocks), not negative; for `mean_reversion_prevailing` RSI ≥ 70 is the *best*
+bucket of best-candidate realized P/L (+0.36 of risk on 38 bars). `max_entry_rsi
+= 70` still improves both strategies in both the August and October/November
+chains (`mean_reversion` 9.9 % → 32.0 %, prevailing 45.6 % → 62.7 %), but the
+trades it removes were net −$552 and **+$2 651** respectively — the gain is the
+27 and 7 trades the freed slots take instead. A gate that wins by what it lets
+in rather than what it keeps out is path luck. It is not adopted.
+
+The same pass measured the structure sleeves (`ev_no_credit`, `naked_only`):
+
+| | return | max DD | ret/dd | Aug chain | Oct+Nov chains |
+|---|---|---|---|---|---|
+| `mean_reversion` (ev) | 9.9 % | 54.1 % | 0.18 | −$3 246 | +$6 184 |
+| no credit | 12.2 % | 53.0 % | 0.23 | −$2 905 | +$6 321 |
+| naked only | 19.1 % | **33.6 %** | 0.57 | +$1 744 | +$2 239 |
+| `mean_reversion_prevailing` (ev) | 45.6 % | 44.0 % | 1.04 | −$5 405 | +$14 846 |
+| no credit | 48.1 % | 42.6 % | 1.13 | −$4 923 | +$15 231 |
+| naked only (12 trades) | 43.4 % | **13.0 %** | 3.34 | −$1 328 | +$10 013 |
+
+Banning credit helps in all four cells, by $300–$500 each — the wrapper lesson
+again (a bearish credit spread comes back as a put debit spread). Naked-only is a
+**risk profile, not an edge**: better in the losing period, worse in the winning
+one, with drawdown cut by a third to two thirds. On the dense candidate sample no
+structure separates (intervals ±0.3 of risk) — too few sampled candidates clear
+the floors. What the losers share is how they end: 59 of `mean_reversion`'s 81
+trades close at the forecast horizon for −$23 386, the 12 that reach the forecast
+target make +$25 393. A loser is a trade that never moved.
+
 ### ATM IV is already the whole vol input; what is missing is *elevation*
 
 Worth knowing before proposing IV as a model input, because it is not merely an
