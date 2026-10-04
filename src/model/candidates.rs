@@ -30,9 +30,12 @@ pub struct CandidateConfig {
     /// Strike-distance bounds, in the underlying's units.
     pub min_width: f64,
     pub max_width: f64,
-    /// Each leg's |delta| must lie in `[min_leg_delta, 1 − min_leg_delta]`. Keeps
-    /// the ranker on the near-money ladder every weekly capture collects, rather
-    /// than on far wings an older, wider capture happened to hold. 0 disables it.
+    /// Each leg's |delta| must lie in `[min_leg_delta, 1 − min_leg_delta]`. The
+    /// floor keeps the ranker on the near-money ladder every weekly capture
+    /// collects, rather than on far wings an older, wider capture happened to
+    /// hold; the ceiling keeps a short leg from opening deep in the money, where
+    /// early assignment lives. Default 0.20; 0 disables it. `fixed_legs` are
+    /// exempt — their strikes are the rule.
     pub min_leg_delta: f64,
     /// A leg's relative bid/ask spread `(ask - bid) / mid` may not exceed this.
     pub max_relative_spread: f64,
@@ -88,7 +91,7 @@ impl Default for CandidateConfig {
             allow_naked_long: true,
             min_width: 0.0,
             max_width: f64::INFINITY,
-            min_leg_delta: 0.0,
+            min_leg_delta: 0.20,
             max_relative_spread: 0.5,
             max_loss: 500.0,
             min_reward_risk: None,
@@ -591,6 +594,7 @@ mod tests {
             allow_strangle: true,
             allow_iron_condor: true,
             allow_iron_butterfly: true,
+            min_leg_delta: 0.0, // every combination, not the tradeable band
             max_relative_spread: 1.0,
             max_loss: 10_000.0,
             ..CandidateConfig::default()

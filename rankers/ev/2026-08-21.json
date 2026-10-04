@@ -2,8 +2,8 @@
   "label": "ev",
   "model_label": "mean-reversion",
   "dataset": "2026-08-21",
-  "spearman": 0.38287231517516096,
+  "spearman": 0.4157957799902934,
   "decile_monotonicity": 1.0,
   "passed": true,
-  "evaluated_at": "2026-09-26T19:07:39.067878Z"
+  "evaluated_at": "2026-10-04T05:54:25.920502Z"
 }

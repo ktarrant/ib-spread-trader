@@ -240,12 +240,20 @@ loop must filter on `(symbol, expiry)` itself.
 On `mean_reversion` about half the entries take an interpolated leg — roughly
 the share of interpolated strikes in the ladder, so the ranker does not favour
 them. Interpolation does **not** pull the ranker toward the money: the median
-trade still has a leg ~10 % from spot. `candidates.min_leg_delta` (off by
-default) is that lever. At 0.20, on the 2026-10-03 snapshot over every monthly
-chain: `mean_reversion` −$11 409 → +$1 138 (legs >8 % out 50 → 25),
-`mean_reversion_prevailing` +$5 313 → +$7 237, `vol_timing` −$1 226 → +$3 620.
-Three of three in one direction, on 16–94 trades and one snapshot — a lead, not
-a default.
+trade still has a leg ~10 % from spot. `candidates.min_leg_delta` is that lever,
+and **0.20 is the default for every ranker**: each leg's |delta| must sit in
+0.20–0.80. The floor keeps entries on the near-money ladder every weekly capture
+collects; the ceiling keeps a short leg from opening deep in the money, where
+early assignment lives. `fixed_legs` (the skewed condor) are exempt — their
+strikes are the rule. A ranker opts out with `min_leg_delta = 0.0`.
+
+It was adopted on that structural argument, not on P&L. The P&L agreed, at 0.20
+on the 2026-10-03 snapshot over every monthly chain: `mean_reversion` −$11 409 →
++$1 138 (legs >8 % out 50 → 25), `mean_reversion_prevailing` +$5 313 → +$7 237,
+`vol_timing` −$1 226 → +$3 620 — three of three, on 16–94 trades. The ranker
+records still pass with the band on; `credit_pop`'s Spearman falls most (0.45 →
+0.38 August, 0.56 → 0.44 October), since its far-OTM shorts were the easiest
+candidates to order and the band removes them.
 
 ## Expiry settlement is reported apart from traded P&L
 
@@ -1571,8 +1579,8 @@ interim worst case.
 enumerated -> priceable -> liquid -> within-loss -> positive-EV -> above-min-score
 -> above-min-pop -> chosen — and the report surfaces it beside the trade log, the way
 `signal_diagnostics` surfaces the staged gates. On the reference snapshot,
-`mean_reversion.toml` prices 36 056 719 candidate verticals (8 732 187 before
-interpolated strikes) down to 51 taken. The
+`mean_reversion.toml` prices 18 501 657 candidate verticals (8 732 187 before
+interpolated strikes and the 0.20 leg-delta band) down to 49 taken. The
 model decides how many bars hold a position and so are *not* enumerating, which
 is why a more-selective model can enumerate more, not less. A ranked run whose
 `chosen` is a rounding error against `enumerated` has been floored, not
