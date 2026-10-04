@@ -16,6 +16,10 @@ chunk, model, prompt version) in a file beside the snapshots — never in the
 snapshot — so reruns are free and a newer model is a new record, not a
 silent replacement.
 
+**The viz reads this cache** (`~/ib-option-viz/src/optionviz/news.py`, the
+Chart page's news strip): the `calls` columns and `news_schema.json`'s fields
+are a contract with it. It shows the newest prompt version only.
+
     python3 scripts/news_score.py --since 2026-09-01 --limit 3   # a few windows
     python3 scripts/news_score.py --since 2026-06-01 --jobs 4    # resumable
     python3 scripts/news_score.py --dry-run --since 2026-09-15   # print a prompt
