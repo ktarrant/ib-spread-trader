@@ -258,8 +258,10 @@ pub struct ChainSeries {
     pub underlying_quality: Quality,
     /// "5min" or "30min" — resolution of `signal_underlying`.
     pub underlying_bar_size: String,
-    /// Minutes per option bar: 15 or 30, whichever the capture took. The finest
-    /// wins when a chain has both. Execution runs at this resolution.
+    /// Minutes per option bar: 15 or 30, whichever the capture took. When a chain
+    /// has both, the finest wins if it spans the coarser tape; otherwise it is
+    /// folded to the coarser one, which fills its gaps. Execution runs at this
+    /// resolution.
     pub bar_minutes: i64,
     /// Earnings dates within the backtest window, sorted ascending.
     pub earnings: Vec<EarningsEvent>,
@@ -270,10 +272,36 @@ impl ChainSeries {
         let symbol = normalize_symbol(symbol);
         let expiry_text = expiry.format("%Y-%m-%d").to_string();
 
-        let bar_size = option_bar_size(snapshot, &symbol, &expiry_text)?;
-        let bar_minutes: i64 = bar_size.trim_end_matches("min").parse()?;
-        let (quotes, option_quality) =
-            load_option_quotes(snapshot, &symbol, &expiry_text, bar_size)?;
+        let mut sizes = option_bar_sizes(snapshot, &symbol, &expiry_text)?.into_iter();
+        let finest = sizes.next().unwrap_or(OPTION_BAR_SIZES[OPTION_BAR_SIZES.len() - 1]);
+        let mut bar_minutes = bar_minutes_of(finest)?;
+        let (mut quotes, mut option_quality) =
+            load_option_quotes(snapshot, &symbol, &expiry_text, finest)?;
+        // A coarser tape reaching bars the finer one does not (a capture taken at
+        // the wrong size) is not discarded: the finer tape folds onto its grid and
+        // it fills the gaps. One spanning the finer tape adds nothing and is skipped.
+        for size in sizes {
+            let (coarse, quality) = load_option_quotes(snapshot, &symbol, &expiry_text, size)?;
+            let span = |q: &[RawQuote]| q.first().zip(q.last()).map(|(a, b)| (a.ts, b.ts));
+            let covered = match (span(&quotes), span(&coarse)) {
+                (_, None) => true,
+                (Some((a, b)), Some((c, d))) => a <= c && b >= d,
+                (None, Some(_)) => false,
+            };
+            if covered {
+                continue;
+            }
+            let minutes = bar_minutes_of(size)?;
+            fold_quotes(&mut quotes, bar_minutes, minutes);
+            let have: BTreeSet<DateTime<Utc>> = quotes.iter().map(|q| q.ts).collect();
+            quotes.extend(coarse.into_iter().filter(|q| !have.contains(&q.ts)));
+            // Stable: each source is already ordered by strike within a timestamp.
+            quotes.sort_by_key(|q| q.ts);
+            option_quality.add(&quality);
+            bar_minutes = minutes;
+        }
+        let bar_size = format!("{bar_minutes}min");
+        let bar_size = bar_size.as_str();
         let (native, native_quality) = load_underlying(snapshot, &symbol, bar_size)?;
         let (five_minute, five_minute_quality) = load_underlying(snapshot, &symbol, "5min")?;
         // Native stock bars when they reach the chain's last option bar; else the
@@ -316,20 +344,13 @@ impl ChainSeries {
     }
 
     /// Fold the option tape to `minutes`-wide bars, so a chain can share a
-    /// timeline with coarser ones. A bar's quote is its close, so the finer bar
-    /// that closes on a `minutes` boundary *is* the coarser bar's quote; it is
-    /// kept and relabelled to the coarser bar's start, and the rest are dropped.
-    /// The underlying is refolded from the finest stock tape to match.
+    /// timeline with coarser ones (see `fold_quotes`). The underlying is refolded
+    /// from the finest stock tape to match.
     pub fn coarsen(&mut self, minutes: i64) {
         if minutes <= self.bar_minutes {
             return;
         }
-        let shift = chrono::Duration::minutes(minutes - self.bar_minutes);
-        let close = chrono::Duration::minutes(self.bar_minutes);
-        self.quotes.retain(|q| (q.ts + close).timestamp() % (minutes * 60) == 0);
-        for quote in &mut self.quotes {
-            quote.ts -= shift;
-        }
+        fold_quotes(&mut self.quotes, self.bar_minutes, minutes);
         self.blocks = blocks(&self.quotes);
         self.underlying = resample(&self.signal_underlying, minutes);
         self.bar_minutes = minutes;
@@ -562,21 +583,38 @@ GROUP BY b.ts
 ORDER BY b.ts
 "#;
 
-/// The finest option bar size the capture took for this chain, or the coarsest
+/// The option bar sizes the capture took for this chain, finest first. Empty
 /// when it took none (an empty chain loads empty either way).
-fn option_bar_size(snapshot: &Snapshot, symbol: &str, expiry: &str) -> Result<&'static str> {
+fn option_bar_sizes(snapshot: &Snapshot, symbol: &str, expiry: &str) -> Result<Vec<&'static str>> {
     let mut stmt = snapshot.conn().prepare(
         "SELECT 1 FROM bars b JOIN contracts c ON c.id = b.contract_id
          WHERE c.kind = 'option' AND c.symbol = ?1 AND c.expiry = ?2
            AND b.bar_size = ?3 AND b.data_type = 'bid'
          LIMIT 1",
     )?;
+    let mut sizes = Vec::new();
     for size in OPTION_BAR_SIZES {
         if stmt.exists((symbol, expiry, size))? {
-            return Ok(size);
+            sizes.push(size);
         }
     }
-    Ok(OPTION_BAR_SIZES[OPTION_BAR_SIZES.len() - 1])
+    Ok(sizes)
+}
+
+fn bar_minutes_of(size: &str) -> Result<i64> {
+    Ok(size.trim_end_matches("min").parse()?)
+}
+
+/// Fold an option tape from `from`- to `to`-minute bars. A bar's quote is its
+/// close, so the finer bar that closes on a `to` boundary *is* the coarser bar's
+/// quote: it is kept and relabelled to the coarser bar's start, the rest dropped.
+fn fold_quotes(quotes: &mut Vec<RawQuote>, from: i64, to: i64) {
+    let shift = chrono::Duration::minutes(to - from);
+    let close = chrono::Duration::minutes(from);
+    quotes.retain(|q| (q.ts + close).timestamp() % (to * 60) == 0);
+    for quote in quotes.iter_mut() {
+        quote.ts -= shift;
+    }
 }
 
 /// Fold consecutive stock bars into one: first open, extreme high and low, last
@@ -938,6 +976,42 @@ mod tests {
 
     fn expiry() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 8, 21).unwrap()
+    }
+
+    /// Add 15-minute quotes for the strike-100 pair at the given bar starts.
+    fn add_fifteen(path: &std::path::Path, starts: &[&str]) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        for ts in starts {
+            for id in [2, 3] {
+                for (kind, close) in [("bid", 4.9), ("ask", 5.1)] {
+                    conn.execute(
+                        "INSERT INTO bars (contract_id, ts, bar_size, data_type, open, high, low, close, volume)
+                         VALUES (?1, ?2, '15min', ?3, ?4, ?4, ?4, ?4, 0)",
+                        rusqlite::params![id, ts, kind, close],
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_fine_tape_that_stops_short_folds_into_the_coarse_one() {
+        // 15-minute bars end before the 30-minute tape begins: the 13:15 bar
+        // closes at 13:30, so it is the 13:00 thirty-minute quote; 13:00 is dropped.
+        let path = fixture("mixed-short");
+        add_fifteen(&path, &["2026-07-01T13:00:00+00:00", "2026-07-01T13:15:00+00:00"]);
+        let series = ChainSeries::load(&Snapshot::open(&path).unwrap(), "test", expiry()).unwrap();
+        assert_eq!(series.bar_minutes, 30);
+        let ts: Vec<String> = series.timestamps().map(|t| t.format("%H:%M").to_string()).collect();
+        assert_eq!(ts, ["13:00", "13:30", "14:00"]);
+
+        // 15-minute bars spanning the 30-minute tape keep the chain at 15.
+        let path = fixture("mixed-spanning");
+        add_fifteen(&path, &["2026-07-01T13:30:00+00:00", "2026-07-01T14:15:00+00:00"]);
+        let series = ChainSeries::load(&Snapshot::open(&path).unwrap(), "test", expiry()).unwrap();
+        assert_eq!(series.bar_minutes, 15);
+        assert_eq!(series.len(), 2);
     }
 
     #[test]

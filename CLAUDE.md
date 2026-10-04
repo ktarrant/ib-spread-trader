@@ -358,6 +358,18 @@ relabelled; the rest are dropped. On the 2026-09-26 snapshot this is what lets t
 30-minute August and 15-minute October chains run as one dataset, at the cost of
 October filling 30 minutes after a decision rather than 15.
 
+**15 minutes is the operating cadence; 30-minute option captures are legacy.**
+The 2026-10-03 capture was taken at 30 minutes by mistake, so the October chain
+holds 15-minute bars to 09-25 and 30-minute bars to 10-01. A chain with both
+keeps its finest tape when that tape spans the coarser one; otherwise the finer
+tape is folded onto the coarser grid at load and the coarser fills its gaps, so
+no captured week is dropped. The 30-minute pass also took a *different* strike
+set (IWM 250–310 against 265–305), so legs opened on the 15-minute ladder can go
+unquoted across the seam and exit at intrinsic. The report counts those as
+synthetic exits. A variable-cadence timeline (15 where captured, 30 elsewhere)
+was judged not worth its cost while every dataset still includes a 30-minute
+chain.
+
 - **Execution runs on every option bar**: fills, marks, P&L exits. A decision
   fills 15 minutes later instead of 30. `bars_held` counts option bars, so it
   doubles on a 15-minute tape for the same holding time.

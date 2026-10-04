@@ -4,4 +4,4 @@
 # each new monthly expiry here as captures land. A symbol without a given chain
 # runs on the ones it has (the report names what was missing).
 symbols = ["SPY", "QQQ", "IWM", "AAPL", "AMZN", "META", "NVDA", "TSLA", "AMD", "COIN", "MSTR", "PLTR", "XOM", "GS", "BA", "UBER", "NFLX"]
-expiries = ["2026-08-21", "2026-10-16"]
+expiries = ["2026-08-21", "2026-10-16", "2026-11-20"]
