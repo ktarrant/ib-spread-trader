@@ -1,16 +1,18 @@
-# `ev_no_credit` with a higher score floor: debit verticals and naked longs only,
-# each needing E[P/L] of at least 6 % of its max loss.
+# `ev` with a higher score floor: each candidate needs E[P/L] of at least 6 % of
+# its max loss. Credit spreads stay allowed — at this floor they are nearly all
+# gone anyway (they are the structure the ranker picks on its weakest views, so
+# they score lowest), and a separate ban changed almost nothing.
 #
 # Chosen as a risk setting, not for return. On the prevailing model over every
-# monthly chain (2026-10-03 snapshot) the floor sweep ran 0.02 / 0.03 / 0.04 /
-# 0.06 / 0.08 → 48.1 / 17.2 / 8.0 / 19.1 / 10.0 % return and 42.6 / 48.4 / 44.1 /
-# 30.7 / 10.8 % max drawdown: no higher floor beats 0.02 on return — the score
-# orders candidates within a bar but does not compare across bars — and 0.06 is
-# the lowest drawdown that still leaves a usable trade count (15).
+# monthly chain (2026-10-03 snapshot, credit allowed) the floor sweep ran 0.02 /
+# 0.03 / 0.04 / 0.06 / 0.08 → 45.9 / 17.7 / 13.1 / 17.8 / 11.5 % return and
+# 44.0 / 39.8 / 42.4 / 32.3 / 18.7 % max drawdown: no higher floor beats 0.02 on
+# return — the score orders candidates within a bar but does not compare across
+# bars — and 0.06 cuts drawdown while leaving a usable trade count (14).
 [candidates]
 rights = ["call", "put"]
 allow_debit = true
-allow_credit = false
+allow_credit = true
 allow_naked_long = true
 min_width = 0.0
 max_relative_spread = 0.35

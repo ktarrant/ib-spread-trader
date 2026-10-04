@@ -870,13 +870,17 @@ the floors. What the losers share is how they end: 59 of `mean_reversion`'s 81
 trades close at the forecast horizon for −$23 386, the 12 that reach the forecast
 target make +$25 393. A loser is a trade that never moved.
 
-**Every mean-reversion strategy runs credit-free** (`ev_no_credit`, and
-`prob_profit` with `allow_credit = false`) **except `mean_reversion_prevailing`**,
-which keeps `ev` and the 0.02 floor; `driftless` keeps `ev` and the `credit_pop`
-family stays the credit experiment it is. `mean_reversion_prevailing_conservative`
-is the prevailing model on `ev_conservative`: credit-free with a 0.06 floor,
-chosen as a risk setting — the floor sweep (0.02 → 0.08) never beat 0.02 on
-return, and 0.06 cuts drawdown 42.6 % → 30.7 % at 15 trades (19.1 % return). And the debit sleeve is
+**The credit-free policy was tried and reverted.** Every mean-reversion
+strategy ran on `ev_no_credit` for a day; it is back on `ev` because the gain was
+path, not edge (below), and because a higher score floor removes credit spreads
+by itself — they are what the ranker picks on its weakest views, so they score
+lowest. `mean_reversion_prevailing_conservative` is the prevailing model on
+`ev_conservative`: `ev` with a 0.06 floor, credit allowed, chosen as a risk
+setting — the floor sweep (0.02 → 0.08) never beat 0.02 on return, and 0.06
+cuts drawdown 44.0 % → 32.3 % at 14 trades (17.8 % return). `ev_no_credit`
+remains as a label.
+
+And the debit sleeve is
 not the steady earner it looks like — per dollar at risk, on the credit-free
 runs:
 
@@ -1954,7 +1958,7 @@ isolates that axis:
 | `exit_pop_trailing.toml` / `exit_momentum.toml` | exit | Structure-scoped give-ups: live-POP on debits, trailing vs momentum on nakeds. |
 | `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
 | `mean_reversion_prevailing.toml` | model | Fade a spike only against the 5-session prevailing trend. Oct-expiry +70.7 %, Aug-expiry −17.7 %; in the frontier. |
-| `mean_reversion_prevailing_conservative.toml` | ranker | The prevailing model credit-free with a 0.06 score floor (`ev_conservative`): lower drawdown, fewer trades. In the frontier. |
+| `mean_reversion_prevailing_conservative.toml` | ranker | The prevailing model with a 0.06 score floor (`ev_conservative`): lower drawdown, fewer trades. In the frontier. |
 | `mean_reversion_no_horizon.toml` | exit | The base without the forecast-horizon cap. Halves the loss; nakeds gain, debit spreads lose. |
 | `naked_rsi_trailing.toml` | model+ranker+exit | Nakeds at RSI extremes on a trailing stop. Loses 53.9 %; the overbought half is 9/10 of it. |
 | `naked_rsi_recovery.toml` / `_tight.toml` | execution | Enter after RSI turns up through 30, within N bars. First positive arms — and one trade is ~all of it. |

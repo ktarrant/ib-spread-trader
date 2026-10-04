@@ -1,6 +1,6 @@
-# mean_reversion_prevailing, conservative: no credit spreads, and a 0.06 score
-# floor (see rankers/ev_conservative.toml). A risk setting — lower drawdown and
-# far fewer trades than the base prevailing model, not a better forecast.
+# mean_reversion_prevailing, conservative: a 0.06 score floor (see
+# rankers/ev_conservative.toml). A risk setting — lower drawdown and far fewer
+# trades than the base prevailing model, not a better forecast.
 name      = "mean-reversion-prevailing-conservative"
 mode      = "ranked"
 model     = "mean-reversion-prevailing"

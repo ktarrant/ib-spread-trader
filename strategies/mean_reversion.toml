@@ -2,7 +2,7 @@
 name      = "mean-reversion"
 mode      = "ranked"
 model     = "mean-reversion"
-ranker    = "ev_no_credit"
+ranker    = "ev"
 portfolio = "shared_20k"
 exit      = "base"
 dataset   = "2026-08-21"
