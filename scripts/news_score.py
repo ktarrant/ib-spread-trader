@@ -2,8 +2,9 @@
 """Score headlines with an LLM, the way a live trader would as they arrive.
 
 **Point-in-time by construction.** Headlines are batched by decision window —
-each 15-minute RTH slot (09:30-16:00 New York), and one window from the close to
-the next 09:30 covering nights and weekends. One call sees every story published
+each 30-minute RTH slot (09:30-16:00 New York; the forecast reads features
+every 30 minutes, so a finer window buys nothing), and one window from the
+close to the next 09:30 covering nights and weekends. One call sees every story published
 in its window (all symbols, deduplicated across feeds and tickers) plus each
 named symbol's stories from the prior 72 hours, and is told "now" is the window
 end. Nothing in a call is later than the bar that will read its output, so a
@@ -52,7 +53,8 @@ SCHEMA = Path(__file__).resolve().parent / "news_schema.json"
 CACHE = Path.home() / "Documents/Options Database/news-llm.sqlite3"
 MODEL = "gpt-5.6-sol"
 EFFORT = "low"
-PROMPT_VERSION = "v5"
+PROMPT_VERSION = "v6"
+WINDOW_MINUTES = 30  # the forecast's cadence: a finer window buys the backtest nothing
 CONTEXT_HOURS = 72
 CONTEXT_PER_SYMBOL = 25
 CHUNK = 40
@@ -103,8 +105,8 @@ def window_end(t: dt.datetime) -> dt.datetime:
     ny = t.astimezone(NY)
     open_, close = ny.replace(hour=9, minute=30, second=0, microsecond=0), ny.replace(hour=16, minute=0, second=0, microsecond=0)
     if ny.weekday() < 5 and open_ < ny <= close:
-        slots = -(-(ny - open_) // dt.timedelta(minutes=15))  # ceil
-        return (open_ + slots * dt.timedelta(minutes=15)).astimezone(dt.timezone.utc)
+        step = dt.timedelta(minutes=WINDOW_MINUTES)
+        return (open_ + -(-(ny - open_) // step) * step).astimezone(dt.timezone.utc)  # ceil
     day = open_ if ny <= open_ else open_ + dt.timedelta(days=1)
     while day.weekday() >= 5:
         day += dt.timedelta(days=1)
@@ -114,8 +116,9 @@ def window_end(t: dt.datetime) -> dt.datetime:
 def check_windows() -> None:
     """The point-in-time guarantee rests on this boundary rule; pin it."""
     u = dt.datetime.fromisoformat
-    for at, end in (("2026-09-15T13:31:00+00:00", "2026-09-15T13:45:00+00:00"),  # 09:31 NY
-                    ("2026-09-15T13:45:00+00:00", "2026-09-15T13:45:00+00:00"),  # (start, end]
+    for at, end in (("2026-09-15T13:31:00+00:00", "2026-09-15T14:00:00+00:00"),  # 09:31 NY
+                    ("2026-09-15T14:00:00+00:00", "2026-09-15T14:00:00+00:00"),  # (start, end]
+                    ("2026-09-15T14:01:00+00:00", "2026-09-15T14:30:00+00:00"),
                     ("2026-09-15T13:30:00+00:00", "2026-09-15T13:30:00+00:00"),  # 09:30 closes the night
                     ("2026-09-15T20:01:00+00:00", "2026-09-16T13:30:00+00:00"),  # after the close
                     ("2026-09-18T21:00:00+00:00", "2026-09-21T13:30:00+00:00"),  # Friday night
@@ -196,16 +199,30 @@ def prompt(end, universe, context, chunk) -> str:
     return "\n".join(lines)
 
 
-def codex(text: str, model: str, effort: str) -> dict:
+class UsageLimit(RuntimeError):
+    """The subscription's usage window is spent; every further call fails."""
+
+
+def codex(text: str, model: str, effort: str) -> tuple[dict, dict | None]:
+    """The model's answer and the call's token usage (None if not reported).
+    The user's config.toml is skipped: nothing of it belongs in a scoring call."""
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "out.json"
-        cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only", "-C", tmp,
-               "-m", model, "-c", f"model_reasoning_effort={effort}",
+        cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--json",
+               "-s", "read-only", "-C", tmp, "-m", model, "-c", f"model_reasoning_effort={effort}",
                "--output-schema", str(SCHEMA), "-o", str(out), "-"]
-        res = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=900)
+        res = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=300)
+        if "usage limit" in res.stderr + res.stdout:
+            raise UsageLimit(next(l for l in (res.stderr + res.stdout).splitlines() if "usage limit" in l))
         if res.returncode != 0 or not out.exists():
             raise RuntimeError(f"codex exited {res.returncode}: {res.stderr[-500:] or res.stdout[-500:]}")
-        return json.loads(out.read_text())
+        usage = None
+        for line in res.stdout.splitlines():
+            try:
+                usage = json.loads(line).get("usage") or usage
+            except (ValueError, AttributeError):
+                pass
+        return json.loads(out.read_text()), usage
 
 
 def open_cache(path: Path) -> sqlite3.Connection:
@@ -215,6 +232,8 @@ def open_cache(path: Path) -> sqlite3.Connection:
         effort TEXT NOT NULL, items_json TEXT NOT NULL, prompt TEXT NOT NULL, raw_json TEXT NOT NULL,
         seconds REAL NOT NULL, created_at TEXT NOT NULL,
         PRIMARY KEY (window_end, chunk, model, prompt_version))""")
+    if "usage_json" not in [r[1] for r in db.execute("PRAGMA table_info(calls)")]:
+        db.execute("ALTER TABLE calls ADD COLUMN usage_json TEXT")
     return db
 
 
@@ -286,27 +305,44 @@ def main() -> None:
         for attempt in range(2):
             try:
                 return c, codex(c["prompt"], args.model, args.effort), time.time() - t0
+            except UsageLimit as e:
+                return c, e, time.time() - t0
             except Exception as e:  # one retry, then report and move on
                 err = e
         return c, err, time.time() - t0
 
-    failed = 0
-    with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
-        for n, (c, res, secs) in enumerate(pool.map(run, todo), 1):
-            if isinstance(res, Exception):
-                failed += 1
-                print(f"[{n}/{len(todo)}] {c['window_end']:%Y-%m-%d %H:%M} FAILED: {res}", file=sys.stderr)
-                continue
-            items_json = json.dumps([dict(key=it["key"], at=it["at"].isoformat(), title=it["title"],
-                                          symbols=sorted(it["symbols"]), providers=sorted(it["providers"]))
-                                     for it in c["items"]])
-            cache.execute("INSERT OR REPLACE INTO calls VALUES (?,?,?,?,?,?,?,?,?,?)", (
-                c["window_end"].isoformat(), c["chunk"], args.model, PROMPT_VERSION, args.effort, items_json,
-                c["prompt"], json.dumps(res), secs, dt.datetime.now(dt.timezone.utc).isoformat()))
-            cache.commit()
-            print(f"[{n}/{len(todo)}] {c['window_end']:%Y-%m-%d %H:%M} {len(c['items'])} items {secs:.0f}s",
-                  file=sys.stderr)
-    print(json.dumps(dict(calls=len(todo), failed=failed, cache=str(args.cache))))
+    # Saved as each call finishes, so one slow call never holds finished ones in memory.
+    failed, limit = 0, None
+    pool = concurrent.futures.ThreadPoolExecutor(args.jobs)
+    futures = [pool.submit(run, c) for c in todo]
+    for n, fut in enumerate(concurrent.futures.as_completed(futures), 1):
+        c, res, secs = fut.result()
+        if isinstance(res, UsageLimit):
+            if limit is None:
+                limit = res
+                pool.shutdown(wait=False, cancel_futures=True)
+            continue
+        if isinstance(res, Exception):
+            failed += 1
+            print(f"[{n}/{len(todo)}] {c['window_end']:%Y-%m-%d %H:%M} FAILED: {res}", file=sys.stderr)
+            continue
+        res, usage = res
+        items_json = json.dumps([dict(key=it["key"], at=it["at"].isoformat(), title=it["title"],
+                                      symbols=sorted(it["symbols"]), providers=sorted(it["providers"]))
+                                 for it in c["items"]])
+        cache.execute(
+            "INSERT OR REPLACE INTO calls (window_end, chunk, model, prompt_version, effort, items_json, prompt,"
+            " raw_json, seconds, created_at, usage_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
+            c["window_end"].isoformat(), c["chunk"], args.model, PROMPT_VERSION, args.effort, items_json,
+            c["prompt"], json.dumps(res), secs, dt.datetime.now(dt.timezone.utc).isoformat(),
+            json.dumps(usage) if usage else None))
+        cache.commit()
+        print(f"[{n}/{len(todo)}] {c['window_end']:%Y-%m-%d %H:%M} {len(c['items'])} items {secs:.0f}s",
+              file=sys.stderr)
+    if limit:
+        print(f"stopped: {limit} — rerun the same command to resume", file=sys.stderr)
+    print(json.dumps(dict(calls=len(todo), failed=failed, usage_limit=bool(limit), cache=str(args.cache))))
+    sys.exit(2 if limit else 0)
 
 
 if __name__ == "__main__":
