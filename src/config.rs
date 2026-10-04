@@ -1094,6 +1094,8 @@ pub struct CandidatesConfig {
     pub allow_naked_long: bool,
     pub min_width: f64,
     pub max_width: Option<f64>,
+    /// See `CandidateConfig::min_leg_delta`.
+    pub min_leg_delta: f64,
     pub max_relative_spread: f64,
     pub max_loss: f64,
     /// Band on `max_profit / max_loss`. See `CandidateConfig`.
@@ -1123,6 +1125,7 @@ impl Default for CandidatesConfig {
             min_width: d.min_width,
             // The runtime default is unbounded; expose that as "no cap".
             max_width: None,
+            min_leg_delta: d.min_leg_delta,
             max_relative_spread: d.max_relative_spread,
             max_loss: d.max_loss,
             min_reward_risk: d.min_reward_risk,
@@ -1158,6 +1161,9 @@ impl CandidatesConfig {
         if self.max_loss.is_nan() || self.max_loss <= 0.0 {
             bail!("`candidates.max_loss` must be positive");
         }
+        if !(0.0..0.5).contains(&self.min_leg_delta) {
+            bail!("`candidates.min_leg_delta` must be in [0, 0.5)");
+        }
         if let (Some(lo), Some(hi)) = (self.min_reward_risk, self.max_reward_risk)
             && lo > hi
         {
@@ -1170,6 +1176,7 @@ impl CandidatesConfig {
             allow_naked_long: self.allow_naked_long,
             min_width: self.min_width,
             max_width: self.max_width.unwrap_or(f64::INFINITY),
+            min_leg_delta: self.min_leg_delta,
             max_relative_spread: self.max_relative_spread,
             max_loss: self.max_loss,
             min_reward_risk: self.min_reward_risk,

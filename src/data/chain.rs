@@ -182,6 +182,40 @@ impl ChainSnapshot {
         interp_smile_iv(&self.otm_smile(), 0.0)
     }
 
+    /// A quote for a strike this bar did not print, estimated from the ones it
+    /// did: Black-76 at the OTM smile's vol for that strike, crossed by the
+    /// absolute bid/ask spread of the nearest quoted strike of the same right.
+    /// `None` when the bar has no smile. Only ever used to mark or close — a
+    /// position cannot be opened against a price nobody quoted.
+    // ponytail: the smile is held flat past the quoted wings, which underprices a
+    // far-OTM put on a steep skew; extrapolate the wing slope if that shows up.
+    pub fn estimate_quote(
+        &self,
+        contract_id: i64,
+        strike: f64,
+        right: OptionRight,
+    ) -> Option<OptionQuote> {
+        let vol = interp_smile_iv(&self.otm_smile(), (strike / self.forward).ln())?;
+        let nearest = self
+            .quotes
+            .iter()
+            .filter(|q| q.right == right)
+            .min_by(|a, b| (a.strike - strike).abs().total_cmp(&(b.strike - strike).abs()))?;
+        let half = 0.5 * (nearest.ask - nearest.bid);
+        let (t, is_call) = (self.year_fraction, right.is_call());
+        let mid = pricing::black76(self.forward, strike, t, vol, is_call);
+        Some(OptionQuote {
+            contract_id,
+            strike,
+            right,
+            bid: (mid - half).max(0.0),
+            ask: mid + half,
+            mid,
+            implied_vol: Some(vol),
+            delta: pricing::delta(self.forward, strike, t, vol, is_call),
+        })
+    }
+
     /// Put/call skew: OTM put IV minus OTM call IV at a symmetric distance from
     /// the money (`moneyness` is a log-moneyness magnitude, e.g. 0.05 for ~5%).
     /// Positive is the usual equity shape — downside protection bid richer than

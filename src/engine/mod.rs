@@ -2814,11 +2814,36 @@ expiry_choice = "{choice}"
         assert!(example.contains("closest quoted"), "{example}");
     }
 
-    /// When option quotes disappear but a time-based exit rule fires, the
-    /// engine closes the position at intrinsic rather than letting it ride to
-    /// expiry settlement.
+    /// The fixture ladder is Black-76 at one vol, so the smile is flat and a
+    /// strike struck from the bar — near the money or on a wing, where the smile
+    /// is extrapolated — is recovered at its own mid, crossed by its neighbour's
+    /// spread.
     #[test]
-    fn unquoted_legs_close_at_intrinsic_when_a_time_rule_fires() {
+    fn an_unquoted_strike_is_estimated_off_the_smile() {
+        let (_snap, series) = series("estimate", &v_shaped_path(), 120.0);
+        let full = series.snapshot(40).unwrap();
+        // The far OTM put, a near-money strike, and the far OTM call. (Deep ITM
+        // is off by the fixture's 6c floor on its OTM twin, through parity.)
+        let last = full.quotes.len() - 1;
+        let picks = [
+            full.quotes.iter().position(|q| !q.right.is_call()).unwrap(),
+            full.quotes.len() / 2,
+            full.quotes.iter().rposition(|q| q.right.is_call()).unwrap().min(last),
+        ];
+        for index in picks {
+            let mut bar = full.clone();
+            let real = bar.quotes.remove(index);
+            let est = bar.estimate_quote(real.contract_id, real.strike, real.right).unwrap();
+            assert!((est.mid - real.mid).abs() < 0.02, "{} {:?}", real.strike, (est.mid, real.mid));
+            assert!(est.bid <= est.mid && est.mid < est.ask);
+        }
+    }
+
+    /// When the held strikes stop quoting but the wings still do, the legs are
+    /// priced off the bar's smile, so a time-based exit closes on an estimate
+    /// with time value rather than at intrinsic.
+    #[test]
+    fn unquoted_legs_close_on_the_smile_when_a_time_rule_fires() {
         let path = v_shaped_path(); // 81 bars, ~1.7 days from Jul 1
         // ATM-ish strikes (±20 of spot) go quiet after bar 40. The position
         // opens around bar 31. A very generous min_days_before_expiry fires
@@ -2847,20 +2872,16 @@ expiry_choice = "{choice}"
         .unwrap();
 
         assert_eq!(run.census.triggers, 1, "one RSI crossing");
-        assert_eq!(
-            run.census.synthetic_exits, 1,
-            "closed at intrinsic when quotes vanished"
-        );
+        assert_eq!(run.census.synthetic_exits, 0, "the smile priced it, not intrinsic");
         assert_eq!(run.portfolio.closed.len(), 1);
 
         let trade = &run.portfolio.closed[0];
-        assert!(trade.synthetic_price, "flagged as synthetic");
+        assert!(trade.estimated_price && !trade.synthetic_price, "flagged as estimated");
         assert_eq!(trade.exit_reason, ExitReason::BeforeExpiry);
     }
 
-    /// When option quotes disappear but the underlying crosses the short
-    /// strike, the engine should close at intrinsic via the short-strike
-    /// rule — not wait for a time-based exit or ride to expiry.
+    /// When the held strikes stop quoting and the underlying crosses the short
+    /// strike, the short-strike rule still fires, priced off the smile.
     #[test]
     fn unquoted_legs_close_at_short_strike_when_underlying_crosses_it() {
         let path = v_shaped_path(); // down 25, up 55 → ends at ~113
@@ -2887,14 +2908,11 @@ expiry_choice = "{choice}"
         .unwrap();
 
         assert_eq!(run.census.triggers, 1, "one RSI crossing");
-        assert_eq!(
-            run.census.synthetic_exits, 1,
-            "closed at intrinsic when underlying crossed short strike"
-        );
+        assert_eq!(run.census.synthetic_exits, 0, "the smile priced it, not intrinsic");
         assert_eq!(run.portfolio.closed.len(), 1);
 
         let trade = &run.portfolio.closed[0];
-        assert!(trade.synthetic_price, "flagged as synthetic");
+        assert!(trade.estimated_price && !trade.synthetic_price, "flagged as estimated");
         assert_eq!(trade.exit_reason, ExitReason::UnderlyingPastShortStrike);
     }
 }

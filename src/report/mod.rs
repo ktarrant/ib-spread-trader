@@ -514,6 +514,19 @@ fn caveats(
             if n == 1 { "" } else { "s" },
         ));
     }
+    let estimated: Vec<&ClosedTrade> = runs
+        .iter()
+        .flat_map(|run| &run.portfolio.closed)
+        .filter(|t| t.estimated_price)
+        .collect();
+    if !estimated.is_empty() {
+        out.push(format!(
+            "{} exit(s) priced a leg the closing bar did not quote off that bar's vol \
+             smile, for ${:.2} of P&L — a model price, not a market one.",
+            estimated.len(),
+            estimated.iter().map(|t| t.pnl).sum::<f64>(),
+        ));
+    }
     let untraded: Vec<&str> = runs
         .iter()
         .filter(|run| run.portfolio.closed.is_empty())
