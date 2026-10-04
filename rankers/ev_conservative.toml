@@ -1,14 +1,15 @@
 # `ev` with a higher score floor: each candidate needs E[P/L] of at least 6 % of
 # its max loss. Credit spreads stay allowed — at this floor they are nearly all
 # gone anyway (they are the structure the ranker picks on its weakest views, so
-# they score lowest), and a separate ban changed almost nothing.
+# they score lowest).
 #
-# Chosen as a risk setting, not for return. On the prevailing model over every
-# monthly chain (2026-10-03 snapshot, credit allowed) the floor sweep ran 0.02 /
-# 0.03 / 0.04 / 0.06 / 0.08 → 45.9 / 17.7 / 13.1 / 17.8 / 11.5 % return and
-# 44.0 / 39.8 / 42.4 / 32.3 / 18.7 % max drawdown: no higher floor beats 0.02 on
-# return — the score orders candidates within a bar but does not compare across
-# bars — and 0.06 cuts drawdown while leaving a usable trade count (14).
+# Chosen as a risk setting, and **that rationale did not survive**. The first
+# sweep put 0.06 at 32.3 % drawdown against 44.0 % at 0.02, but it ran on
+# interpolated quotes that read the other right's IV, and a higher floor selected
+# exactly their mispricings. Rerun on same-right bounded interpolation (prevailing
+# model, every monthly chain, credit allowed): 0.02 / 0.03 / 0.04 / 0.06 / 0.08 →
+# 48.6 / 24.5 / 9.3 / 3.1 / 10.7 % return and 46.5 / 41.8 / 46.0 / 46.4 / 10.3 %
+# max drawdown. No floor above 0.02 helps on either axis except 0.08, on 3 trades.
 [candidates]
 rights = ["call", "put"]
 allow_debit = true

@@ -206,25 +206,43 @@ ranker chose from was about half the real one.
 
 `ChainSnapshot::estimate_quote` prices a strike off the bar's own OTM smile:
 Black-76 at the smile's IV for that log-moneyness, crossed by the nearest quoted
-same-right strike's absolute spread. `examples/estimate_profile.rs` holds real
-quotes out and measures it, in units of the real half-spread:
+Black-76 at an implied vol interpolated between the two nearest real quotes **of
+the same right**, with the mid then held inside the bounds those two prices set
+(calls fall and puts rise with strike, by no more than the strike step, and
+never above the straight line between them), crossed by the wider neighbour's
+spread. A strike no two same-right quotes bracket falls back to the OTM smile.
 
-| held out | position | median error | p90 |
-|---|---|---|---|
-| one strike | inside the smile, \|z\| 0–2 | 0.18–0.28 | 0.66–0.90 |
-| it and both neighbours | inside the smile | 0.24–0.39 | 0.92–1.75 |
-| one strike | past the quoted wings | 0.56–2.99 | 4.4–58 |
+The first version read the OTM smile for every estimate, so a call below the
+forward took the *put* side's vol. Where same-strike puts and calls disagree by a
+vol point — a parity residual, not skew — that priced a SPY 739 call at 12.89
+against a real 740 call at 12.965, and the ranker sold the real 737 against it
+for a score of 1.41. Typical error was small; the ranker picks the tail. Entries
+with an interpolated leg had scored higher than all-real ones (median 0.035 vs
+0.027 on `mean_reversion`) and returned −4.2 % per trade against +7.2 %.
 
-The estimated spread over the real one has median 1.00. So the rule splits on
-interpolation:
+`examples/estimate_profile.rs` holds real quotes out (both rights of a strike, or
+it and both neighbours) and measures the estimate, in units of the real
+half-spread:
+
+| held out | position | median | p90 | p99 |
+|---|---|---|---|---|
+| one strike | bracketed by the same right, \|z\| 0–2 | 0.14–0.18 | 0.50–0.74 | 1.4–2.3 |
+| it and both neighbours | bracketed | 0.21–0.27 | 0.83–1.62 | 3.1–5.9 |
+| one strike | past the same-right quotes (smile) | 0.46–2.56 | 3.5–61 | 15–142 |
+
+The estimated spread runs ~1.1× the real one, by design. After the fix
+`mean_reversion`'s interpolated entries number 21 of 79 (from 41), score like
+real ones (0.031 vs 0.028), and return +13.2 % per trade; the run goes +11.8 % →
++21.9 %. So the rule splits on bracketing:
 
 - **Entry**: `ChainSnapshot::interpolated` holds every registered strike the bar
-  did not print but its smile spans, and `selectable` offers them beside the real
-  quotes. Nothing past the quoted wings is ever opened — META quoting only to
-  +1 % still has no 0.30-delta call. A trade opened on one is `estimated_entry`.
-- **Close and mark**: any unquoted leg, extrapolated if need be
-  (`ponytail:` the smile is flat past the wings). Such a close is
-  `estimated_price`. Both flags are counted in the caveats.
+  did not print but two real same-right quotes bracket, and `selectable` offers
+  them beside the real quotes. Nothing past the quoted strikes is ever opened —
+  META quoting only to +1 % still has no 0.30-delta call. A trade opened on one
+  is `estimated_entry`.
+- **Close and mark**: any unquoted leg, bracketed if possible, else off the smile
+  (flat past the wings). Such a close is `estimated_price`. Both flags are
+  counted in the caveats.
 - **Features never see them.** Forward, ATM IV, skew and the smile itself read
   `quotes` only; `interpolated` is a separate field so no estimate can feed the
   surface it was drawn from.
@@ -876,9 +894,12 @@ path, not edge (below), and because a higher score floor removes credit spreads
 by itself — they are what the ranker picks on its weakest views, so they score
 lowest. `mean_reversion_prevailing_conservative` is the prevailing model on
 `ev_conservative`: `ev` with a 0.06 floor, credit allowed, chosen as a risk
-setting — the floor sweep (0.02 → 0.08) never beat 0.02 on return, and 0.06
-cuts drawdown 44.0 % → 32.3 % at 14 trades (17.8 % return). `ev_no_credit`
-remains as a label.
+setting — and the risk benefit was an artifact. The sweep that found 0.06
+cutting drawdown 44.0 % → 32.3 % ran on interpolated quotes priced off the other
+right's IV, and the higher floor selected their mispricings (10 of its 14 trades
+had an interpolated leg). On same-right bounded interpolation, 0.06 is 12
+trades, +3.1 %, 46.4 % drawdown: no better than 0.02 on either axis.
+`ev_no_credit` remains as a label.
 
 And the debit sleeve is
 not the steady earner it looks like — per dollar at risk, on the credit-free

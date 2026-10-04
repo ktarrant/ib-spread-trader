@@ -9,7 +9,10 @@
 //! - **holdout**: on every bar, drop one quoted strike (both rights), or it and
 //!   its two neighbours, and estimate each dropped quote from what is left.
 //!   Mid error is in units of the real half-spread; `spread` is estimated over
-//!   real. `interp` means the strike lies inside what is left of the OTM smile.
+//!   real. `interp` means two remaining real quotes of the same right bracket the
+//!   strike — what `ChainSnapshot::interpolated` offers to entries. The ranker
+//!   picks the most mispriced candidates, so the tails (p99, max) matter more
+//!   than the median.
 //!
 //! `cargo run --release --example estimate_profile`
 use chrono::NaiveDate;
@@ -88,14 +91,14 @@ fn main() -> anyhow::Result<()> {
                     let hi = strikes[(j + drop / 2).min(strikes.len() - 1)];
                     let mut thin: ChainSnapshot = bar.clone();
                     thin.quotes.retain(|q| q.strike < lo || q.strike > hi);
-                    let otm: Vec<f64> = thin
-                        .quotes
-                        .iter()
-                        .filter(|q| q.implied_vol.is_some() && (q.right.is_call() == (q.strike >= thin.forward)))
-                        .map(|q| q.strike)
-                        .collect();
-                    let interp = otm.iter().any(|&k| k < strike) && otm.iter().any(|&k| k > strike);
                     for real in bar.quotes.iter().filter(|q| q.strike == strike) {
+                        let same: Vec<f64> = thin
+                            .quotes
+                            .iter()
+                            .filter(|q| q.right == real.right && q.implied_vol.is_some())
+                            .map(|q| q.strike)
+                            .collect();
+                        let interp = same.iter().any(|&k| k < strike) && same.iter().any(|&k| k > strike);
                         let half = 0.5 * (real.ask - real.bid);
                         let Some(est) = thin.estimate_quote(real.contract_id, strike, real.right) else { continue };
                         if !(half > 0.0) {
@@ -125,7 +128,7 @@ fn main() -> anyhow::Result<()> {
         .map(|((drop, kind, bin), (mut abs, mut signed, mut spread))| {
             json!({
                 "dropped": drop, "kind": kind, "abs_z": bin, "n": abs.len(),
-                "abs_err_half_spreads": {"median": pct(&mut abs, 0.5), "p90": pct(&mut abs, 0.9)},
+                "abs_err_half_spreads": {"median": pct(&mut abs, 0.5), "p90": pct(&mut abs, 0.9), "p99": pct(&mut abs, 0.99), "max": pct(&mut abs, 1.0)},
                 "bias_half_spreads": pct(&mut signed, 0.5),
                 "spread_ratio_median": pct(&mut spread, 0.5),
             })

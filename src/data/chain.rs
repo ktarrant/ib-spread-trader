@@ -127,11 +127,10 @@ pub struct ChainSnapshot {
     /// Calendar year fraction to the 16:00 ET expiry.
     pub year_fraction: f64,
     pub quotes: Vec<OptionQuote>,
-    /// Registered strikes this bar did not print but its quoted smile spans,
-    /// priced off it (`estimate_quote`). Interpolated only, never past the quoted
-    /// wings: held out on real bars, an interpolated mid lands a median 0.2
-    /// half-spreads from the real one, an extrapolated one 0.6–3. Kept apart from
-    /// `quotes` so the forward, ATM IV and skew stay real-only.
+    /// Registered strikes this bar did not print but two real quotes of the same
+    /// right bracket, interpolated from them (`bracketed`). Never past the quoted
+    /// wings. Kept apart from `quotes` so the forward, ATM IV and skew stay
+    /// real-only.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub interpolated: Vec<OptionQuote>,
 }
@@ -196,30 +195,71 @@ impl ChainSnapshot {
         interp_smile_iv(&self.otm_smile(), 0.0)
     }
 
-    /// A quote for a strike this bar did not print, estimated from the ones it
-    /// did: Black-76 at the OTM smile's vol for that strike, crossed by the
-    /// absolute bid/ask spread of the nearest quoted strike of the same right.
-    /// `None` when the bar has no smile. Only ever used to mark or close — a
-    /// position cannot be opened against a price nobody quoted.
-    // ponytail: the smile is held flat past the quoted wings, which underprices a
-    // far-OTM put on a steep skew; extrapolate the wing slope if that shows up.
+    /// A quote for a strike this bar did not print. Between two real quotes of
+    /// the same right it is interpolated from them (`bracketed`); past them it
+    /// falls back to the OTM smile, held flat beyond the quoted wings. `None` when
+    /// neither works. Only a bracketed estimate may be opened against (see
+    /// `interpolated`); any estimate may mark or close.
+    // ponytail: the smile fallback is flat past the quoted wings, which
+    // underprices a far-OTM put on a steep skew; extrapolate the wing slope if
+    // that shows up.
     pub fn estimate_quote(
         &self,
         contract_id: i64,
         strike: f64,
         right: OptionRight,
     ) -> Option<OptionQuote> {
-        self.estimate_on(&self.otm_smile(), contract_id, strike, right)
+        self.bracketed(contract_id, strike, right)
+            .or_else(|| self.smile_estimate(contract_id, strike, right))
     }
 
-    fn estimate_on(
-        &self,
-        smile: &[(f64, f64)],
-        contract_id: i64,
-        strike: f64,
-        right: OptionRight,
-    ) -> Option<OptionQuote> {
-        let vol = interp_smile_iv(smile, (strike / self.forward).ln())?;
+    /// Interpolated from the nearest real quotes of the same right on either
+    /// side: IV linear in log-moneyness between them, then the mid held inside
+    /// the bounds those two prices set — calls fall and puts rise with strike, by
+    /// no more than the strike step, and never above the straight line between
+    /// them — so an estimate cannot undercut a real quote further out. Reading
+    /// the other right's IV instead (the OTM smile) once priced a SPY 739 call
+    /// below the real 740, and the ranker traded the gap. The spread is the
+    /// wider neighbour's: the ranker picks the tail of estimate error, so err wide.
+    fn bracketed(&self, contract_id: i64, strike: f64, right: OptionRight) -> Option<OptionQuote> {
+        let nearest = |below: bool| {
+            self.quotes
+                .iter()
+                .filter(|q| q.right == right && q.implied_vol.is_some())
+                .filter(|q| if below { q.strike < strike } else { q.strike > strike })
+                .min_by(|a, b| (a.strike - strike).abs().total_cmp(&(b.strike - strike).abs()))
+        };
+        let (lo, hi) = (nearest(true)?, nearest(false)?);
+        let ln = |k: f64| (k / self.forward).ln();
+        let w = (ln(strike) - ln(lo.strike)) / (ln(hi.strike) - ln(lo.strike));
+        let (lo_iv, hi_iv) = (lo.implied_vol?, hi.implied_vol?);
+        let vol = lo_iv + w * (hi_iv - lo_iv);
+        let (t, is_call) = (self.year_fraction, right.is_call());
+        let line = lo.mid + (strike - lo.strike) / (hi.strike - lo.strike) * (hi.mid - lo.mid);
+        let floor = if is_call {
+            hi.mid.max(lo.mid - (strike - lo.strike))
+        } else {
+            lo.mid.max(hi.mid - (hi.strike - strike))
+        };
+        let mid = pricing::black76(self.forward, strike, t, vol, is_call).clamp(floor, line.max(floor));
+        let vol = pricing::implied_vol(mid, self.forward, strike, t, is_call).unwrap_or(vol);
+        let half = 0.5 * (lo.ask - lo.bid).max(hi.ask - hi.bid);
+        Some(OptionQuote {
+            contract_id,
+            strike,
+            right,
+            bid: (mid - half).max(0.0),
+            ask: mid + half,
+            mid,
+            implied_vol: Some(vol),
+            delta: pricing::delta(self.forward, strike, t, vol, is_call),
+        })
+    }
+
+    /// Black-76 at the OTM smile's vol for the strike, crossed by the nearest
+    /// same-right quote's spread — for a strike no two same-right quotes bracket.
+    fn smile_estimate(&self, contract_id: i64, strike: f64, right: OptionRight) -> Option<OptionQuote> {
+        let vol = interp_smile_iv(&self.otm_smile(), (strike / self.forward).ln())?;
         let nearest = self
             .quotes
             .iter()
@@ -613,19 +653,13 @@ impl ChainSeries {
             quotes,
             interpolated: Vec::new(),
         };
-        let smile = bar.otm_smile();
-        if let (Some(&(lo, _)), Some(&(hi, _))) = (smile.first(), smile.last()) {
-            let quoted: BTreeSet<i64> = bar.quotes.iter().map(|q| q.contract_id).collect();
-            bar.interpolated = self
-                .registered
-                .iter()
-                .filter(|(id, strike, _)| {
-                    let x = (strike / bar.forward).ln();
-                    !quoted.contains(id) && lo < x && x < hi
-                })
-                .filter_map(|&(id, strike, right)| bar.estimate_on(&smile, id, strike, right))
-                .collect();
-        }
+        let quoted: BTreeSet<i64> = bar.quotes.iter().map(|q| q.contract_id).collect();
+        bar.interpolated = self
+            .registered
+            .iter()
+            .filter(|(id, ..)| !quoted.contains(id))
+            .filter_map(|&(id, strike, right)| bar.bracketed(id, strike, right))
+            .collect();
         Some(bar)
     }
 
@@ -1179,6 +1213,38 @@ mod tests {
         assert_eq!(first.underlying.close, Some(100.0));
         assert_eq!(first.underlying.volume, Some(0.0));
         assert!((first.underlying.mid.unwrap() - 100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_bracketed_estimate_stays_inside_its_real_neighbours_bounds() {
+        // Two real calls whose IVs disagree wildly: Black-76 at the interpolated
+        // vol would price 102.5 far above both. The bounds hold it between the
+        // 105 call (a call cannot be cheaper further out) and the straight line.
+        let call = |strike: f64, mid: f64, iv: f64| OptionQuote {
+            contract_id: strike as i64,
+            strike,
+            right: OptionRight::Call,
+            bid: mid - 0.05,
+            ask: mid + 0.05,
+            mid,
+            implied_vol: Some(iv),
+            delta: Some(0.5),
+        };
+        let bar = ChainSnapshot {
+            symbol: "TEST".into(),
+            expiry: chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
+            ts: Utc::now(),
+            underlying: UnderlyingBar::default(),
+            forward: 100.0,
+            residual_mad: 0.0,
+            paired_strikes: 2,
+            year_fraction: 0.1,
+            quotes: vec![call(100.0, 5.0, 0.30), call(105.0, 4.9, 0.90)],
+            interpolated: Vec::new(),
+        };
+        let est = bar.estimate_quote(1025, 102.5, OptionRight::Call).unwrap();
+        assert!((4.9..=4.95).contains(&est.mid), "{}", est.mid);
+        assert!(est.ask - est.bid >= 0.1 - 1e-12, "the wider neighbour's spread");
     }
 
     #[test]
