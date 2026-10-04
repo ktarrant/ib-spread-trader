@@ -42,12 +42,12 @@ def norm(title: str) -> str:
 def load(db) -> list[dict]:
     rows = db.execute(
         """SELECT symbol, event_time, source, title, captured_at,
-                  json_extract(detail_json, '$.sentiment')
+                  json_extract(detail_json, '$.sentiment'), source_id
            FROM events WHERE kind = 'headline' AND event_time IS NOT NULL
            ORDER BY symbol, event_time"""
     ).fetchall()
     return [dict(symbol=s, at=parse(t), provider=p.removeprefix("ib_news:"), title=ti or "",
-                 batch=c[:19], k=k) for s, t, p, ti, c, k in rows]
+                 batch=c[:19], k=k, article_id=a) for s, t, p, ti, c, k, a in rows]
 
 
 def stories(rows: list[dict]) -> list[list[dict]]:
