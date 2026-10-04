@@ -183,9 +183,10 @@ Two consequences to expect rather than debug:
 - **Equity drops the instant a trade opens**, by the width of the book plus
   round-trip commission. A position entered at the ask and marked at the bid is
   genuinely worth less than it cost.
-- **A position the current bar cannot price is held at entry cost**, not marked
-  to zero. Wings stop printing; writing them off would invent a total loss the
-  market never showed.
+- **A leg the current bar does not quote is priced off that bar's smile**, not
+  marked to zero or held at cost (see *Unquoted strikes* below). Only a bar with
+  no smile at all falls back to entry cost for marks, and to intrinsic for a
+  time-forced exit.
 
 `Spread::payoff_bounds` derives max profit and max loss generically, by sampling
 the strikes and both tails, rather than special-casing verticals — so a butterfly
@@ -193,6 +194,58 @@ or condor added later gets correct bounds for free. It returns `None` for a
 structure with a runaway tail (a naked call, either side), because a profit
 target expressed as a percentage of max profit is meaningless there. Naked
 **puts** are bounded: the underlying cannot go below zero.
+
+## Unquoted strikes: interpolated to enter, estimated to close
+
+The captured strike set moves week to week — the tapered ladder in
+`ib-option-calc` takes every strike out to ±0.5σ√T, one in two to ±1σ, one in
+four to ±2σ — so a bar routinely lacks strikes a chain lists. On the 2026-10-03
+snapshot a bar quotes a median **7 of 13** registered strikes within ±0.5σ√T of
+the forward (p10: 4), and 13 of 24 within ±1σ√T. Near spot, the ladder the
+ranker chose from was about half the real one.
+
+`ChainSnapshot::estimate_quote` prices a strike off the bar's own OTM smile:
+Black-76 at the smile's IV for that log-moneyness, crossed by the nearest quoted
+same-right strike's absolute spread. `examples/estimate_profile.rs` holds real
+quotes out and measures it, in units of the real half-spread:
+
+| held out | position | median error | p90 |
+|---|---|---|---|
+| one strike | inside the smile, \|z\| 0–2 | 0.18–0.28 | 0.66–0.90 |
+| it and both neighbours | inside the smile | 0.24–0.39 | 0.92–1.75 |
+| one strike | past the quoted wings | 0.56–2.99 | 4.4–58 |
+
+The estimated spread over the real one has median 1.00. So the rule splits on
+interpolation:
+
+- **Entry**: `ChainSnapshot::interpolated` holds every registered strike the bar
+  did not print but its smile spans, and `selectable` offers them beside the real
+  quotes. Nothing past the quoted wings is ever opened — META quoting only to
+  +1 % still has no 0.30-delta call. A trade opened on one is `estimated_entry`.
+- **Close and mark**: any unquoted leg, extrapolated if need be
+  (`ponytail:` the smile is flat past the wings). Such a close is
+  `estimated_price`. Both flags are counted in the caveats.
+- **Features never see them.** Forward, ATM IV, skew and the smile itself read
+  `quotes` only; `interpolated` is a separate field so no estimate can feed the
+  surface it was drawn from.
+
+Two consequences worth knowing. Every intrinsic exit on the reference snapshot
+had been **flattering**: a TSLA call spread paid its full width a week before
+expiry, a SPY credit spread called worth $0 because its strike was off an
+odd-strike ladder (the smile prices the buy-back at ~$2.42). And "not quoted"
+used to mean "not this chain" — `update_peaks` relied on another chain's bar
+failing to price a position. An estimate does not fail, so every per-position
+loop must filter on `(symbol, expiry)` itself.
+
+On `mean_reversion` about half the entries take an interpolated leg — roughly
+the share of interpolated strikes in the ladder, so the ranker does not favour
+them. Interpolation does **not** pull the ranker toward the money: the median
+trade still has a leg ~10 % from spot. `candidates.min_leg_delta` (off by
+default) is that lever. At 0.20, on the 2026-10-03 snapshot over every monthly
+chain: `mean_reversion` −$11 409 → +$1 138 (legs >8 % out 50 → 25),
+`mean_reversion_prevailing` +$5 313 → +$7 237, `vol_timing` −$1 226 → +$3 620.
+Three of three in one direction, on 16–94 trades and one snapshot — a lead, not
+a default.
 
 ## Expiry settlement is reported apart from traded P&L
 
@@ -1518,7 +1571,8 @@ interim worst case.
 enumerated -> priceable -> liquid -> within-loss -> positive-EV -> above-min-score
 -> above-min-pop -> chosen — and the report surfaces it beside the trade log, the way
 `signal_diagnostics` surfaces the staged gates. On the reference snapshot,
-`mean_reversion.toml` prices 8 732 187 candidate verticals down to 51 taken. The
+`mean_reversion.toml` prices 36 056 719 candidate verticals (8 732 187 before
+interpolated strikes) down to 51 taken. The
 model decides how many bars hold a position and so are *not* enumerating, which
 is why a more-selective model can enumerate more, not less. A ranked run whose
 `chosen` is a rounding error against `enumerated` has been floored, not

@@ -127,6 +127,13 @@ pub struct ChainSnapshot {
     /// Calendar year fraction to the 16:00 ET expiry.
     pub year_fraction: f64,
     pub quotes: Vec<OptionQuote>,
+    /// Registered strikes this bar did not print but its quoted smile spans,
+    /// priced off it (`estimate_quote`). Interpolated only, never past the quoted
+    /// wings: held out on real bars, an interpolated mid lands a median 0.2
+    /// half-spreads from the real one, an extrapolated one 0.6–3. Kept apart from
+    /// `quotes` so the forward, ATM IV and skew stay real-only.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interpolated: Vec<OptionQuote>,
 }
 
 impl ChainSnapshot {
@@ -144,12 +151,19 @@ impl ChainSnapshot {
         self.quotes.iter().find(|q| q.contract_id == contract_id)
     }
 
-    /// Quotes of one right, ascending by strike, restricted to those a delta
+    /// A real quote, else an interpolated one — what a position can be opened at.
+    pub fn quote_or_interpolated(&self, contract_id: i64) -> Option<&OptionQuote> {
+        self.quote(contract_id)
+            .or_else(|| self.interpolated.iter().find(|q| q.contract_id == contract_id))
+    }
+
+    /// Quotes of one right — real and interpolated — restricted to those a delta
     /// actually solved for. Deep-ITM strikes quoting at or below intrinsic are
     /// excluded here rather than defaulted downstream.
     pub fn selectable(&self, right: OptionRight) -> impl Iterator<Item = &OptionQuote> {
         self.quotes
             .iter()
+            .chain(&self.interpolated)
             .filter(move |q| q.right == right && q.delta.is_some())
     }
 
@@ -195,7 +209,17 @@ impl ChainSnapshot {
         strike: f64,
         right: OptionRight,
     ) -> Option<OptionQuote> {
-        let vol = interp_smile_iv(&self.otm_smile(), (strike / self.forward).ln())?;
+        self.estimate_on(&self.otm_smile(), contract_id, strike, right)
+    }
+
+    fn estimate_on(
+        &self,
+        smile: &[(f64, f64)],
+        contract_id: i64,
+        strike: f64,
+        right: OptionRight,
+    ) -> Option<OptionQuote> {
+        let vol = interp_smile_iv(smile, (strike / self.forward).ln())?;
         let nearest = self
             .quotes
             .iter()
@@ -299,6 +323,9 @@ pub struct ChainSeries {
     pub bar_minutes: i64,
     /// Earnings dates within the backtest window, sorted ascending.
     pub earnings: Vec<EarningsEvent>,
+    /// Every option contract registered for this chain — the strikes a bar
+    /// that did not print them can still interpolate.
+    registered: Vec<(i64, f64, OptionRight)>,
 }
 
 impl ChainSeries {
@@ -355,6 +382,7 @@ impl ChainSeries {
         let sessions_tape = if five_minute.is_empty() { &underlying } else { &five_minute };
         let sessions = sessions_tape.keys().map(|ts| ts.date_naive()).collect();
         let earnings = load_earnings(snapshot, &symbol, &sessions)?;
+        let registered = load_registered(snapshot, &symbol, &expiry_text)?;
         let (signal_underlying, signal_quality, underlying_bar_size) = if !five_minute.is_empty() {
             (five_minute, five_minute_quality, "5min".to_string())
         } else {
@@ -374,6 +402,7 @@ impl ChainSeries {
             underlying_bar_size,
             bar_minutes,
             earnings,
+            registered,
         })
     }
 
@@ -505,6 +534,7 @@ impl ChainSeries {
             paired_strikes: 0,
             year_fraction: pricing::year_fraction(ts, self.expiry_instant),
             quotes: Vec::new(),
+            interpolated: Vec::new(),
         })
     }
 
@@ -562,7 +592,7 @@ impl ChainSeries {
             })
             .collect();
 
-        Some(ChainSnapshot {
+        let mut bar = ChainSnapshot {
             symbol: self.symbol.clone(),
             expiry: self.expiry,
             ts,
@@ -572,7 +602,22 @@ impl ChainSeries {
             paired_strikes: ladder.len(),
             year_fraction,
             quotes,
-        })
+            interpolated: Vec::new(),
+        };
+        let smile = bar.otm_smile();
+        if let (Some(&(lo, _)), Some(&(hi, _))) = (smile.first(), smile.last()) {
+            let quoted: BTreeSet<i64> = bar.quotes.iter().map(|q| q.contract_id).collect();
+            bar.interpolated = self
+                .registered
+                .iter()
+                .filter(|(id, strike, _)| {
+                    let x = (strike / bar.forward).ln();
+                    !quoted.contains(id) && lo < x && x < hi
+                })
+                .filter_map(|&(id, strike, right)| bar.estimate_on(&smile, id, strike, right))
+                .collect();
+        }
+        Some(bar)
     }
 
     /// Resolve the ladder at a specific timestamp.
@@ -616,6 +661,26 @@ WHERE b.bar_size = ?1
 GROUP BY b.ts
 ORDER BY b.ts
 "#;
+
+fn load_registered(
+    snapshot: &Snapshot,
+    symbol: &str,
+    expiry: &str,
+) -> Result<Vec<(i64, f64, OptionRight)>> {
+    let mut stmt = snapshot.conn().prepare(
+        "SELECT id, strike, right FROM contracts
+         WHERE kind = 'option' AND symbol = ?1 AND expiry = ?2",
+    )?;
+    let rows = stmt.query_map((symbol, expiry), |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, String>(2)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, strike, right) = row?;
+        out.push((id, strike, right.parse()?));
+    }
+    Ok(out)
+}
 
 /// The option bar sizes the capture took for this chain, finest first. Empty
 /// when it took none (an empty chain loads empty either way).
@@ -1030,6 +1095,30 @@ mod tests {
     }
 
     #[test]
+    fn registered_strikes_inside_the_smile_are_interpolated_and_none_past_it() {
+        let path = fixture("interpolated");
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO contracts (id, symbol, kind, exchange, currency, expiry, strike, right)
+                 VALUES (6, 'TEST', 'option', 'SMART', 'USD', '2026-08-21', 102.5, 'C'),
+                        (7, 'TEST', 'option', 'SMART', 'USD', '2026-08-21', 102.5, 'P'),
+                        (8, 'TEST', 'option', 'SMART', 'USD', '2026-08-21', 120.0, 'C');",
+            )
+            .unwrap();
+        let series = ChainSeries::load(&Snapshot::open(&path).unwrap(), "test", expiry()).unwrap();
+        let bar = series.snapshot(0).unwrap();
+        let ids: Vec<i64> = bar.interpolated.iter().map(|q| q.contract_id).collect();
+        assert_eq!(ids, [6, 7], "102.5 sits inside the quoted 100-105 smile; 120 does not");
+        assert!(bar.quote(6).is_none() && bar.quote_or_interpolated(6).is_some());
+        // The smile is built from real quotes only, so registering strikes moves nothing.
+        let plain = fixture("not-interpolated");
+        let plain = ChainSeries::load(&Snapshot::open(&plain).unwrap(), "test", expiry()).unwrap();
+        assert_eq!(bar.atm_implied_vol(), plain.snapshot(0).unwrap().atm_implied_vol());
+        assert_eq!(bar.selectable(OptionRight::Call).count(), 3);
+    }
+
+    #[test]
     fn a_fine_tape_that_stops_short_folds_into_the_coarse_one() {
         // 15-minute bars end before the 30-minute tape begins: the 13:15 bar
         // closes at 13:30, so it is the 13:00 thirty-minute quote; 13:00 is dropped.
@@ -1102,6 +1191,7 @@ mod tests {
                 quote(99.0, OptionRight::Call, 0.90),
                 quote(101.0, OptionRight::Put, 0.90),
             ],
+            interpolated: Vec::new(),
         };
 
         let lo = (99.0_f64 / 100.0).ln();
@@ -1132,6 +1222,7 @@ mod tests {
             paired_strikes: 4,
             year_fraction: 0.1,
             quotes,
+            interpolated: Vec::new(),
         };
 
         // Puts bid richer than calls: a positive equity skew of roughly the raw

@@ -83,10 +83,11 @@ pub fn cash_flow(
             contract_id: leg.contract_id,
             strike: leg.strike,
         };
-        // A close may price a strike the bar did not print off its smile — the
-        // capture's strike set moves week to week — but an open never does.
+        // A strike the bar did not print but its smile spans is interpolated, and
+        // either side may trade it. Past the quoted wings only a close may price
+        // off the smile — the capture's strike set moves week to week.
         let estimated;
-        let quote = match bar.quote(leg.contract_id) {
+        let quote = match bar.quote_or_interpolated(leg.contract_id) {
             Some(quote) => quote,
             None if direction == Direction::Close => {
                 estimated = bar
@@ -115,7 +116,7 @@ pub fn entry_debit(spread: &Spread, bar: &ChainSnapshot) -> Result<f64, FillErro
     cash_flow(spread, bar, Direction::Open).map(|flow| -flow)
 }
 
-/// Whether the bar quotes every leg, so a close against it is a market price
+/// Whether the bar quotes every leg, so a fill against it is a market price
 /// rather than partly an estimate.
 pub fn fully_quoted(spread: &Spread, bar: &ChainSnapshot) -> bool {
     spread.legs.iter().all(|leg| bar.quote(leg.contract_id).is_some())
@@ -164,6 +165,7 @@ mod tests {
             residual_mad: 0.02,
             paired_strikes: 30,
             year_fraction: 0.006,
+            interpolated: Vec::new(),
             quotes: vec![
                 quote(1, 750.0, OptionRight::Call, 2.90, 3.10),
                 quote(2, 755.0, OptionRight::Call, 1.40, 1.60),

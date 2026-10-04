@@ -118,6 +118,8 @@ pub struct OpenPosition {
     /// Running peak unrealized P&L since entry, updated each bar. Drives the
     /// naked-long trailing stop. `None` until the first mark.
     pub peak_value: Option<f64>,
+    /// Opened with a leg the bar did not quote, at an interpolated price.
+    pub estimated_entry: bool,
 }
 
 impl OpenPosition {
@@ -152,6 +154,10 @@ pub struct ClosedTrade {
     /// moves week to week. A model price, not a market one.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub estimated_price: bool,
+    /// Opened with a leg the entry bar did not quote, at a price interpolated
+    /// off its smile (`ChainSnapshot::interpolated`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub estimated_entry: bool,
     /// Structural worst case at entry, net of cost — the capital at risk, and the
     /// denominator of realized P/L-per-risk. `None` for an unbounded structure.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -242,6 +248,7 @@ impl Portfolio {
         costs: &Costs,
     ) -> Result<usize, FillError> {
         let debit = entry_debit(&spread, bar)?;
+        let estimated_entry = !fully_quoted(&spread, bar);
         let commission = costs.commission(&spread);
         let bounds = spread.payoff_bounds();
 
@@ -265,6 +272,7 @@ impl Portfolio {
             entry_features: None,
             leg_vols: Vec::new(),
             peak_value: None,
+            estimated_entry,
         });
         Ok(id)
     }
@@ -302,6 +310,7 @@ impl Portfolio {
             exit_reason: reason,
             synthetic_price: false,
             estimated_price,
+            estimated_entry: position.estimated_entry,
             max_loss: position.max_loss,
             prediction: position.prediction,
             forecast_target: position.forecast_target,
@@ -350,6 +359,7 @@ impl Portfolio {
             exit_reason: reason,
             synthetic_price: true,
             estimated_price: false,
+            estimated_entry: position.estimated_entry,
             max_loss: position.max_loss,
             prediction: position.prediction,
             forecast_target: position.forecast_target,
@@ -399,6 +409,7 @@ impl Portfolio {
             exit_reason: ExitReason::Expiry,
             synthetic_price: false,
             estimated_price: false,
+            estimated_entry: position.estimated_entry,
             max_loss: position.max_loss,
             prediction: position.prediction,
             forecast_target: position.forecast_target,
@@ -496,6 +507,7 @@ mod tests {
             residual_mad: 0.02,
             paired_strikes: 30,
             year_fraction: 0.006,
+            interpolated: Vec::new(),
             quotes: vec![
                 quote(1, 750.0, long.0, long.1),
                 quote(2, 755.0, short.0, short.1),

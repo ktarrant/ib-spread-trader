@@ -527,6 +527,19 @@ fn caveats(
             estimated.iter().map(|t| t.pnl).sum::<f64>(),
         ));
     }
+    let interpolated: Vec<&ClosedTrade> = runs
+        .iter()
+        .flat_map(|run| &run.portfolio.closed)
+        .filter(|t| t.estimated_entry)
+        .collect();
+    if !interpolated.is_empty() {
+        out.push(format!(
+            "{} trade(s) opened with a leg the bar did not quote, at a price \
+             interpolated off its smile, for ${:.2} of P&L.",
+            interpolated.len(),
+            interpolated.iter().map(|t| t.pnl).sum::<f64>(),
+        ));
+    }
     let untraded: Vec<&str> = runs
         .iter()
         .filter(|run| run.portfolio.closed.is_empty())

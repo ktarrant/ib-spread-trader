@@ -121,6 +121,7 @@ pub mod testing {
             residual_mad: 0.01,
             paired_strikes: 30,
             year_fraction: 0.1,
+            interpolated: Vec::new(),
             quotes: Vec::new(),
         }
     }

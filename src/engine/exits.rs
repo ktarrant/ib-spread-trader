@@ -510,6 +510,7 @@ mod tests {
             entry_features: None,
             leg_vols: Vec::new(),
             peak_value: None,
+            estimated_entry: false,
         }
     }
 
@@ -719,6 +720,7 @@ mod tests {
             entry_features: None,
             leg_vols: Vec::new(),
             peak_value: None,
+            estimated_entry: false,
         };
         let rules = ExitRules {
             underlying_past_short_strike: true,
@@ -774,6 +776,7 @@ mod tests {
             entry_features: None,
             leg_vols: Vec::new(),
             peak_value: None,
+            estimated_entry: false,
         };
         let rules = ExitRules {
             underlying_past_short_strike: true,

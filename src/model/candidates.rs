@@ -694,6 +694,7 @@ mod tests {
             residual_mad: 0.0,
             paired_strikes: 4,
             year_fraction: 0.05,
+            interpolated: Vec::new(),
             quotes: vec![
                 quote(1, 95.0, OptionRight::Call, 6.0, 6.2, 0.75),
                 quote(2, 100.0, OptionRight::Call, 2.5, 2.7, 0.50),
