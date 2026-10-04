@@ -1677,9 +1677,11 @@ threshold tried, 1σ–3σ), and mixed after non-earnings gaps. A fade there fig
 post-earnings drift. `execution.post_earnings_blackout_sessions = 5` refuses
 entries on the reaction session and the four after it (`census.
 post_earnings_blackout`); `earnings_blackout_days` only ever looked forward.
-On `mean_reversion_prevailing` it removes exactly four entries (TSLA after its
+Every strategy on a mean-reversion model sets it — all of them fade, and the
+variants must keep differing from the base on one axis only. On
+`mean_reversion_prevailing` it removes exactly four entries (TSLA after its
 deliveries, AAPL, META, AMZN; −$1 878) and adds none: 40 → 36 trades, +$7 237 →
-+$9 115. One earnings season, 5–7 symbol-days — a risk rule on a known effect,
++$9 115; on `mean_reversion`, 91 → 81 trades, +$1 138 → +$1 989. One earnings season, 5–7 symbol-days — a risk rule on a known effect,
 not a measured edge. Non-earnings gaps get no filter: nothing consistent there.
 
 ### The first vol-timing model: positive on both months, not yet significant

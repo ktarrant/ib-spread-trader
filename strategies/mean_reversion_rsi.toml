@@ -22,6 +22,7 @@ dataset   = "2026-08-21"
 [execution]
 timing = "next_bar"
 earnings_blackout_days = 3
+post_earnings_blackout_sessions = 5
 max_entry_rsi = 70.0
 
 [costs]

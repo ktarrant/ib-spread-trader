@@ -2,8 +2,8 @@
   "label": "prob_profit",
   "model_label": "mean-reversion",
   "dataset": "2026-08-21",
-  "spearman": 0.4008744937842418,
-  "decile_monotonicity": 0.9636363636363636,
+  "spearman": 0.40947109385413816,
+  "decile_monotonicity": 0.9515151515151515,
   "passed": true,
-  "evaluated_at": "2026-10-04T05:54:26.383052Z"
+  "evaluated_at": "2026-10-04T06:28:06.649766Z"
 }
