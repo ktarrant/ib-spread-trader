@@ -1,0 +1,58 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "event_type", "is_repeat", "effects", "future_events"],
+        "properties": {
+          "id": {"type": "string"},
+          "event_type": {
+            "type": "string",
+            "enum": ["earnings", "guidance", "m_and_a", "analyst", "product", "legal_regulatory",
+                     "management", "capital", "macro", "market_recap", "other", "noise"]
+          },
+          "is_repeat": {"type": "boolean"},
+          "effects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["symbol", "materiality", "direction", "vol", "horizon"],
+              "properties": {
+                "symbol": {"type": "string"},
+                "materiality": {"type": "integer", "enum": [0, 1, 2, 3]},
+                "direction": {"type": "number"},
+                "vol": {"type": "string", "enum": ["none", "elevated", "high"]},
+                "horizon": {"type": "string", "enum": ["intraday", "days", "weeks"]}
+              }
+            }
+          },
+          "future_events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["symbols", "date", "date_precision", "kind", "title"],
+              "properties": {
+                "symbols": {"type": "array", "items": {"type": "string"}},
+                "date": {"type": "string"},
+                "date_precision": {"type": "string", "enum": ["day", "week", "month", "quarter"]},
+                "kind": {
+                  "type": "string",
+                  "enum": ["earnings", "investor_day", "product_launch", "regulatory_decision",
+                           "court", "shareholder_vote", "index_change", "macro", "other"]
+                },
+                "title": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
