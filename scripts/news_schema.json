@@ -16,7 +16,8 @@
           "event_type",
           "is_repeat",
           "effects",
-          "future_events"
+          "future_events",
+          "rationale"
         ],
         "properties": {
           "id": {
@@ -143,6 +144,9 @@
                 }
               }
             }
+          },
+          "rationale": {
+            "type": "string"
           }
         }
       }

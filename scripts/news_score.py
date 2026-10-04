@@ -47,7 +47,7 @@ SCHEMA = Path(__file__).resolve().parent / "news_schema.json"
 CACHE = Path.home() / "Documents/Options Database/news-llm.sqlite3"
 MODEL = "gpt-5.6-sol"
 EFFORT = "low"
-PROMPT_VERSION = "v3"
+PROMPT_VERSION = "v4"
 CONTEXT_HOURS = 72
 CONTEXT_PER_SYMBOL = 25
 CHUNK = 40
@@ -83,6 +83,8 @@ For each NEW headline (by id):
   decisions, shareholder votes, index changes, macro releases). date is
   YYYY-MM-DD, the first day of the period when precision is week/month/quarter.
   Empty when nothing dated is announced.
+- rationale: one or two short sentences a trader can read at a glance: what the
+  news is and why it got the scores above (or why it does not matter).
 
 Then, under "symbols", one entry for each tracked symbol tagged on a NEW
 headline: sentiment -1..1, the overall tone of that symbol's news flow across
@@ -235,7 +237,8 @@ def scored(cache: Path = CACHE, model: str = MODEL, version: str = PROMPT_VERSIO
             except (ValueError, IndexError):
                 continue
             out.append(dict(it, available_at=end, event_type=s["event_type"], is_repeat=s["is_repeat"],
-                            effects=s["effects"], future_events=s["future_events"]))
+                            effects=s["effects"], future_events=s["future_events"],
+                            rationale=s.get("rationale", "")))
     return out
 
 
