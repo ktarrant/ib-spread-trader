@@ -391,6 +391,31 @@ pub fn in_earnings_blackout(
     days_until >= 0 && days_until < blackout_days as i64
 }
 
+/// True on the first `sessions` weekdays after a release is priced — the
+/// reaction session and the days of drift after it. `last_release` is the
+/// latest release whose last clean session (`close_on`) is before the bar.
+// ponytail: counts weekdays, not sessions, so a holiday in the window shortens
+// it by one; read the session tape if that ever matters.
+pub fn in_post_earnings_blackout(
+    bar_ts: DateTime<Utc>,
+    last_release: Option<&EarningsEvent>,
+    sessions: u32,
+) -> bool {
+    use chrono::Datelike;
+    let Some(event) = last_release else {
+        return false;
+    };
+    let bar_date = bar_ts.date_naive();
+    let weekdays = event
+        .close_on
+        .iter_days()
+        .skip(1)
+        .take_while(|d| *d <= bar_date)
+        .filter(|d| d.weekday().number_from_monday() <= 5)
+        .count();
+    weekdays >= 1 && weekdays <= sessions as usize
+}
+
 /// True when the underlying has crossed the short strike in the direction that
 /// means the spread is near max profit.
 /// Whether the underlying has reached the forecast target in the trade's favour.
@@ -1383,6 +1408,24 @@ mod tests {
             model: None,
         };
         assert_eq!(rules.triggered(&position(), &ctx), None);
+    }
+
+    #[test]
+    fn the_post_earnings_blackout_covers_the_sessions_after_the_release() {
+        use crate::data::EarningsEvent;
+        // A Thursday after-close release: Thursday is its last clean session.
+        let event = EarningsEvent {
+            date: chrono::NaiveDate::from_ymd_opt(2026, 7, 30).unwrap(),
+            close_on: chrono::NaiveDate::from_ymd_opt(2026, 7, 30).unwrap(),
+        };
+        let on = |d| in_post_earnings_blackout(Utc.with_ymd_and_hms(2026, 7, d, 15, 0, 0).unwrap(), Some(&event), 5);
+        let aug = |d| in_post_earnings_blackout(Utc.with_ymd_and_hms(2026, 8, d, 15, 0, 0).unwrap(), Some(&event), 5);
+        assert!(!on(30), "the release day itself belongs to the pre-release gate");
+        assert!(on(31), "the reaction session is session 1");
+        // Mon 3 .. Thu 6 are sessions 2-5; the weekend counts for nothing.
+        assert!(aug(3) && aug(6));
+        assert!(!aug(7), "session 6 trades again");
+        assert!(!in_post_earnings_blackout(Utc.with_ymd_and_hms(2026, 7, 31, 15, 0, 0).unwrap(), None, 5));
     }
 
     #[test]

@@ -1668,6 +1668,20 @@ The model reads only the sign of `prevailing_trend`; a dead zone around zero is
 the obvious next thing to test, and each weekly capture adds a period to check
 it on.
 
+**A release's gap is the prevailing trend for the week after it**, because the
+65-bar SMA spans five sessions. Bucketing the 2026-10-03 forecast log by
+sessions since an opening gap of ≥1.5× the daily implied move: on the bars
+where the model takes a view, skill is +0.003 with no big gap in five sessions,
+**−0.04 to −0.05 in the five sessions after an earnings gap** (negative at every
+threshold tried, 1σ–3σ), and mixed after non-earnings gaps. A fade there fights
+post-earnings drift. `execution.post_earnings_blackout_sessions = 5` refuses
+entries on the reaction session and the four after it (`census.
+post_earnings_blackout`); `earnings_blackout_days` only ever looked forward.
+On `mean_reversion_prevailing` it removes exactly four entries (TSLA after its
+deliveries, AAPL, META, AMZN; −$1 878) and adds none: 40 → 36 trades, +$7 237 →
++$9 115. One earnings season, 5–7 symbol-days — a risk rule on a known effect,
+not a measured edge. Non-earnings gaps get no filter: nothing consistent there.
+
 ### The first vol-timing model: positive on both months, not yet significant
 
 Fitting ATM IV × a multiplier on one month and scoring it on the other (Gaussian

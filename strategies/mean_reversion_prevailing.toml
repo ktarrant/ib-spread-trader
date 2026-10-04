@@ -10,6 +10,9 @@ dataset   = "2026-08-21"
 [execution]
 timing = "next_bar"
 earnings_blackout_days = 3
+# The gap is the 5-session prevailing trend for a week after a release, and a
+# fade there fights post-earnings drift; skill on those bars is negative.
+post_earnings_blackout_sessions = 5
 
 [costs]
 commission_per_contract = 0.65

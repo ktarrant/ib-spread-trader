@@ -29,6 +29,8 @@ pub struct Census {
     pub capital_limited: usize,
     pub too_close_to_expiry: usize,
     pub earnings_blackout: usize,
+    /// Bars refused in the sessions just after a release.
+    pub post_earnings_blackout: usize,
     /// Bars refused by the RSI entry band. Zero unless the band is configured.
     pub rsi_out_of_band: usize,
     /// Bars refused because RSI had not recently turned up through its level.
@@ -198,6 +200,7 @@ fn assemble(
         census.capital_limited += run.census.capital_limited;
         census.too_close_to_expiry += run.census.too_close_to_expiry;
         census.earnings_blackout += run.census.earnings_blackout;
+        census.post_earnings_blackout += run.census.post_earnings_blackout;
         census.rsi_out_of_band += run.census.rsi_out_of_band;
         census.no_recent_rsi_cross += run.census.no_recent_rsi_cross;
         census.entry_spacing += run.census.entry_spacing;

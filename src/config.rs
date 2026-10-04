@@ -331,6 +331,9 @@ pub struct ExecutionConfig {
     /// closed by `close_before_earnings`.
     #[serde(default)]
     pub earnings_blackout_days: Option<u32>,
+    /// Refuse new entries on the first this-many sessions after a release.
+    #[serde(default)]
+    pub post_earnings_blackout_sessions: Option<u32>,
 }
 
 fn default_tolerance() -> f64 {
@@ -372,6 +375,7 @@ impl Default for ExecutionConfig {
             min_days_between_entries: None,
             entry_window: None,
             earnings_blackout_days: None,
+            post_earnings_blackout_sessions: None,
         }
     }
 }
@@ -1684,6 +1688,7 @@ impl StrategyConfig {
             min_entry_days_before_expiry: self.execution.min_entry_days_before_expiry,
             expiry_choice: self.execution.expiry_choice,
             earnings_blackout_days: self.execution.earnings_blackout_days,
+            post_earnings_blackout_sessions: self.execution.post_earnings_blackout_sessions,
             min_entry_rsi: self.execution.min_entry_rsi,
             max_entry_rsi: self.execution.max_entry_rsi,
             entry_rsi_zone: self.execution.entry_rsi_zone,
