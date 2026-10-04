@@ -851,8 +851,8 @@ The same pass measured the structure sleeves (`ev_no_credit`, `naked_only`):
 | no credit | 48.1 % | 42.6 % | 1.13 | −$4 923 | +$15 231 |
 | naked only (12 trades) | 43.4 % | **13.0 %** | 3.34 | −$1 328 | +$10 013 |
 
-Banning credit helps in all four cells, by $300–$500 each — the wrapper lesson
-again (a bearish credit spread comes back as a put debit spread). Naked-only is a
+Banning credit helps in all four cells, by $300–$500 each — but as path, not
+edge (see below): a bearish credit spread comes back as a put debit spread. Naked-only is a
 **risk profile, not an edge**: better in the losing period, worse in the winning
 one, with drawdown cut by a third to two thirds. On the dense candidate sample no
 structure separates (intervals ±0.3 of risk) — too few sampled candidates clear
@@ -878,6 +878,28 @@ the cap takes the target exit's tail, and a timeout near the money still costs
 most of the premium. Positive only on the Oct/Nov chains; nakeds positive on
 both for `mean_reversion`. Naked calls have no `max_loss` (unbounded upside), so
 their risk here is premium plus commission.
+
+**Structure is a readout of how strong the view is, not a cause.** At the
+decision bar, the forecast's drift toward the trade, `(q50 − spot) / stddev`, has
+median +0.07 / +0.01 under the credit spreads the ranker picked, +0.16 / +0.13
+under debits, +0.22 / +0.23 under nakeds (`mean_reversion` / prevailing): E[P/L]
+per unit of max loss only favours a naked long when the expected move is large.
+Swapping the wrapper on the *same* setup changes nothing — credit → debit on the
+same symbol and bar −39 % → −43 % per unit of risk, same direction 3/3; debit →
+naked −27 % → −34 %. The naked-only arm mostly does not take the debit setups at
+all (42 of 45 have no same-bar counterpart): a naked cannot clear the score floor
+on a weak view, so it trades less, and its result is *which* trades. The
+credit-free gain is therefore path, like the RSI gate's; credit-free is kept for
+its own reasons (no short premium, less assignment risk), not on that P&L.
+
+The variable underneath has only a weak gradient on the dense log. By |drift_z|
+on `mean_reversion`'s directional forecasts, the realized move toward the view
+runs +0.06 → +0.14 sd and the hit rate 54 → 58 % from weakest to strongest; CRPS
+skill peaks at 0.15–0.25 (+0.025 [−0.001, +0.045]) and turns negative above
+0.25, where the drift overstates the move. Prevailing shows no gradient. So the
+model's directional edge is a fraction of a standard deviation at any strength —
+which is why a loser is a trade that never moved: most of each move is the part
+the model does not see, and a weak view cannot pay a structure's spread and decay.
 
 ### ATM IV is already the whole vol input; what is missing is *elevation*
 
