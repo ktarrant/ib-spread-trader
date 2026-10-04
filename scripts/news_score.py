@@ -17,6 +17,12 @@ chunk, model, prompt version) in a file beside the snapshots — never in the
 snapshot — so reruns are free and a newer model is a new record, not a
 silent replacement.
 
+**It runs on the capture server**, after each daily headline sync
+(deploy/systemd/ib-spread-trader-news-score.service): only windows closed by
+that sync and headlines not yet scored, at most --limit calls a run, so the
+work spreads over the week instead of filling one Codex usage window.
+scripts/fetch_news_cache.sh copies the server's cache here.
+
 **The viz reads this cache** (`~/ib-option-viz/src/optionviz/news.py`, the
 Chart page's news strip): the `calls` columns and `news_schema.json`'s fields
 are a contract with it. It shows the newest prompt version only.
@@ -36,6 +42,7 @@ import datetime as dt
 import difflib
 import functools
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -113,8 +120,8 @@ def window_end(t: dt.datetime) -> dt.datetime:
     return day.astimezone(dt.timezone.utc)
 
 
-def check_windows() -> None:
-    """The point-in-time guarantee rests on this boundary rule; pin it."""
+def self_check() -> None:
+    """The point-in-time guarantee rests on these rules; pin them on every run."""
     u = dt.datetime.fromisoformat
     for at, end in (("2026-09-15T13:31:00+00:00", "2026-09-15T14:00:00+00:00"),  # 09:31 NY
                     ("2026-09-15T14:00:00+00:00", "2026-09-15T14:00:00+00:00"),  # (start, end]
@@ -124,6 +131,13 @@ def check_windows() -> None:
                     ("2026-09-18T21:00:00+00:00", "2026-09-21T13:30:00+00:00"),  # Friday night
                     ("2026-09-19T15:00:00+00:00", "2026-09-21T13:30:00+00:00")):  # Saturday
         assert window_end(u(at)) == u(end), (at, window_end(u(at)), end)
+    # A headline a later sync adds to an already-scored window gets its own
+    # chunk, numbered after the cached ones, with only itself in it.
+    end = u("2026-09-15T14:00:00+00:00")
+    old, late = (dict(key=k, at=end - dt.timedelta(minutes=m), title=k, symbols={"AMD"}, providers=set(), window=end)
+                 for k, m in (("old", 20), ("late", 10)))
+    got = calls([old, late], ["AMD"], lambda e: True, done={"old"}, used={end.isoformat(): 1})
+    assert [(c["chunk"], [i["key"] for i in c["items"]]) for c in got] == [(1, ["late"])], got
 
 
 # Formats that are never news, by measurement: on 995 headlines the model had
@@ -177,9 +191,13 @@ def similar(a: str, b: str) -> bool:
     return difflib.SequenceMatcher(None, a, b).ratio() > 0.7
 
 
-def calls(items: list[dict], universe: list[str], keep) -> list[dict]:
-    """One call per (window, chunk) whose window end passes `keep`: its new
-    items, and each named symbol's prior-72h context from earlier windows."""
+def calls(items: list[dict], universe: list[str], keep, done=frozenset(), used=None) -> list[dict]:
+    """One call per (window, chunk) whose window end passes `keep`: its items
+    not yet scored (keys in `done`), and each named symbol's prior-72h context
+    from earlier windows. A window with chunks already cached (`used`, by window
+    end) numbers its new ones after them — a later sync can add an older
+    headline to a window that was scored, and it is scored on its own."""
+    used = used or {}
     by_window = collections.defaultdict(list)
     by_symbol = collections.defaultdict(list)
     for it in items:
@@ -189,7 +207,8 @@ def calls(items: list[dict], universe: list[str], keep) -> list[dict]:
     times = {s: [c["at"] for c in cs] for s, cs in by_symbol.items()}
     out = []
     for end, new in sorted(by_window.items()):
-        if not keep(end):
+        new = [it for it in new if it["key"] not in done]
+        if not new or not keep(end):
             continue
         context = {}
         for s in sorted({s for it in new for s in it["symbols"]}):
@@ -199,7 +218,8 @@ def calls(items: list[dict], universe: list[str], keep) -> list[dict]:
         assert all(c["at"] <= end and c["window"] < end for cs in context.values() for c in cs), "context from the future"
         assert all(it["at"] <= end for it in new), "item after its window"
         for k in range(0, len(new), CHUNK):
-            out.append(dict(window_end=end, chunk=k // CHUNK, items=new[k:k + CHUNK], context=context))
+            out.append(dict(window_end=end, chunk=used.get(end.isoformat(), 0) + k // CHUNK,
+                            items=new[k:k + CHUNK], context=context))
     return out
 
 
@@ -290,7 +310,8 @@ def symbol_sentiment(cache: Path = CACHE, model: str = MODEL, version: str = PRO
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--db", default=None)
+    ap.add_argument("--db", default=os.environ.get("IB_SNAPSHOT"),
+                    help="snapshot or live capture DB, opened read-only (default $IB_SNAPSHOT, else the newest snapshot)")
     ap.add_argument("--cache", default=CACHE, type=Path)
     ap.add_argument("--model", default=MODEL)
     ap.add_argument("--effort", default=EFFORT)
@@ -300,22 +321,29 @@ def main() -> None:
     ap.add_argument("--jobs", type=int, default=2)
     ap.add_argument("--dry-run", action="store_true", help="print the first prompt and the call count")
     args = ap.parse_args()
-    check_windows()
+    self_check()
 
-    snap = sqlite3.connect(f"file:{args.db or default_db()}?mode=ro", uri=True)
+    # Read-only always: on the capture server this is the live, irreplaceable DB,
+    # and a capture may be writing to it (hence the wait for its lock).
+    snap = sqlite3.connect(f"file:{args.db or default_db()}?mode=ro", uri=True, timeout=120)
     rows = load(snap)
     universe = sorted({r["symbol"] for r in rows})
     items = build_items(rows)
-    keep = lambda end: end.date() >= args.since and (args.until is None or end.date() <= args.until)
-    todo = calls(items, universe, keep)
+    # Only windows closed by the last sync: an open one can still gain headlines.
+    synced = dt.datetime.fromisoformat(max(r["batch"] for r in rows)).replace(tzinfo=dt.timezone.utc)
+    keep = lambda end: (end <= synced and end.date() >= args.since
+                        and (args.until is None or end.date() <= args.until))
 
     cache = open_cache(args.cache)
-    done = {(e, k) for e, k in cache.execute(
-        "SELECT window_end, chunk FROM calls WHERE model = ? AND prompt_version = ?", (args.model, PROMPT_VERSION))}
-    todo = [c for c in todo if (c["window_end"].isoformat(), c["chunk"]) not in done][:args.limit]
+    cached = cache.execute("SELECT window_end, items_json FROM calls WHERE model = ? AND prompt_version = ?",
+                           (args.model, PROMPT_VERSION)).fetchall()
+    done = {it["key"] for _, js in cached for it in json.loads(js)}
+    used = collections.Counter(e for e, _ in cached)
+    todo = calls(items, universe, keep, done, used)[:args.limit]
     for c in todo:
         c["prompt"] = prompt(c["window_end"], universe, c["context"], c["items"])
-    print(f"{len(items)} stories; {len(todo)} calls to make", file=sys.stderr)
+    print(f"{len(items)} stories; {len(todo)} calls to make (windows closed by the {synced:%Y-%m-%d %H:%M}Z sync)",
+          file=sys.stderr)
     if args.dry_run:
         print(todo[0]["prompt"] if todo else "(nothing to do)")
         return

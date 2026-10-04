@@ -55,6 +55,13 @@ cargo run -- catalog --all      # including chains too thin to trade
 scripts/run_frontier.sh         # rerun the frontier into out/, archive the rest
 ```
 
+Headlines are scored by an LLM on the capture server, not here:
+`scripts/news_score.py` runs after each daily headline sync
+(`deploy/systemd/`), scoring only windows that sync closed, and
+`scripts/fetch_news_cache.sh` copies its cache (`news-llm.sqlite3`) beside the
+snapshots for `scripts/news_explore.py` and the viz. Running it locally works
+the same way, but a full backfill spends a whole Codex usage window.
+
 `out/` holds only the **frontier** — the runs listed in `scripts/run_frontier.sh`,
 which is all the viz offers. Other runs are moved to `out_archive/`, not deleted.
 The frontier runs `datasets/all.toml` (and `etf-all.toml`): every **monthly** chain
