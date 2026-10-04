@@ -354,10 +354,19 @@ impl ChainSeries {
             }
             let minutes = bar_minutes_of(size)?;
             fold_quotes(&mut quotes, bar_minutes, minutes);
-            let have: BTreeSet<DateTime<Utc>> = quotes.iter().map(|q| q.ts).collect();
-            quotes.extend(coarse.into_iter().filter(|q| !have.contains(&q.ts)));
-            // Stable: each source is already ordered by strike within a timestamp.
-            quotes.sort_by_key(|q| q.ts);
+            // Merge per contract, not per timestamp: the two passes can take
+            // different strike sets at the same instant (SPY's 15-minute band
+            // stopped at 730 where the 30-minute one reached 680), so the finer
+            // quote wins where both have one and the coarser fills the rest.
+            let have: BTreeSet<(DateTime<Utc>, i64)> =
+                quotes.iter().map(|q| (q.ts, q.contract_id)).collect();
+            quotes.extend(coarse.into_iter().filter(|q| !have.contains(&(q.ts, q.contract_id))));
+            // The loader's own order: timestamp, then strike, calls before puts.
+            quotes.sort_by(|a, b| {
+                a.ts.cmp(&b.ts)
+                    .then(a.strike.total_cmp(&b.strike))
+                    .then(b.right.is_call().cmp(&a.right.is_call()))
+            });
             option_quality.add(&quality);
             bar_minutes = minutes;
         }
@@ -1082,7 +1091,7 @@ mod tests {
         let conn = rusqlite::Connection::open(path).unwrap();
         for ts in starts {
             for id in [2, 3] {
-                for (kind, close) in [("bid", 4.9), ("ask", 5.1)] {
+                for (kind, close) in [("bid", 4.8), ("ask", 5.2)] {
                     conn.execute(
                         "INSERT INTO bars (contract_id, ts, bar_size, data_type, open, high, low, close, volume)
                          VALUES (?1, ?2, '15min', ?3, ?4, ?4, ?4, ?4, 0)",
@@ -1128,6 +1137,17 @@ mod tests {
         assert_eq!(series.bar_minutes, 30);
         let ts: Vec<String> = series.timestamps().map(|t| t.format("%H:%M").to_string()).collect();
         assert_eq!(ts, ["13:00", "13:30", "14:00"]);
+
+        // Where both tapes quote the same instant, strikes only the coarse pass
+        // took are kept: the 13:45 bar (strike 100 only) is the 13:30 quote, and
+        // the 30-minute 13:30 bar adds strike 105.
+        let path = fixture("mixed-overlap");
+        add_fifteen(&path, &["2026-07-01T13:15:00+00:00", "2026-07-01T13:45:00+00:00"]);
+        let series = ChainSeries::load(&Snapshot::open(&path).unwrap(), "test", expiry()).unwrap();
+        let bar = series.snapshot_at(parse_ts("2026-07-01T13:30:00+00:00").unwrap()).unwrap();
+        let strikes: Vec<f64> = bar.quotes.iter().map(|q| q.strike).collect();
+        assert_eq!(strikes, [100.0, 100.0, 105.0, 105.0]);
+        assert_eq!(bar.quote(2).unwrap().bid, 4.8, "the finer tape's quote wins where both have one");
 
         // 15-minute bars spanning the 30-minute tape keep the chain at 15.
         let path = fixture("mixed-spanning");

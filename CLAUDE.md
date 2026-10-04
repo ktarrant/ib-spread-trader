@@ -419,6 +419,16 @@ relabelled; the rest are dropped. On the 2026-09-26 snapshot this is what lets t
 30-minute August and 15-minute October chains run as one dataset, at the cost of
 October filling 30 minutes after a decision rather than 15.
 
+**A chain with both tapes merges per contract, not per timestamp.** The two
+passes took different strike sets at the same instant — SPY's October 15-minute
+band stopped at 730 where the 30-minute one reached 680 — and keeping the finer
+bar's whole ladder dropped every strike only the coarser pass held. That hid the
+skewed condor's 6.5 % SPY put on every overlapping bar, so SPY never traded it;
+merged per contract, it takes 6 SPY trades and the run goes +1.4 % → +8.2 %
+(28 trades). `RankingFunnel::fixed_unplaceable` now counts bars where a fixed
+leg found no strike within tolerance, so a short ladder no longer reads as no
+signal.
+
 **15 minutes is the operating cadence; 30-minute option captures are legacy.**
 The 2026-10-03 capture was taken at 30 minutes by mistake, so the October chain
 holds 15-minute bars to 09-25 and 30-minute bars to 10-01. A chain with both

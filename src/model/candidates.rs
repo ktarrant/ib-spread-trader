@@ -157,6 +157,10 @@ pub struct RankingFunnel {
     pub above_min_pop: usize,
     /// Bars on which a candidate was actually taken.
     pub chosen: usize,
+    /// Bars on which a `fixed_legs` structure could not be placed — a leg had no
+    /// quoted strike within `fixed_tolerance` of its target. Outside the cascade:
+    /// without it a ladder too short for the structure reads as no signal.
+    pub fixed_unplaceable: usize,
 }
 
 impl RankingFunnel {
@@ -170,6 +174,7 @@ impl RankingFunnel {
         self.above_min_score += other.above_min_score;
         self.above_min_pop += other.above_min_pop;
         self.chosen += other.chosen;
+        self.fixed_unplaceable += other.fixed_unplaceable;
     }
 }
 
@@ -417,10 +422,12 @@ fn fixed_structure(
         };
         let quote = chain
             .selectable(leg.right)
-            .min_by(|a, b| (a.strike - target).abs().total_cmp(&(b.strike - target).abs()))?;
-        if (quote.strike - target).abs() > cfg.fixed_tolerance * spot {
+            .min_by(|a, b| (a.strike - target).abs().total_cmp(&(b.strike - target).abs()))
+            .filter(|q| (q.strike - target).abs() <= cfg.fixed_tolerance * spot);
+        let Some(quote) = quote else {
+            funnel.fixed_unplaceable += 1;
             return None;
-        }
+        };
         legs.push((quote, leg.side));
     }
     let distinct: std::collections::HashSet<_> =
