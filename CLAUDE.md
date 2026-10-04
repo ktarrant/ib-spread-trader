@@ -892,14 +892,19 @@ target make +$25 393. A loser is a trade that never moved.
 strategy ran on `ev_no_credit` for a day; it is back on `ev` because the gain was
 path, not edge (below), and because a higher score floor removes credit spreads
 by itself — they are what the ranker picks on its weakest views, so they score
-lowest. `mean_reversion_prevailing_conservative` is the prevailing model on
-`ev_conservative`: `ev` with a 0.06 floor, credit allowed, chosen as a risk
-setting — and the risk benefit was an artifact. The sweep that found 0.06
-cutting drawdown 44.0 % → 32.3 % ran on interpolated quotes priced off the other
-right's IV, and the higher floor selected their mispricings (10 of its 14 trades
-had an interpolated leg). On same-right bounded interpolation, 0.06 is 12
-trades, +3.1 %, 46.4 % drawdown: no better than 0.02 on either axis.
-`ev_no_credit` remains as a label.
+lowest. `ev_no_credit` remains as a label.
+
+**A higher score floor does not help, on return or risk.** A conservative
+prevailing variant (`ev` with a 0.06 floor) was built and retired the same day.
+Its sweep first showed 0.06 cutting drawdown 44.0 % → 32.3 %, but that ran on
+interpolated quotes priced off the other right's IV, and the higher floor
+selected their mispricings (10 of its 14 trades had an interpolated leg). On
+same-right bounded interpolation, over every monthly chain: floors 0.02 / 0.03 /
+0.04 / 0.06 / 0.08 → 48.6 / 24.5 / 9.3 / 3.1 / 10.7 % return, 46.5 / 41.8 / 46.0
+/ 46.4 / 10.3 % max drawdown (0.08 is 3 trades). The score orders candidates
+within a bar but does not compare across bars, so a stricter floor trades less
+without trading better. The general lesson: a filter that selects for high
+scores also selects for whatever makes a score wrong.
 
 And the debit sleeve is
 not the steady earner it looks like — per dollar at risk, on the credit-free
@@ -1979,7 +1984,6 @@ isolates that axis:
 | `exit_pop_trailing.toml` / `exit_momentum.toml` | exit | Structure-scoped give-ups: live-POP on debits, trailing vs momentum on nakeds. |
 | `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
 | `mean_reversion_prevailing.toml` | model | Fade a spike only against the 5-session prevailing trend. Oct-expiry +70.7 %, Aug-expiry −17.7 %; in the frontier. |
-| `mean_reversion_prevailing_conservative.toml` | ranker | The prevailing model with a 0.06 score floor (`ev_conservative`): lower drawdown, fewer trades. In the frontier. |
 | `mean_reversion_no_horizon.toml` | exit | The base without the forecast-horizon cap. Halves the loss; nakeds gain, debit spreads lose. |
 | `naked_rsi_trailing.toml` | model+ranker+exit | Nakeds at RSI extremes on a trailing stop. Loses 53.9 %; the overbought half is 9/10 of it. |
 | `naked_rsi_recovery.toml` / `_tight.toml` | execution | Enter after RSI turns up through 30, within N bars. First positive arms — and one trade is ~all of it. |

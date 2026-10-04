@@ -13,7 +13,6 @@ vol_timing     all
 skewed_condor  etf-all
 mean_reversion all
 mean_reversion_prevailing all
-mean_reversion_prevailing_conservative all
 "
 
 cargo build -q --release
