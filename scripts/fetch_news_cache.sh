@@ -4,6 +4,11 @@
 #
 #   scripts/fetch_news_cache.sh      # -> ~/Documents/Options Database/news-llm.sqlite3
 #
+# and keeps a read-only dated copy in news/news-llm-YYYY-MM-DD.sqlite3, since
+# the server's cache is rewritten as scoring continues. The subfolder is not
+# optional: a dated *.sqlite3 beside the snapshots would win the default
+# snapshot pick (latest date, then name — "news" sorts after "ib").
+#
 # ib-option-calc's `news-score` writes the cache beside the capture database
 # after each daily headline sync, and is its one writer: this replaces the local
 # copy. It travels container -> Proxmox host -> here, as fetch-snapshot.sh does.
@@ -29,4 +34,8 @@ EOF
 scp -q "$HOST:$staged" "$DEST.part"
 [ "$(sqlite3 -readonly "$DEST.part" 'PRAGMA quick_check;')" = ok ] || { echo "quick_check failed; rerun" >&2; exit 1; }
 mv "$DEST.part" "$DEST"
+snap="$(dirname "$DEST")/news/news-llm-$(date +%F).sqlite3"
+mkdir -p "$(dirname "$snap")"
+cp -f "$DEST" "$snap" && chmod 444 "$snap"
 echo "$DEST"
+echo "$snap"

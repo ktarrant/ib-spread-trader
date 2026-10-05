@@ -19,6 +19,7 @@ import sqlite3
 from pathlib import Path
 
 CACHE = Path.home() / "Documents/Options Database/news-llm.sqlite3"
+SEGMENT_GAP = dt.timedelta(days=4)
 
 
 def _calls(cache: Path):
@@ -53,3 +54,17 @@ def symbol_sentiment(cache: Path = CACHE) -> list[dict]:
     window end. A window split into chunks gives one reading per chunk."""
     return [dict(symbol=s["symbol"], available_at=end, sentiment=s["sentiment"])
             for end, _items, raw in _calls(cache) for s in raw["symbols"]]
+
+
+def segments(items: list[dict]) -> list[tuple[dt.datetime, dt.datetime]]:
+    """Runs of scored windows with no gap over SEGMENT_GAP (a weekend is one
+    overnight window, so it never splits one). A backlog drained newest-first
+    after oldest-first leaves the middle unscored: a time outside every segment
+    is unknown, not quiet."""
+    ends = sorted({it["available_at"] for it in items})
+    out, start = [], 0
+    for i in range(1, len(ends) + 1):
+        if i == len(ends) or ends[i] - ends[i - 1] > SEGMENT_GAP:
+            out.append((ends[start], ends[i - 1]))
+            start = i
+    return out

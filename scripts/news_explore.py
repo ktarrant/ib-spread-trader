@@ -42,7 +42,7 @@ import sqlite3
 from pathlib import Path
 
 from news_profile import complete_from, load, parse, stories
-from news_scores import CACHE, scored, symbol_sentiment
+from news_scores import CACHE, scored, segments, symbol_sentiment
 from option_premium import ETFS, default_db, weekly_interval
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,9 +53,8 @@ LEAN = 0.15  # |signal| below this is neutral
 
 def llm_index(cache: Path):
     """Per symbol, time-sorted effects on it (cross-symbol included) and the
-    model's tone readings; plus the first and last scored window. Rows outside
-    that range are unknown. ponytail: assumes the scored range is contiguous
-    (a caught-up news-score cache); a failed call inside it reads as quiet."""
+    model's tone readings; plus the scored segments (`news_scores.segments`).
+    ponytail: a failed call inside a segment still reads as quiet."""
     effects, tone = collections.defaultdict(list), collections.defaultdict(list)
     items = scored(cache)
     for it in items:
@@ -67,8 +66,7 @@ def llm_index(cache: Path):
     for d in (effects, tone):
         for v in d.values():
             v.sort(key=lambda e: e["available_at"] if "available_at" in e else e["at"])
-    span = (min(it["available_at"] for it in items), max(it["available_at"] for it in items)) if items else None
-    return effects, tone, span
+    return effects, tone, segments(items)
 
 
 def llm_features(sym, t, effects, tone) -> dict:
@@ -138,7 +136,7 @@ def main() -> None:
         story_at[sym] = [s[0]["at"] for s in stories(rs)]
         ratings[sym] = sorted(r["at"] for r in rs if r["provider"] == "BRFUPDN")
     rel = releases(db)
-    effects, tone, span = llm_index(args.cache) if args.cache.exists() else ({}, {}, None)
+    effects, tone, spans = llm_index(args.cache) if args.cache.exists() else ({}, {}, [])
 
     rows = []
     for r in forecast_rows(args.forecasts):
@@ -156,7 +154,7 @@ def main() -> None:
         earn = any(-5 <= (d - day).days <= h * 365 for d in rel.get(sym, []))
         nxt = r["next"]
         llm = (llm_features(sym, t, effects, tone)
-               if span and span[0] <= t - dt.timedelta(hours=72) and t <= span[1] else None)
+               if any(a <= t - dt.timedelta(hours=72) and t <= b for a, b in spans) else None)
         r1 = math.log(float(nxt["spot"]) / spot) if nxt else None
         rows.append(dict(llm=llm,
             z7=math.log(float(r["realized"]) / spot) / (iv * math.sqrt(h)),
@@ -223,7 +221,8 @@ def main() -> None:
     scoredq = [r for r in quiet if r["llm"]]
     if not scoredq:
         return
-    print(f"\n=== LLM features: {len(scoredq)} ex-earnings rows scored {span[0]:%Y-%m-%d}..{span[1]:%Y-%m-%d} ===")
+    covered = ", ".join(f"{a:%Y-%m-%d %H:%M}..{b:%Y-%m-%d %H:%M}" for a, b in spans)
+    print(f"\n=== LLM features: {len(scoredq)} ex-earnings rows, scored {covered} ===")
     L = lambda k: (lambda r: r["llm"][k])
     table("ex-earnings, max materiality of fresh news in prior 72h", [
         (f"{m}", [r for r in scoredq if L("mat")(r) == m]) for m in range(4)])

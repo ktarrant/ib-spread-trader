@@ -66,7 +66,9 @@ Headlines are scored by an LLM on the capture server, not here:
 ib-option-calc's `news-score` runs after each daily headline sync, scoring only
 windows that sync closed, and `scripts/fetch_news_cache.sh` copies its cache
 (`news-llm.sqlite3`) beside the snapshots, where `scripts/news_explore.py`
-(through `scripts/news_scores.py`) and the viz read it.
+(through `scripts/news_scores.py`) and the viz read it, and a read-only dated
+copy into `news/` there (a subfolder, so it never wins the default snapshot
+pick). `scripts/news_audit.py` checks the cache and runs the event study below.
 
 `out/` holds only the **frontier** — the runs listed in `scripts/run_frontier.sh`,
 which is all the viz offers. Other runs are moved to `out_archive/`, not deleted.
@@ -1542,6 +1544,44 @@ decided before an earnings release fills after it.
 
 What this leaves for the live side: cross, or rest at mid only when trading in
 the first half hour. Execution will not rescue a strategy that loses crossing.
+
+## LLM headline scores: clean labels, no forward edge yet
+
+The 2026-10-04 cache (prompt v7, 285 calls, 2 367 stories) is **two segments**:
+08-03 → 08-19 midday and 09-22 midday → 10-02. The backlog was drained
+oldest-first, then newest-first, so the five weeks between hold ~4 900
+headlines and no calls. `news_scores.segments` splits on a gap over four days,
+and both readers treat a time outside every segment as **unknown, not quiet**
+— `news_explore.py` had read the whole gap as no news. Inside a segment about
+one window a day has no call, all of whose headlines the noise filter dropped.
+
+The answers are structurally clean: every item answered, no stray ids, nothing
+out of range, no item later than its window, every future event dated after
+"now". Materiality 0/1/2/3 is 31/44/18/7 %, 42 % are repeats, and a hand sample
+of the 3s is real catalysts (guidance, FAA 737 inspections, M&A). **84 % of
+fresh material news lands in the overnight window**, so the first price to see
+it is the 09:30 open.
+
+`news_audit.py`'s event study (5-minute stock tape, SPY-adjusted single names,
+day-block intervals, 21 days, ~310 fresh material events ex-releases):
+
+- **The scores describe the move already made.** In the LLM's direction the
+  window's own return is +0.11 sd [+0.03, +0.18], +0.20 overnight, +0.37 at
+  materiality 3 — the open has priced the news by the time it is scored.
+- **Nothing forward.** Rest of session +0.03 [−0.08, +0.15], next close +0.02
+  [−0.13, +0.18], fifth close +0.00, hit-rate 46 %. Sentiment the same, with a
+  faint reversal intraday (−0.15 [−0.28, −0.04] next close) — one cut of many,
+  so a hint at most.
+- **No vol forecast outside releases.** Against quiet bars at the same entry
+  time, variance after fresh news is 1.24× [0.95, 1.57] to the close and
+  0.76× / 0.67× at one and five sessions; the `vol` flag does not separate.
+  Release days move 2.5–9×, which the calendar already knows.
+
+`news_explore.py`'s IV-relative tables reach only 672 rows over 3 weeks (the
+forecast log ends 09-24 and needs a 72-hour lookback) and are unreadable. So:
+the labels are sound and the price has moved before the window closes; what
+edge there is lives inside the window, faster than a 30-minute batch can act.
+Re-run when the middle is scored before concluding more.
 
 ## Test fixtures generate their own options
 
