@@ -51,7 +51,7 @@ from zoneinfo import ZoneInfo
 from news_audit import LEAN, interval, panel, release_days
 from news_explore import forecast_rows
 from news_profile import complete_from, load
-from news_scores import CACHE, _calls, scored, segments, sentiment_index
+from news_scores import CACHE, _calls, scored, segments, sentiment_index, symbol_sentiment
 from option_premium import ETFS, default_db, weekly_interval
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -95,7 +95,7 @@ def cluster_t(rs, num, den, null) -> float | None:
         by[monday(x["day"])] += num(x) - r * den(x)
     g = len(by)
     se = math.sqrt(g / (g - 1) * sum(e * e for e in by.values())) / abs(sd) if g > 1 else 0.0
-    return (r - null) / se if se else None
+    return (r - null) / se if se > 1e-12 else None
 
 
 def sgn(x: float | None, lean: float = 0.0) -> int:
@@ -105,6 +105,13 @@ def sgn(x: float | None, lean: float = 0.0) -> int:
 def placebo_cut(maxes: list[float]) -> float:
     s = sorted(maxes)
     return s[int(0.95 * len(s))] if s else float("inf")
+
+
+def signed(cells: list[dict]) -> None:
+    """For a skill (CRPS saved), an interval clear of zero says which way."""
+    for c in cells:
+        if c["verdict"] == "finding":
+            c["verdict"] = "improves" if c["point"] > 0 else "hurts"
 
 
 def judge(cells: list[dict], cut: float | None) -> None:
@@ -132,6 +139,7 @@ class Data:
         self.db_path, self.cache = db_path, cache
         self.db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         self.items = scored(cache)
+        self.symbol_tone = symbol_sentiment(cache)
         self.segs = segments(self.items)
         self.rel = release_days(self.db)
         heads = collections.defaultdict(list)
@@ -413,7 +421,7 @@ def kind_t(rows: list[dict], labels: list[dict]) -> tuple[dict, dict]:
                 continue
             m = sum(a[1] for a in weeks.values()) / n
             se = math.sqrt(g / (g - 1) * sum((a[1] - a[0] * m) ** 2 for a in weeks.values())) / n
-            if se:
+            if se > 1e-12:
                 t_abs[axis, level, target] = (m - null) / se
                 t_diff[axis, level, target] = (m - pooled) / se
     return t_abs, t_diff
@@ -681,6 +689,562 @@ def market_news(data: Data, draws: int, rnd: random.Random) -> dict:
                 series=[dict(day=r["day"].isoformat(), intensity=r["intensity"], macro=r["macro"], live=r["live"]) for r in rows])
 
 
+# ------------------------------------------------------------------ D
+
+BASE = dict(half=48, box=None, clock="calendar", weight="materiality", floor=1, repeats=False, cross=True,
+            signal="sentiment", balance="raw", transform="tone")
+SWEEPS = (
+    ("half-life (h)", "half", (2, 6, 12, 24, 48, 96, 168)),
+    ("boxcar window (h)", "box", (24, 72)),
+    ("decay clock", "clock", ("calendar", "trading")),
+    ("weight", "weight", ("count", "materiality", "materiality²", "vol-weighted")),
+    ("materiality floor", "floor", (1, 2)),
+    ("repeats", "repeats", (False, True)),
+    ("read-through", "cross", (True, False)),
+    ("signal", "signal", ("sentiment", "direction", "sentiment − direction", "LLM symbol tone")),
+    ("optimism balancing", "balance", ("raw", "global mean", "symbol mean", "event-type mean", "symbol z", "daily rank")),
+    ("transform", "transform", ("tone", "sum", "change 24h−120h", "residual on the move")),
+)
+GRID = ((2, 6, 12, 24, 48, 96, 168), ("raw", "global mean", "symbol mean", "event-type mean", "symbol z", "daily rank"))
+SENT_TARGETS = {
+    "d1": ("next close in the indicator's direction (sd)", 0.0),
+    "d5": ("next five closes in the indicator's direction (sd/√5)", 0.0),
+    "v1": ("next-close variance when |indicator| is in its top third (x symbol's own)", 1.0),
+    "same": ("same-day move in the indicator's direction (sd) — describing, not forecasting", 0.0),
+}
+SEARCHED = ("d1", "d5", "v1")
+# Fixed 2026-10-05, after the first run picked them out of the grid: balanced
+# short-memory tone leaned toward next-day continuation (t 3.6-4.6, below the
+# family bar). From here on each is ONE pre-registered test, judged on data
+# after LEADS_FROM only, where no search has touched it.
+LEADS = ((12, "event-type mean"), (6, "symbol z"))
+LEADS_FROM = dt.date(2026, 10, 2)
+
+
+class Clock:
+    """Hours on the trading clock: regular-session minutes elapse, each
+    overnight (weekend or holiday included) counts one hour."""
+
+    def __init__(self, sessions: list[dt.date]):
+        self.sessions = sessions
+
+    def __call__(self, t: dt.datetime) -> float:
+        local = t.astimezone(NY)
+        i = bisect.bisect_left(self.sessions, local.date())
+        elapsed = 0.0
+        if i < len(self.sessions) and self.sessions[i] == local.date():
+            open_ = local.replace(hour=9, minute=30, second=0, microsecond=0)
+            if local >= open_ + dt.timedelta(hours=6.5):
+                i += 1
+            elif local > open_:
+                elapsed = (local - open_).total_seconds() / 3600
+        return i * 7.5 + elapsed
+
+
+class Sentiment:
+    """The decayed indicator under any variant, with the per-variant
+    effect lists and balancing means cached."""
+
+    def __init__(self, data: Data):
+        self.data, self.clock = data, Clock(data.sessions)
+        self.tone = collections.defaultdict(list)
+        for r in data.symbol_tone:
+            self.tone[r["symbol"]].append((r["available_at"], 1.0, r["sentiment"]))
+        self._lists, self._global = {}, {}
+
+    def effects(self, v: dict, sym: str) -> list[tuple]:
+        """(at, weight, x) for the variant's filters, weights and signal,
+        event-type balanced if asked; time-sorted."""
+        key = (sym, v["floor"], v["repeats"], v["cross"], v["weight"], v["signal"], v["balance"] == "event-type mean")
+        if key in self._lists:
+            return self._lists[key]
+        if v["signal"] == "LLM symbol tone":
+            out = sorted(self.tone.get(sym, []))
+        else:
+            if v["balance"] == "event-type mean" and ("types", key[1:]) not in self._lists:
+                self._type_means(v, key[1:])
+            out = []
+            for e in self.data.effects.get(sym, []):
+                if e["materiality"] < v["floor"] or (e["repeat"] and not v["repeats"]) or (e["cross"] and not v["cross"]):
+                    continue
+                m = e["materiality"]
+                w = dict(count=1.0, materiality=m, **{"materiality²": m * m, "vol-weighted": m * (1 + VOL.index(e["vol"]))})[v["weight"]]
+                x = dict(sentiment=e["sentiment"], direction=e["direction"],
+                         **{"sentiment − direction": e["sentiment"] - e["direction"]})[v["signal"]]
+                if v["balance"] == "event-type mean":
+                    x -= self._lists["types", key[1:]].get(id(e), 0.0)
+                out.append((e["at"], w, x))
+        self._lists[key] = out
+        return out
+
+    def _type_means(self, v: dict, key: tuple) -> None:
+        """Each effect's event type's expanding mean signal, over every
+        symbol, from effects available strictly before it."""
+        allx = []
+        for es in self.data.effects.values():
+            for e in es:
+                if e["materiality"] >= v["floor"] and (v["repeats"] or not e["repeat"]) and (v["cross"] or not e["cross"]):
+                    x = dict(sentiment=e["sentiment"], direction=e["direction"],
+                             **{"sentiment − direction": e["sentiment"] - e["direction"]})[v["signal"]]
+                    allx.append((e["at"], e["type"], x, id(e)))
+        allx.sort(key=lambda a: a[0])
+        acc, means = collections.defaultdict(lambda: [0.0, 0]), {}
+        i = 0
+        while i < len(allx):  # effects sharing a window end see none of each other
+            j = i
+            while j < len(allx) and allx[j][0] == allx[i][0]:
+                a = acc[allx[j][1]]
+                means[allx[j][3]] = a[0] / a[1] if a[1] else 0.0
+                j += 1
+            for k in range(i, j):
+                a = acc[allx[k][1]]
+                a[0] += allx[k][2]
+                a[1] += 1
+            i = j
+        self._lists["types", key] = means
+
+    def level(self, v: dict, sym: str, t: dt.datetime, half: float | None = None) -> tuple[float, float]:
+        """(Σ w·k·x, Σ w·k) over the variant's effects available by t, with k
+        the decay at that age: 2^(−age/half) on the chosen clock, or a boxcar."""
+        half = half or v["half"]
+        now = self.clock(t) if v["clock"] == "trading" else None
+        s = i = 0.0
+        for at, w, x in self.effects(v, sym):
+            if at > t:
+                break
+            if v["box"]:
+                k = 1.0 if (t - at) < dt.timedelta(hours=v["box"]) else 0.0
+            else:
+                age = now - self.clock(at) if now is not None else (t - at).total_seconds() / 3600
+                k = 0.5 ** (age / half)
+            s += w * k * x
+            i += w * k
+        return s, i
+
+    def mean_before(self, v: dict, t: dt.datetime, sym: str | None = None, since: dt.datetime | None = None) -> float:
+        """Weighted mean signal of effects available by t: over every symbol
+        (the global optimism), or one symbol's since `since`."""
+        syms = [sym] if sym else list(self.data.effects)
+        num = den = 0.0
+        for s in syms:
+            for at, w, x in self.effects(v, s):
+                if at > t:
+                    break
+                if since is None or at > since:
+                    num += w * x
+                    den += w
+        return num / den if den else 0.0
+
+
+def sentiment_rows(data: Data) -> list[dict]:
+    """Symbol-days of single names: decided at the close with news cut just
+    before it, complete coverage for the 7 days behind it, no release from
+    the day before to a week after, and forward closes to the fifth."""
+    rows = []
+    for sym in data.singles:
+        r, sd = data.ret[sym], data.sd[sym]
+        for i, d in enumerate(data.sessions[:-5]):
+            close = data.close_at(d)
+            fwd = [data.sessions[i + k] for k in range(1, 6)]
+            if d not in r or any(f not in r for f in fwd) or not data.known(sym, close, dt.timedelta(days=7)) \
+                    or data.near_release(sym, d, 1, 7):
+                continue
+            rows.append(dict(symbol=sym, day=d, cut=close - dt.timedelta(seconds=1), z0=r[d] / sd,
+                             f1=r[fwd[0]] / sd, f5=sum(r[f] for f in fwd) / sd / math.sqrt(5)))
+    by = collections.defaultdict(list)
+    for x in rows:
+        by[x["symbol"]].append(x["f1"] ** 2)
+    for x in rows:
+        x["v1"] = x["f1"] ** 2 / (sum(by[x["symbol"]]) / len(by[x["symbol"]]))
+    return rows
+
+
+def indicator(sent: Sentiment, rows: list[dict], v: dict) -> list[float | None]:
+    """The variant's value on every row (None where it has no news)."""
+    vals = []
+    for r in rows:
+        if v["transform"] == "change 24h−120h":
+            (s1, i1), (s2, i2) = sent.level(v, r["symbol"], r["cut"], 24), sent.level(v, r["symbol"], r["cut"], 120)
+            vals.append(s1 / i1 - s2 / i2 if i1 > 1e-9 and i2 > 1e-9 else None)
+            continue
+        s, i = sent.level(v, r["symbol"], r["cut"])
+        if i <= 1e-9:
+            vals.append(None)
+            continue
+        mu = 0.0
+        if v["balance"] == "global mean":
+            mu = sent.mean_before(v, r["cut"])
+        elif v["balance"] == "symbol mean":
+            mu = sent.mean_before(v, r["cut"], r["symbol"], r["cut"] - dt.timedelta(days=14))
+        vals.append(s - mu * i if v["transform"] == "sum" else s / i - mu)
+    if v["balance"] == "symbol z":
+        hist = collections.defaultdict(list)
+        out = [None] * len(rows)
+        for k in sorted(range(len(rows)), key=lambda k: rows[k]["day"]):
+            h, x = hist[rows[k]["symbol"]], vals[k]
+            if x is None:
+                continue
+            if len(h) >= 5:
+                prev = h[-20:]
+                m = sum(prev) / len(prev)
+                sd = math.sqrt(sum((p - m) ** 2 for p in prev) / (len(prev) - 1))
+                out[k] = (x - m) / sd if sd > 1e-9 else None
+            h.append(x)
+        vals = out
+    if v["balance"] == "daily rank" or v["transform"] == "residual on the move":
+        days = collections.defaultdict(list)
+        for k, x in enumerate(vals):
+            if x is not None:
+                days[rows[k]["day"]].append(k)
+        out = [None] * len(rows)
+        for ks in days.values():
+            if v["transform"] == "residual on the move":
+                if len(ks) < 4:
+                    continue
+                xs, ys = [rows[k]["z0"] for k in ks], [vals[k] for k in ks]
+                mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+                sxx = sum((x - mx) ** 2 for x in xs)
+                b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx if sxx else 0.0
+                for k, x, y in zip(ks, xs, ys):
+                    out[k] = y - my - b * (x - mx)
+            else:
+                if len(ks) < 3:
+                    continue
+                order = sorted(ks, key=lambda k: vals[k])
+                for rank, k in enumerate(order):
+                    out[k] = 2 * rank / (len(ks) - 1) - 1
+        vals = out
+    return vals
+
+
+def sent_values(rows: list[dict], vals: list, target: str) -> list[tuple]:
+    """(day, x) for one target; v1 reads the variant's top third by |value|."""
+    have = [(r, x) for r, x in zip(rows, vals) if x is not None]
+    if target == "v1":
+        mags = sorted(abs(x) for _r, x in have)
+        cut = mags[2 * len(mags) // 3] if mags else 0.0
+        return [(r["day"], r["v1"], r["symbol"]) for r, x in have if abs(x) > cut]
+    key = dict(d1="f1", d5="f5", same="z0")[target]
+    return [(r["day"], sgn(x) * r[key], r["symbol"]) for r, x in have if sgn(x)]
+
+
+def consistency(pairs: list[tuple], null: float) -> dict:
+    """How many weeks and symbols, taken alone, lean the pooled way."""
+    if not pairs:
+        return {}
+    lean = sgn(sum(p[1] for p in pairs) / len(pairs) - null)
+    out = {}
+    for name, key in (("weeks", lambda p: monday(p[0])), ("symbols", lambda p: p[2])):
+        by = collections.defaultdict(list)
+        for p in pairs:
+            by[key(p)].append(p[1])
+        means = [sum(v) / len(v) for v in by.values() if len(v) >= 5]
+        out[f"{name}_agree"] = f"{sum(sgn(m - null) == lean for m in means)}/{len(means)}"
+    return out
+
+
+def fast_t(pairs: list[tuple], null: float) -> float | None:
+    by = collections.defaultdict(lambda: [0, 0.0])
+    for day, x, *_ in pairs:
+        a = by[monday(day)]
+        a[0] += 1
+        a[1] += x
+    n, g = len(pairs), len(by)
+    if n < MIN_N or g < MIN_WEEKS:
+        return None
+    m = sum(p[1] for p in pairs) / n
+    se = math.sqrt(g / (g - 1) * sum((a[1] - a[0] * m) ** 2 for a in by.values())) / n
+    return (m - null) / se if se > 1e-12 else None
+
+
+def sentiment(data: Data, draws: int) -> dict:
+    sent = Sentiment(data)
+    rows = sentiment_rows(data)
+    # The base variant is news_scores.sentiment_index, exactly.
+    eff = {s: [dict(at=at, materiality=w, sentiment=x) for at, w, x in sent.effects(BASE, s)] for s in data.singles}
+    for r in rows:
+        mine = sent.level(BASE, r["symbol"], r["cut"])
+        ref = sentiment_index(eff[r["symbol"]], r["cut"], dt.timedelta(hours=48))
+        assert abs(mine[0] - ref[0]) < 1e-9 and abs(mine[1] - ref[1]) < 1e-9, (r, mine, ref)
+
+    variants = []  # (axis, level, variant)
+    for axis, key, levels in SWEEPS:
+        for level in levels:
+            v = dict(BASE, **{key: level})
+            variants.append((axis, str(level), v))
+    for half in GRID[0]:
+        for bal in GRID[1]:
+            variants.append(("grid", f"{half}h × {bal}", dict(BASE, half=half, balance=bal)))
+    values = {}
+    for _axis, _level, v in variants:
+        k = json.dumps(v, sort_keys=True)
+        if k not in values:
+            values[k] = indicator(sent, rows, v)
+
+    by_day = collections.defaultdict(list)
+    for k, r in enumerate(rows):
+        by_day[r["day"]].append(k)
+    rnd = random.Random(13)
+    maxes, shares = [], []
+    for _ in range(draws):
+        perm = list(range(len(rows)))
+        for ks in by_day.values():
+            sh = ks[:]
+            rnd.shuffle(sh)
+            for a, b in zip(ks, sh):
+                perm[a] = b
+        ts = []
+        for vals in values.values():
+            shuffled = [vals[perm[k]] for k in range(len(rows))]
+            for tg in SEARCHED:
+                t = fast_t(sent_values(rows, shuffled, tg), SENT_TARGETS[tg][1])
+                if t is not None:
+                    ts.append(abs(t))
+        maxes.append(max(ts, default=0.0))
+        shares.append(sum(t > 2.0 for t in ts) / len(ts) if ts else 0.0)
+    cut = placebo_cut(maxes)
+
+    cells = []
+    for axis, level, v in variants:
+        vals = values[json.dumps(v, sort_keys=True)]
+        for tg, (desc, null) in SENT_TARGETS.items():
+            pairs = sent_values(rows, vals, tg)
+            c = dict(stat([dict(day=d, x=x) for d, x, _s in pairs], lambda r: r["x"], null=null),
+                     axis=axis, level=level, target=tg, description=desc, rows_with_news=sum(x is not None for x in vals),
+                     **consistency(pairs, null))
+            judge([c], cut if tg in SEARCHED else 0.0)
+            if tg == "same" and c["verdict"] == "finding":
+                c["verdict"] = "describes"
+            cells.append(c)
+    leads = []
+    for half, bal in LEADS:
+        v = dict(BASE, half=half, balance=bal)
+        have = [(r, x) for r, x in zip(rows, values[json.dumps(v, sort_keys=True)]) if x is not None and sgn(x)]
+        price = [(r["day"], sgn(r["z0"]) * r["f1"]) for r, _x in have if sgn(r["z0"])]
+        for label, sub, post in (
+            ("in sample (picked here)", have, True),
+            ("tone agrees with the day's move", [(r, x) for r, x in have if sgn(x) == sgn(r["z0"])], True),
+            ("tone opposes the day's move", [(r, x) for r, x in have if sgn(x) == -sgn(r["z0"])], True),
+            (f"out of sample (after {LEADS_FROM})", [(r, x) for r, x in have if r["day"] > LEADS_FROM], False),
+        ):
+            c = dict(stat([dict(day=r["day"], x=sgn(x) * r["f1"]) for r, x in sub], lambda q: q["x"]),
+                     lead=f"{half}h × {bal}", label=label, post_hoc=post)
+            judge([c], 0.0)
+            leads.append(c)
+        c = dict(stat([dict(day=d, x=x) for d, x in price], lambda q: q["x"]), lead=f"{half}h × {bal}",
+                 label="control: the day's own move, same rows", post_hoc=True)
+        judge([c], 0.0)
+        leads.append(c)
+    return dict(rows=len(rows), symbols=len({r["symbol"] for r in rows}), weeks=len({monday(r["day"]) for r in rows}),
+                base=BASE, leads=leads, leads_from=LEADS_FROM.isoformat(), targets={k: dict(description=d, null=n) for k, (d, n) in SENT_TARGETS.items()},
+                grid=dict(half=list(GRID[0]), balance=list(GRID[1])),
+                placebo=dict(t95=cut, draws=draws, share_t_over_2=sum(shares) / len(shares) if shares else None),
+                cells=cells)
+
+
+# ------------------------------------------------------------------ E
+
+Z75 = 0.6744897501960817
+
+
+def crps_normal(mu: float, sigma: float, y: float) -> float:
+    z = (y - mu) / sigma
+    pdf = math.exp(-z * z / 2) / math.sqrt(2 * math.pi)
+    cdf = 0.5 * (1 + math.erf(z / math.sqrt(2)))
+    return sigma * (z * (2 * cdf - 1) + 2 * pdf - 1 / math.sqrt(math.pi))
+
+
+def halves(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    weeks = sorted({monday(r["day"]) for r in rows})
+    first = set(weeks[: len(weeks) // 2])
+    return [r for r in rows if monday(r["day"]) in first], [r for r in rows if monday(r["day"]) not in first]
+
+
+def cross_fit(rows: list[dict], fit, apply) -> dict:
+    """Fit on one half of the weeks, score the other, then swap: every row
+    is scored out of sample. Skill is the CRPS saved against the unmodified
+    model, as a ratio of sums with its weekly interval."""
+    a, b = halves(rows)
+    scored_rows, params = [], []
+    for train, test in ((a, b), (b, a)):
+        p = fit(train)
+        params.append(p)
+        for r in test:
+            scored_rows.append(dict(day=r["day"], base=r["crps"], new=apply(r, p)))
+    out = stat(scored_rows, lambda r: r["base"] - r["new"], lambda r: r["base"], null=0.0)
+    out["params"] = params
+    return out
+
+
+def forecaster(data: Data, fc: list[dict], sent: Sentiment) -> dict:
+    """Offline: rescale or shift the vol-timing model's log-normal (read
+    back from its quartiles) by a news term and score it by Gaussian CRPS
+    in log space, out of sample. Then the directional models' own skill by
+    news state."""
+    rows = []
+    for r in fc:
+        if r["symbol"] in ETFS or not data.known(r["symbol"], r["decided"], DAY):
+            continue
+        sigma = (math.log(r["q75"]) - math.log(r["q25"])) / (2 * Z75)
+        mu, y = math.log(r["q50"]), math.log(r["realized"])
+        s, i = sent.level(BASE, r["symbol"], r["decided"])
+        (s1, i1), (s2, i2) = sent.level(BASE, r["symbol"], r["decided"], 24), sent.level(BASE, r["symbol"], r["decided"], 120)
+        rows.append(dict(r, mu=mu, sigma=sigma, y=y, crps=crps_normal(mu, sigma, y),
+                         state=data.news_state(r["symbol"], r["decided"]), intensity=i,
+                         tone=s / i if i > 1e-9 else 0.0,
+                         change=s1 / i1 - s2 / i2 if i1 > 1e-9 and i2 > 1e-9 else 0.0))
+    grid = [0.5 + 0.01 * k for k in range(151)]
+
+    def fit_scale(key):
+        def fit(train):
+            out = {}
+            for state in {key(r) for r in train}:
+                sub = [r for r in train if key(r) == state]
+                out[state] = min(grid, key=lambda k: sum(crps_normal(r["mu"], k * r["sigma"], r["y"]) for r in sub))
+            return out
+        return fit
+
+    def apply_scale(key):
+        return lambda r, p: crps_normal(r["mu"], p.get(key(r), 1.0) * r["sigma"], r["y"])
+
+    def tercile(r, cuts):
+        return "low" if r["intensity"] <= cuts[0] else "mid" if r["intensity"] <= cuts[1] else "high"
+
+    def fit_intensity(train):
+        xs = sorted(r["intensity"] for r in train)
+        cuts = (xs[len(xs) // 3], xs[2 * len(xs) // 3])
+        return dict(cuts=cuts, k=fit_scale(lambda r: tercile(r, cuts))(train))
+
+    betas = [-1 + 0.02 * k for k in range(101)]
+
+    def fit_drift(key):
+        return lambda train: min(betas, key=lambda b: sum(
+            crps_normal(r["mu"] + b * r[key] * r["sigma"], r["sigma"], r["y"]) for r in train))
+
+    tests = [
+        dict(test="E1", label="vol multiplier by news state (none / unflagged / flagged)",
+             **cross_fit(rows, fit_scale(lambda r: r["state"]), apply_scale(lambda r: r["state"]))),
+        dict(test="E1", label="vol multiplier by news-intensity tercile (48 h index)",
+             **cross_fit(rows, fit_intensity,
+                         lambda r, p: crps_normal(r["mu"], p["k"].get(tercile(r, p["cuts"]), 1.0) * r["sigma"], r["y"]))),
+        dict(test="E3", label="drift β × tone (48 h) × σ",
+             **cross_fit(rows, fit_drift("tone"), lambda r, b: crps_normal(r["mu"] + b * r["tone"] * r["sigma"], r["sigma"], r["y"]))),
+        dict(test="E3", label="drift β × tone change (24 h − 120 h) × σ",
+             **cross_fit(rows, fit_drift("change"), lambda r, b: crps_normal(r["mu"] + b * r["change"] * r["sigma"], r["sigma"], r["y"]))),
+    ]
+    judge(tests, 0.0)
+    signed(tests)
+
+    # Post hoc, from section C: ETFs with a payrolls release inside the horizon.
+    pay = sorted(dt.datetime.fromisoformat(e) for (e,) in data.db.execute(
+        "SELECT event_time FROM events WHERE kind = 'jobs_report'"))
+    etf = []
+    for r in fc:
+        if r["symbol"] not in ETFS:
+            continue
+        sigma = (math.log(r["q75"]) - math.log(r["q25"])) / (2 * Z75)
+        mu, y = math.log(r["q50"]), math.log(r["realized"])
+        has = bisect.bisect_right(pay, r["decided"] + dt.timedelta(days=7)) > bisect.bisect_right(pay, r["decided"])
+        etf.append(dict(r, mu=mu, sigma=sigma, y=y, crps=crps_normal(mu, sigma, y), state="payrolls" if has else "none"))
+    t = dict(test="E4", label="ETF vol multiplier when payrolls fall inside the 7-day horizon", post_hoc=True,
+             **cross_fit(etf, fit_scale(lambda r: r["state"]), apply_scale(lambda r: r["state"])))
+    judge([t], 0.0)
+    signed([t])
+    tests.append(t)
+
+    # E2: the directional models' CRPS skill against their null, by news state.
+    skill = []
+    for run in ("mean_reversion_all", "mean_reversion_prevailing_all"):
+        path = ROOT / "out" / run / "forecasts.csv"
+        if not path.exists():
+            continue
+        frs = [r for r in forecasts(data, path) if r["symbol"] not in ETFS and data.known(r["symbol"], r["decided"], DAY)
+               and not data.near_release(r["symbol"], r["day"], 3, 7)]
+        for r in frs:
+            r["state"] = data.news_state(r["symbol"], r["decided"])
+            prev = data.sessions[bisect.bisect_left(data.sessions, r["decided"].astimezone(NY).date()) - 1]
+            c = data.close[r["symbol"]].get(prev)
+            raw_sd = math.sqrt(sum(x * x for x in data.ret_raw[r["symbol"]].values()) / len(data.ret_raw[r["symbol"]]))
+            r["big"] = c is not None and abs(math.log(r["spot"] / c)) > raw_sd
+        for label, sub in (("all", frs), *((f"news {s}", [r for r in frs if r["state"] == s]) for s in ("none", "unflagged", "flagged")),
+                           ("move > 1 sd since the prior close, no news", [r for r in frs if r["big"] and r["state"] == "none"]),
+                           ("move > 1 sd since the prior close, with news", [r for r in frs if r["big"] and r["state"] != "none"])):
+            skill.append(dict(stat(sub, lambda r: r["null"] - r["model"], lambda r: r["null"], null=0.0), run=run, bucket=label))
+    judge(skill, 0.0)
+    signed(skill)
+    return dict(rows=len(rows), weeks=len({monday(r["day"]) for r in rows}), tests=tests, skill=skill)
+
+
+# ------------------------------------------------------------------ F
+
+def day_type(data: Data, draws: int) -> dict:
+    """Initial balance = the first hour; a day closes inside it, beyond it by
+    under one width, or beyond by a width or more (a trend day) — the
+    intraday report's `day_close_beyond`. Labelled by fresh material news
+    available between the prior close and 10:30."""
+    rows = []
+    for sym in data.singles:
+        by_day = collections.defaultdict(list)
+        for t, o, h, l, c in data.bars[sym]:
+            by_day[t.astimezone(NY).date()].append((t.astimezone(NY), h, l, c))
+        for d, bs in by_day.items():
+            i = data.sidx.get(d)
+            if not i or len(bs) < 70 or data.near_release(sym, d, 1, 1):
+                continue
+            ib_end = dt.datetime(d.year, d.month, d.day, 10, 30, tzinfo=NY).astimezone(dt.timezone.utc)
+            if not data.known(sym, ib_end, DAY):
+                continue
+            ib = [b for b in bs if b[0].hour == 9 or (b[0].hour == 10 and b[0].minute < 30)]
+            hi, lo = max(b[1] for b in ib), min(b[2] for b in ib)
+            if hi <= lo:
+                continue
+            close = bs[-1][3]
+            beyond = max(close - hi, lo - close, 0) / (hi - lo)
+            news = data.fresh(sym, data.close_at(data.sessions[i - 1]), ib_end)
+            label = "none" if not news else "flagged" if any(e["vol"] != "none" for e in news) else "unflagged"
+            rows.append(dict(symbol=sym, day=d, label=label, trend=float(beyond >= 1), inside=float(beyond == 0)))
+
+    def diffs(labels):
+        out = {}
+        for outcome in ("trend", "inside"):
+            for lab in ("flagged", "unflagged"):
+                sub = [(r["day"], r[outcome]) for r, l in zip(rows, labels) if l == lab]
+                base = [r[outcome] for r, l in zip(rows, labels) if l == "none"]
+                if sub and base:
+                    m = sum(base) / len(base)
+                    out[outcome, lab] = fast_t([(d, x - m) for d, x in sub], 0.0)
+        return out
+
+    by = collections.defaultdict(list)
+    for k, r in enumerate(rows):
+        by[r["day"]].append(k)
+    labels = [r["label"] for r in rows]
+    rnd, maxes = random.Random(17), []
+    for _ in range(draws):
+        sh = labels[:]
+        for ks in by.values():
+            p = [labels[k] for k in ks]
+            rnd.shuffle(p)
+            for k, l in zip(ks, p):
+                sh[k] = l
+        maxes.append(max((abs(t) for t in diffs(sh).values() if t is not None), default=0.0))
+    cut = placebo_cut(maxes)
+    cells = []
+    for outcome in ("trend", "inside"):
+        base = [r[outcome] for r in rows if r["label"] == "none"]
+        m = sum(base) / len(base) if base else 0.0
+        for lab in ("none", "unflagged", "flagged"):
+            sub = [r for r in rows if r["label"] == lab]
+            c = dict(stat(sub, lambda r: r[outcome]), outcome=outcome, label=lab, kind="share", null=None)
+            c["verdict"] = "descriptive"
+            cells.append(c)
+            if lab != "none":
+                c = dict(stat(sub, lambda r: r[outcome] - m, null=0.0), outcome=outcome, label=lab, kind="vs no news")
+                judge([c], cut)
+                cells.append(c)
+    return dict(rows=len(rows), weeks=len({monday(r["day"]) for r in rows}), placebo=dict(t95=cut, draws=draws), cells=cells)
+
+
 def statistics_sd(xs: list[float]) -> float:
     m = sum(xs) / len(xs)
     return math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1))
@@ -701,7 +1265,8 @@ def main() -> None:
     fc = forecasts(data, args.forecasts)
 
     sections = dict(coverage=coverage(data), recheck=recheck(data, fc), kinds=kinds(data, fc, args.draws),
-                    macro=macro(data, fc, args.draws))
+                    macro=macro(data, fc, args.draws), sentiment=sentiment(data, args.draws),
+                    forecaster=forecaster(data, fc, Sentiment(data)), day_type=day_type(data, args.draws))
     commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
     report = dict(provenance=dict(
         snapshot=str(data.db_path), cache=str(args.cache), forecasts=str(args.forecasts), commit=commit,
