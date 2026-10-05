@@ -17,8 +17,8 @@ open. Returns run to the entry session's close (`rest`), the next session's
 (`d1`) and the fifth's (`d5`), minus SPY's over the same span for single
 names, in units of the symbol's daily stdev (`d5` over √5). `pre` is the
 window itself: the 30 minutes (or the night) before t, already history when
-the score arrives. "Fresh news" is a non-repeat effect with materiality >= 1
-whose window ends at t. Intervals resample whole days: news clusters, and
+the score arrives; `past` is the move since the prior session's close. "Fresh
+news" is a non-repeat effect with materiality >= 1 whose window ends at t. Intervals resample whole days: news clusters, and
 ~20 days, not ~4 000 rows, is the sample.
 
 Variance is read against the **same entry slot's** quiet rows (no material
@@ -43,7 +43,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from news_profile import load
-from news_scores import CACHE, _calls, scored, segments
+from news_scores import CACHE, _calls, effects_by_symbol, scored, segments, sentiment_index
 from option_premium import ETFS, default_db
 
 NY = ZoneInfo("America/New_York")
@@ -145,7 +145,8 @@ def panel(cache: Path, db) -> list[dict]:
         k = days.index(day)
         out = {h: math.log(closes[sym][days[k + n]] / px) if k + n < len(days) else None
                for h, n in (("rest", 0), ("d1", 1), ("d5", 5))}
-        return day, dict(out, pre=math.log(px / bars[j - 1][2]) if j else None)
+        past = math.log(px / closes[sym][days[k - 1]]) if k else None
+        return day, dict(out, pre=math.log(px / bars[j - 1][2]) if j else None, past=past)
 
     grid = []
     for a, b in segs:
@@ -180,7 +181,7 @@ def panel(cache: Path, db) -> list[dict]:
             w = sum(e["materiality"] for e in now)
             local = t.astimezone(NY).time()
             rows.append(dict(
-                symbol=sym, day=day, etf=etf, slot="open" if local in (dt.time(9, 30), dt.time(16, 0)) else f"{local:%H:%M}",
+                symbol=sym, t=t, day=day, etf=etf, slot="open" if local in (dt.time(9, 30), dt.time(16, 0)) else f"{local:%H:%M}",
                 earnings=any(abs((day - d).days) <= 1 for d in releases[sym]),
                 mat=max((e["materiality"] for e in now), default=0),
                 vol=max((("none", "elevated", "high").index(e["vol"]) for e in now), default=-1),
@@ -262,6 +263,50 @@ def events(rows) -> None:
         "d1 variance": var("d1")})
 
 
+def sentiment(rows, items) -> None:
+    """The decayed sentiment indicator (`news_scores.sentiment_index`): where
+    it stands now, and whether its tone (sentiment / intensity, in terciles
+    across rows) or its intensity says anything about direction, continuation
+    of the move since the prior close, or variance. A row counts only once the
+    scored history covers three half-lives before it."""
+    eff, segs = effects_by_symbol(items), segments(items)
+    end = segs[-1][1]
+    now = [(s / i, i, sym) for sym, es in eff.items()
+           for s, i in [sentiment_index(es, end, dt.timedelta(hours=48))] if i > 0.5]
+    print(f"\n=== sentiment, 48h half-life, as of {end:%Y-%m-%d %H:%M} UTC: tone (intensity) ===")
+    print("  " + "  ".join(f"{sym} {tone:+.2f} ({i:.0f})" for tone, i, sym in sorted(now, reverse=True)))
+    sg = lambda x: (x > 0) - (x < 0)
+    for hours in (24, 48):
+        half = dt.timedelta(hours=hours)
+        warm = [dict(r) for r in rows if not r["etf"] and not r["earnings"]
+                and any(a <= r["t"] - 3 * half and r["t"] <= b for a, b in segs)]
+        for r in warm:
+            s, i = sentiment_index(eff.get(r["symbol"], []), r["t"], half)
+            r["tone"], r["intensity"] = s / i if i else 0.0, i
+        cut = lambda k: sorted(r[k] for r in warm)
+        tones, ints = cut("tone"), cut("intensity")
+        third = lambda xs, r_: 0 if r_ < xs[len(xs) // 3] else 2 if r_ > xs[2 * len(xs) // 3] else 1
+        for r in warm:
+            r["tband"], r["iband"] = third(tones, r["tone"]), third(ints, r["intensity"])
+        print(f"\n--- half-life {hours}h: {len(warm)} rows over {len({r['day'] for r in warm})} days, "
+              f"tone terciles at {tones[len(tones) // 3]:+.2f} / {tones[2 * len(tones) // 3]:+.2f} ---")
+        tercile = ("low", "mid", "high")
+        z = lambda h: lambda r: r["z"][h]
+        table("direction: return by tone tercile", [(f"tone {n}", [r for r in warm if r["tband"] == k])
+              for k, n in enumerate(tercile)], {h: z(h) for h in ("past", "rest", "d1", "d5")})
+        moved = [r for r in warm if r["z"]["past"] is not None and abs(r["z"]["past"]) > 0.5]
+        agrees = lambda r: r["tband"] != 1 and (r["tband"] == 2) == (r["z"]["past"] > 0)
+        cont = lambda h: lambda r: sg(r["z"]["past"]) * r["z"][h] if r["z"][h] is not None else None
+        table("momentum: after a >0.5 sd move since the prior close, return in its direction", [
+            ("all moves", moved), ("tone agrees", [r for r in moved if agrees(r)]),
+            ("tone opposes", [r for r in moved if r["tband"] != 1 and not agrees(r)]),
+            ("tone mid", [r for r in moved if r["tband"] == 1])], {h: cont(h) for h in ("rest", "d1", "d5")})
+        table("variance / same-slot quiet mean", [
+            *((f"intensity {n}", [r for r in warm if r["iband"] == k]) for k, n in enumerate(tercile)),
+            ("tone low", [r for r in warm if r["tband"] == 0]), ("tone high", [r for r in warm if r["tband"] == 2]),
+        ], {h: (lambda h: lambda r: r[h + "_var"])(h) for h in ("rest", "d1", "d5")}, sign=False)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cache", default=CACHE, type=Path)
@@ -269,7 +314,9 @@ def main() -> None:
     args = ap.parse_args()
     db = sqlite3.connect(f"file:{args.db or default_db()}?mode=ro", uri=True)
     audit(args.cache, db)
-    events(panel(args.cache, db))
+    rows = panel(args.cache, db)
+    events(rows)
+    sentiment(rows, scored(args.cache))
 
 
 if __name__ == "__main__":

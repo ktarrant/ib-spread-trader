@@ -1583,6 +1583,21 @@ the labels are sound and the price has moved before the window closes; what
 edge there is lives inside the window, faster than a 30-minute batch can act.
 Re-run when the middle is scored before concluding more.
 
+**A decayed sentiment indicator** (`news_scores.sentiment_index`): materiality
+× sentiment summed with a 2^(−age/half-life) decay, beside the same sum of
+materiality (*intensity*, the volume of news); tone is their ratio. The LLM's
+sentiment runs positive (+0.15 mean, 2:1), so read tone in terciles across
+rows, not against zero, and decay never reaches zero, so "no news" is the low
+intensity tercile. On the same 12–15 days, at 24 h and 48 h half-lives: tone
+tracks the move *since the prior close* (low tercile −0.15 to −0.18 sd, high
++0.14 to +0.17) and orders nothing after it; high intensity comes with ~1.5×
+variance for the rest of the session and none after. One cut to test, fixed
+now so the full data can confirm or kill it: **a move the tone opposes
+reverses** (48 h: −0.38 sd [−0.68, −0.12] over five sessions; 24 h −0.21,
+interval spans zero) — the stock-tape form of the mean-reversion hint that
+fades agreeing with the LLM's direction hit 64 % against 50 %. Same weeks,
+many cuts: a hypothesis, not a finding.
+
 ## Test fixtures generate their own options
 
 `engine::testing::snapshot_with` builds a real on-disk snapshot whose ladder is

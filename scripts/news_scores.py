@@ -68,3 +68,34 @@ def segments(items: list[dict]) -> list[tuple[dt.datetime, dt.datetime]]:
             out.append((ends[start], ends[i - 1]))
             start = i
     return out
+
+
+def effects_by_symbol(items: list[dict]) -> dict[str, list[dict]]:
+    """Per symbol, time-sorted material (>= 1), non-repeat effects on it —
+    cross-symbol read-through included — each stamped with its window end."""
+    out: dict[str, list[dict]] = {}
+    for it in items:
+        if it["is_repeat"]:
+            continue
+        for e in it["effects"]:
+            if e["materiality"] >= 1:
+                out.setdefault(e["symbol"], []).append(dict(e, at=it["available_at"]))
+    for v in out.values():
+        v.sort(key=lambda e: e["at"])
+    return out
+
+
+def sentiment_index(effects: list[dict], t: dt.datetime, half_life: dt.timedelta) -> tuple[float, float]:
+    """(sentiment, intensity) as of t: sum of materiality x sentiment, and of
+    materiality, each decayed by 2^(-age / half_life) — the integrated tone
+    and the volume of news behind it. tone = sentiment / intensity when
+    intensity > 0. Reads only effects available by t. ponytail: decays in
+    calendar time, so a weekend fades news as much as two sessions do."""
+    s = i = 0.0
+    for e in effects:
+        if e["at"] > t:
+            break
+        w = e["materiality"] * 0.5 ** ((t - e["at"]) / half_life)
+        s += w * e["sentiment"]
+        i += w
+    return s, i
