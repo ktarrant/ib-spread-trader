@@ -1676,6 +1676,32 @@ best. On the 2026-10-04 snapshot:
 So headline news stays out of the models, the macro calendar is the next vol
 input, and the study re-runs on every weekly snapshot.
 
+## ARK's daily trades: a contrarian readout, no forward edge yet
+
+The capture syncs ARK's daily ETF trades (`ark_buy`/`ark_sell` events, from
+2020, `after_close` on the trade day; `detail_json.etf_percent` is the fund
+weight traded). `scripts/ark_study.py` is the event study: SPY-adjusted daily
+moves in sd units, signed by the day's net ARK flow, entered at the next open
+(the email lands after the close), weekly-block intervals.
+
+The limit is our prices, not ARK's history: the snapshot's daily tape starts
+2026-05-15, so the 2026-10-05 run has **100 ARK symbol-days over 20 weeks** on
+9 cohort names (AMD 23 sells, PLTR 13s/4b; SPCX 13, COIN 10, META 9, NVDA 7,
+TSLA 8b/2s buys; GS, UBER, XOM, AAPL, BA none in the window).
+
+- **ARK trades against the recent move.** The 5 sessions before a trade ran
+  −0.41 sd [−0.66, −0.16] in ARK's direction: it buys laggards and sells
+  leaders — the same fade our mean-reversion model makes.
+- **No reaction to the email**: the overnight gap is −0.03 [−0.14, +0.10].
+- **Forward, nothing that survives the search.** Next session +0.11
+  [−0.01, +0.24], fifth +0.04, twentieth +0.11. Demeaning each symbol's drift
+  pushes d1 (+0.14) and d20 (+0.21) just clear of zero, but that is 2 of ~40
+  cells, d20 windows overlap within 20 weeks, and the most independent rows —
+  the leading edge of a run — show nothing (d20 −0.18).
+
+What would settle it is daily bars back to 2020 for the cohort (a capture-side
+backfill): ARK's history already holds 1 227 cohort trade days.
+
 ## Test fixtures generate their own options
 
 `engine::testing::snapshot_with` builds a real on-disk snapshot whose ladder is
