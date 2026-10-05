@@ -26,7 +26,14 @@ news in the prior 24 h, no release within a session): overnight news enters
 at the open and holds a whole session, so a raw comparison with rows spread
 across the day would read time of day as a news effect.
 
-    python3 scripts/news_audit.py [--cache news-llm.sqlite3] [--db snapshot]
+**Realized against implied**, on the vol-timing run's forecast log: the 7-day
+move over the move ATM IV priced, squared and averaged (1.00 = the options
+priced it fairly), by the news in the 24 hours before the decision bar. This is
+the vol model's question: does a headline say the stock will move more or less
+than its options charge for? Each symbol is also read against its own average,
+because how much news a name gets mostly says which name it is.
+
+    python3 scripts/news_audit.py [--cache news-llm.sqlite3] [--db snapshot] [--forecasts forecasts.csv]
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import collections
+import csv
 import datetime as dt
 import json
 import math
@@ -47,6 +55,7 @@ from news_scores import CACHE, _calls, effects_by_symbol, scored, segments, sent
 from option_premium import ETFS, default_db
 
 NY = ZoneInfo("America/New_York")
+FORECASTS = Path(__file__).resolve().parent.parent / "out/vol_timing_all/forecasts.csv"
 LEAN = 0.15  # |direction| at or below this is no call
 
 
@@ -115,6 +124,14 @@ def audit(cache: Path, db) -> None:
     print("segments:", ", ".join(f"{a:%Y-%m-%d %H:%M}..{b:%Y-%m-%d %H:%M}" for a, b in segments(scored(cache))))
 
 
+def release_days(db) -> dict[str, set[dt.date]]:
+    out = collections.defaultdict(set)
+    for sym, day in db.execute("SELECT symbol, COALESCE(json_extract(detail_json, '$.reaction_date'), event_date) "
+                               "FROM events WHERE kind = 'earnings'"):
+        out[sym].add(dt.date.fromisoformat(day))
+    return out
+
+
 def panel(cache: Path, db) -> list[dict]:
     items = scored(cache)
     segs = segments(items)
@@ -161,10 +178,7 @@ def panel(cache: Path, db) -> list[dict]:
         for e in it["effects"]:
             if not it["is_repeat"]:
                 effects[e["symbol"]].append(dict(e, at=it["available_at"], type=it["event_type"]))
-    releases = collections.defaultdict(set)
-    for sym, day in db.execute("SELECT symbol, COALESCE(json_extract(detail_json, '$.reaction_date'), event_date) "
-                               "FROM events WHERE kind = 'earnings'"):
-        releases[sym].add(dt.date.fromisoformat(day))
+    releases = release_days(db)
 
     spy = {t: move("SPY", t) for t in grid}
     rows = []
@@ -307,16 +321,77 @@ def sentiment(rows, items) -> None:
         ], {h: (lambda h: lambda r: r[h + "_var"])(h) for h in ("rest", "d1", "d5")}, sign=False)
 
 
+def implied(path: Path, items: list[dict], releases) -> None:
+    """Single names, no release within -3..+7 days of the bar. News is
+    `flagged` when any fresh material effect carries an elevated/high `vol`,
+    `unflagged` when it has fresh material news and none does. `day` holds the
+    ISO week here, so `interval` resamples weeks: 7-day horizons overlap."""
+    if not path.exists():
+        print(f"\n(no forecast log at {path}: skipping realized vs implied)")
+        return
+    segs = segments(items)
+    news = collections.defaultdict(list)
+    for it in items:
+        if not it["is_repeat"]:
+            for e in it["effects"]:
+                if e["materiality"] >= 1:
+                    news[e["symbol"]].append((it["available_at"], e["vol"]))
+    rows = []
+    for r in csv.DictReader(path.open()):
+        t, sym = dt.datetime.fromisoformat(r["ts"]), r["symbol"]
+        if sym in ETFS or not (r["realized"] and r["atm_iv"]) \
+                or not any(a <= t - dt.timedelta(hours=24) and t <= b for a, b in segs) \
+                or any(-3 <= (d - t.date()).days <= 7 for d in releases[sym]):
+            continue
+        z = math.log(float(r["realized"]) / float(r["spot"])) / (float(r["atm_iv"]) * math.sqrt(float(r["horizon_years"])))
+        recent = [v for a, v in news[sym] if t - dt.timedelta(hours=24) < a <= t]
+        rows.append(dict(symbol=sym, day=t.isocalendar()[:2], z2=z * z,
+                         news="none" if not recent else "flagged" if any(v != "none" for v in recent) else "unflagged"))
+    if not rows:
+        print("\n(no forecast rows inside a scored segment: skipping realized vs implied)")
+        return
+    by_sym = collections.defaultdict(list)
+    for r in rows:
+        by_sym[r["symbol"]].append(r["z2"])
+    own = {s: sum(v) / len(v) for s, v in by_sym.items()}  # ponytail: full-sample, descriptive only
+    for r in rows:
+        r["rel"] = r["z2"] / own[r["symbol"]]
+    print(f"\n=== realized / implied over 7 days, {path.parent.name}: {len(rows)} single-name bars ===")
+    table("squared move / ATM-IV-implied (1.00 = fairly priced); own symbol: / that symbol's mean", [
+        ("no news 24h", [r for r in rows if r["news"] == "none"]),
+        ("news, vol none", [r for r in rows if r["news"] == "unflagged"]),
+        ("news, vol elevated/high", [r for r in rows if r["news"] == "flagged"]),
+    ], {"raw": lambda r: r["z2"], "own symbol": lambda r: r["rel"]}, sign=False)
+    by = collections.defaultdict(lambda: ([], []))
+    for r in rows:
+        if r["news"] != "none":
+            by[r["day"]][r["news"] == "unflagged"].append(r["rel"])
+    weeks, rnd, ds = [w for w, (f, u) in by.items() if f and u], random.Random(1), []
+    mean = lambda xs: sum(xs) / len(xs)
+    for _ in range(2000):
+        pick = rnd.choices(weeks, k=len(weeks))
+        ds.append(mean([v for w in pick for v in by[w][0]]) - mean([v for w in pick for v in by[w][1]]))
+    ds.sort()
+    point = mean([v for w in weeks for v in by[w][0]]) - mean([v for w in weeks for v in by[w][1]])
+    per = [(mean(f) > mean(u)) for s in own
+           for f, u in [([r["rel"] for r in rows if r["symbol"] == s and r["news"] == k] for k in ("flagged", "unflagged"))]
+           if len(f) > 20 and len(u) > 20]
+    print(f"  flagged minus unflagged, own symbol: {point:+.2f} [{ds[50]:+.2f}, {ds[-51]:+.2f}] over {len(weeks)} weeks; "
+          f"flagged higher on {sum(per)} of {len(per)} symbols")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cache", default=CACHE, type=Path)
     ap.add_argument("--db", default=None)
+    ap.add_argument("--forecasts", default=FORECASTS, type=Path)
     args = ap.parse_args()
     db = sqlite3.connect(f"file:{args.db or default_db()}?mode=ro", uri=True)
     audit(args.cache, db)
-    rows = panel(args.cache, db)
+    rows, items = panel(args.cache, db), scored(args.cache)
     events(rows)
-    sentiment(rows, scored(args.cache))
+    sentiment(rows, items)
+    implied(args.forecasts, items, release_days(db))
 
 
 if __name__ == "__main__":

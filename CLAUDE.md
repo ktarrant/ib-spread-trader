@@ -1575,6 +1575,24 @@ day-block intervals, 43 days, 684 fresh material events ex-releases):
   at the fifth for all fresh news. The move happens with the news and the
   following days are quieter than a quiet bar's, not louder.
 
+**Against the option market's price the calm is mostly symbol mix.** The vol
+model asks whether a stock will move more or less than its options charge, so
+`news_audit.py` also reads the vol-timing run's forecast log: 7-day realized
+move over the ATM-IV-implied move, squared (1.00 = fairly priced), single names,
+no release within −3..+7 days, weekly blocks. Raw, news the LLM marks `vol:
+none` runs **0.68** [0.52, 0.86] against 0.93 for flagged news and for no news —
+which reads as "sell premium after harmless news". Against each symbol's own
+average it is 0.94 vs 1.07, flagged minus unflagged **+0.13 [−0.06, +0.35]**
+over 8 weeks, 7 of 13 symbols: names with constant news coverage simply sit at
+lower ratios. ATM IV relative to its median barely moves with news (0.92–0.97).
+Re-run weekly; a news term in the vol model waits on that interval clearing
+zero.
+
+**`future_events` is not a forward calendar.** Its 17 earnings mentions are
+nearly all same-day or same-week (BA's 10-27 from 09-30 is the one with lead
+time), NVDA's 08-26 print was never announced, and CPI and payrolls appear on
+the day. A scheduled-macro term needs the published BLS/Fed calendars instead.
+
 **A decayed sentiment indicator** (`news_scores.sentiment_index`, drawn as a
 pane in `ib-option-viz`): materiality × sentiment summed with a
 2^(−age/half-life) decay, beside the same sum of materiality (*intensity*);
