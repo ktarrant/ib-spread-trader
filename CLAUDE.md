@@ -1545,58 +1545,54 @@ decided before an earnings release fills after it.
 What this leaves for the live side: cross, or rest at mid only when trading in
 the first half hour. Execution will not rescue a strategy that loses crossing.
 
-## LLM headline scores: clean labels, no forward edge yet
+## LLM headline scores: clean labels, no forward edge
 
-The 2026-10-04 cache (prompt v7, 285 calls, 2 367 stories) is **two segments**:
-08-03 → 08-19 midday and 09-22 midday → 10-02. The backlog was drained
-oldest-first, then newest-first, so the five weeks between hold ~4 900
-headlines and no calls. `news_scores.segments` splits on a gap over four days,
-and both readers treat a time outside every segment as **unknown, not quiet**
-— `news_explore.py` had read the whole gap as no news. Inside a segment about
-one window a day has no call, all of whose headlines the noise filter dropped.
+The 2026-10-04 cache (prompt v7, 594 calls, 4 727 stories) covers 08-03 → 10-02
+in one segment. It was drained oldest-first, then newest-first, and for a day
+held two segments with a month between; `news_scores.segments` splits on a gap
+over four days, and every reader treats a time outside a segment as
+**unknown, not quiet**. About one window a day has no call — all of its
+headlines were dropped by the noise filter — and 98 % of headlines sit in a
+scored window.
 
 The answers are structurally clean: every item answered, no stray ids, nothing
 out of range, no item later than its window, every future event dated after
-"now". Materiality 0/1/2/3 is 31/44/18/7 %, 42 % are repeats, and a hand sample
-of the 3s is real catalysts (guidance, FAA 737 inspections, M&A). **84 % of
-fresh material news lands in the overnight window**, so the first price to see
-it is the 09:30 open.
+"now". Materiality 0/1/2/3 is 31/46/17/6 %, 43 % are repeats, and a hand sample
+of the 3s is real catalysts (guidance, FAA 737 inspections, M&A). Most fresh
+material news lands in the overnight window, so the first price to see it is
+the 09:30 open.
 
 `news_audit.py`'s event study (5-minute stock tape, SPY-adjusted single names,
-day-block intervals, 21 days, ~310 fresh material events ex-releases):
+day-block intervals, 43 days, 684 fresh material events ex-releases):
 
 - **The scores describe the move already made.** In the LLM's direction the
-  window's own return is +0.11 sd [+0.03, +0.18], +0.20 overnight, +0.37 at
-  materiality 3 — the open has priced the news by the time it is scored.
-- **Nothing forward.** Rest of session +0.03 [−0.08, +0.15], next close +0.02
-  [−0.13, +0.18], fifth close +0.00, hit-rate 46 %. Sentiment the same, with a
-  faint reversal intraday (−0.15 [−0.28, −0.04] next close) — one cut of many,
-  so a hint at most.
-- **No vol forecast outside releases.** Against quiet bars at the same entry
-  time, variance after fresh news is 1.24× [0.95, 1.57] to the close and
-  0.76× / 0.67× at one and five sessions; the `vol` flag does not separate.
-  Release days move 2.5–9×, which the calendar already knows.
+  window's own return is +0.10 sd [+0.04, +0.16], +0.17 overnight.
+- **Nothing forward.** Next close +0.07 [−0.02, +0.16], fifth −0.02, hit-rate
+  52 %. Sentiment the same.
+- **A same-day vol flag, and calm after.** Variance against quiet bars at the
+  same entry time: `vol` elevated/high runs 1.31× [1.02, 1.66] for the rest of
+  the session, materiality 2 1.33× — then 0.81× at the next close and 0.71×
+  at the fifth for all fresh news. The move happens with the news and the
+  following days are quieter than a quiet bar's, not louder.
 
-`news_explore.py`'s IV-relative tables reach only 672 rows over 3 weeks (the
-forecast log ends 09-24 and needs a 72-hour lookback) and are unreadable. So:
-the labels are sound and the price has moved before the window closes; what
-edge there is lives inside the window, faster than a 30-minute batch can act.
-Re-run when the middle is scored before concluding more.
+**A decayed sentiment indicator** (`news_scores.sentiment_index`, drawn as a
+pane in `ib-option-viz`): materiality × sentiment summed with a
+2^(−age/half-life) decay, beside the same sum of materiality (*intensity*);
+tone is their ratio. The LLM runs positive (+0.15 mean, 2:1), so read tone in
+terciles across rows, not against zero. Tone tracks the move since the prior
+close (low tercile −0.11 sd, high +0.09 to +0.14) and orders nothing after it.
 
-**A decayed sentiment indicator** (`news_scores.sentiment_index`): materiality
-× sentiment summed with a 2^(−age/half-life) decay, beside the same sum of
-materiality (*intensity*, the volume of news); tone is their ratio. The LLM's
-sentiment runs positive (+0.15 mean, 2:1), so read tone in terciles across
-rows, not against zero, and decay never reaches zero, so "no news" is the low
-intensity tercile. On the same 12–15 days, at 24 h and 48 h half-lives: tone
-tracks the move *since the prior close* (low tercile −0.15 to −0.18 sd, high
-+0.14 to +0.17) and orders nothing after it; high intensity comes with ~1.5×
-variance for the rest of the session and none after. One cut to test, fixed
-now so the full data can confirm or kill it: **a move the tone opposes
-reverses** (48 h: −0.38 sd [−0.68, −0.12] over five sessions; 24 h −0.21,
-interval spans zero) — the stock-tape form of the mean-reversion hint that
-fades agreeing with the LLM's direction hit 64 % against 50 %. Same weeks,
-many cuts: a hypothesis, not a finding.
+**Both hypotheses fixed on the half-scored cache failed on the full one.**
+"A move the 48 h tone opposes reverses" went −0.38 [−0.68, −0.12] → −0.02
+[−0.18, +0.14] over five sessions. "Mean-reversion fades the LLM agrees with
+hit more often" went 64 % → 52 %, against 55 % when it disagrees (weekly
+blocks, 8 weeks of `forecasts.csv`). Skipping entries with fresh news does not
+help either: no-news bars forecast no better, and the trades taken within a day
+of materiality-2+ news made +$5 847 over 17 against −$2 298 over 18 with none —
+a few winners, not a reason to prefer news. Two weeks of data had produced two
+convincing-looking cuts; seven weeks removed both. The one cell left standing
+(`mean_reversion_prevailing` CRPS skill +0.011 [+0.005, +0.029] when the news
+agrees with its fade, hit rate unchanged) is one of ~16 and is not adopted.
 
 ## Test fixtures generate their own options
 
