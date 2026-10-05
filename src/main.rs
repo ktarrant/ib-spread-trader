@@ -6,7 +6,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use clap::{Parser, Subcommand};
 use ib_spread_trader::config::{AccountMode, StrategyConfig};
 use ib_spread_trader::data::{
-    ChainSeries, Snapshot, chain_coverage, snapshot::default_snapshot_path,
+    ChainSeries, NewsSentiment, Snapshot, chain_coverage, news, snapshot::default_snapshot_path,
 };
 use ib_spread_trader::{engine, intraday, report};
 use std::path::PathBuf;
@@ -135,6 +135,24 @@ fn main() -> Result<()> {
         } => {
             let strategy_config = StrategyConfig::load(&config)?;
             let run_config = strategy_config.run_config()?;
+            // The news cache sits beside the snapshots, under its fixed name.
+            let sentiment_gate = match strategy_config.execution.sentiment_gate_half_life_hours {
+                None => None,
+                Some(hours) => {
+                    let dir = snapshot.path().parent().context("snapshot has no directory")?;
+                    Some(engine::SentimentGate {
+                        news: std::sync::Arc::new(NewsSentiment::load(dir.join(news::CACHE_NAME))?),
+                        half_life: chrono::Duration::seconds((hours * 3600.0).round() as i64),
+                    })
+                }
+            };
+            let strategy = || -> Result<engine::Strategy> {
+                let mut s = strategy_config.strategy()?;
+                if let (Some(gate), engine::Strategy::Ranked(r)) = (&sentiment_gate, &mut s) {
+                    r.sentiment_gate = Some(gate.clone());
+                }
+                Ok(s)
+            };
 
             // Load every symbol's chains once, skipping those with no two-sided
             // option bars (a zero-return run would dilute every real result).
@@ -182,7 +200,7 @@ fn main() -> Result<()> {
             let (mut built, runs, curve) = if strategy_config.account_mode()? == AccountMode::Shared {
                 let mut strategies: Vec<engine::Strategy> = symbols
                     .iter()
-                    .map(|_| strategy_config.strategy())
+                    .map(|_| strategy())
                     .collect::<anyhow::Result<_>>()?;
                 let shared = engine::run_shared(&symbols, &mut strategies, &run_config)?;
                 // The earliest chain: `expiry` alone is unset when a dataset lists several.
@@ -194,7 +212,7 @@ fn main() -> Result<()> {
                 let mut runs = Vec::new();
                 for series in symbols.iter().flatten() {
                     // A fresh strategy per symbol: signals carry indicator state.
-                    let mut strategy = strategy_config.strategy()?;
+                    let mut strategy = strategy()?;
                     runs.push(engine::run_symbol(series, &mut strategy, &run_config)?);
                 }
                 let built = report::build(&strategy_config.name, strategy_config.expiry, &runs);

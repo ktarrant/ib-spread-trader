@@ -151,6 +151,29 @@ pub struct RankedStrategy {
     pub model: Box<dyn PriceModel>,
     pub candidates: CandidateConfig,
     pub ranking: RankingConfig,
+    /// `execution.sentiment_gate_half_life_hours`, with the news it reads.
+    /// Attached by the caller, which knows where the news cache is.
+    pub sentiment_gate: Option<SentimentGate>,
+}
+
+/// Veto an entry whose direction the news sentiment disagrees with.
+#[derive(Debug, Clone)]
+pub struct SentimentGate {
+    pub news: std::sync::Arc<crate::data::NewsSentiment>,
+    pub half_life: Duration,
+}
+
+impl SentimentGate {
+    /// Whether to refuse `spread`, decided at `t`. Unknown sentiment and a
+    /// direction-neutral structure are never refused; zero refuses both sides.
+    fn refuses(&self, spread: &Spread, t: DateTime<Utc>) -> bool {
+        if spread.is_direction_neutral() {
+            return false;
+        }
+        self.news
+            .at(&spread.symbol, t, self.half_life)
+            .is_some_and(|s| if spread.profits_from_a_rise() { s <= 0.0 } else { s >= 0.0 })
+    }
 }
 
 /// One symbol's decision engine, in one of two shapes. The bar loop, gates,
@@ -441,6 +464,8 @@ pub struct Census {
     pub entry_spacing: usize,
     /// Refused because the bar fell outside the entry window.
     pub outside_entry_window: usize,
+    /// The ranked choice's direction disagreed with the news sentiment.
+    pub sentiment_disagrees: usize,
     /// Closed at intrinsic because option quotes were unavailable.
     pub synthetic_exits: usize,
     /// A ranked choice was made but the capital left could not fund even one
@@ -1690,6 +1715,15 @@ fn ranked_choose(
                 .is_none_or(|(held, ..)| choice_key(&choice, cfg) > choice_key(held, cfg))
         {
             best = Some((choice, bar.expiry));
+        }
+    }
+    // The news can veto the model's choice, never substitute another: the
+    // decision is read at the close of the bar it was made on.
+    if let (Some(gate), Some((choice, expiry))) = (&ranked.sentiment_gate, &best) {
+        let (series, bar) = open.iter().find(|(_, b)| b.expiry == *expiry).expect("chosen from open");
+        if gate.refuses(&choice.candidate.spread, bar.ts + Duration::minutes(series.bar_minutes)) {
+            census.sentiment_disagrees += 1;
+            best = None;
         }
     }
     // A bar takes at most one candidate, however many chains offered one.

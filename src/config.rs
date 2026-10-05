@@ -327,6 +327,14 @@ pub struct ExecutionConfig {
     /// twice the spread of midday, and a decision fills on the next bar.
     #[serde(default)]
     pub entry_window: Option<[String; 2]>,
+    /// Refuse an entry whose direction disagrees with the sign of the symbol's
+    /// decayed news sentiment (`data::NewsSentiment`, this half-life): a bullish
+    /// structure needs it positive, a bearish one negative. The model still
+    /// chooses the trade; the news can only veto it. Unknown sentiment —
+    /// outside the scored cache, or still warming — refuses nothing, and a
+    /// direction-neutral structure is never refused. Ranked mode only.
+    #[serde(default)]
+    pub sentiment_gate_half_life_hours: Option<f64>,
     /// announcement. Prevents opening positions that would be immediately
     /// closed by `close_before_earnings`.
     #[serde(default)]
@@ -374,6 +382,7 @@ impl Default for ExecutionConfig {
             max_bars_since_rsi_cross_up: None,
             min_days_between_entries: None,
             entry_window: None,
+            sentiment_gate_half_life_hours: None,
             earnings_blackout_days: None,
             post_earnings_blackout_sessions: None,
         }
@@ -1397,6 +1406,14 @@ impl StrategyConfig {
                  and applies only to ranked mode"
             );
         }
+        if let Some(h) = self.execution.sentiment_gate_half_life_hours {
+            if self.mode != StrategyMode::Ranked {
+                bail!("`execution.sentiment_gate_half_life_hours` applies only to ranked mode");
+            }
+            if h.is_nan() || h <= 0.0 {
+                bail!("`execution.sentiment_gate_half_life_hours` must be positive, got {h}");
+            }
+        }
         if let (Some(lo), Some(hi)) = (self.execution.min_entry_rsi, self.execution.max_entry_rsi)
             && lo > hi
         {
@@ -1647,6 +1664,7 @@ impl StrategyConfig {
             model: Box::new(LognormalDriftModel::new(model.model.to_runtime()?)),
             candidates: ranker.candidates.to_runtime()?,
             ranking: ranker.ranking.to_runtime()?,
+            sentiment_gate: None,
         })
     }
 

@@ -39,6 +39,9 @@ pub struct Census {
     pub entry_spacing: usize,
     /// Bars refused because they fell outside the entry window.
     pub outside_entry_window: usize,
+    /// Ranked choices vetoed because the news sentiment disagreed with their
+    /// direction. Zero unless `execution.sentiment_gate_half_life_hours` is set.
+    pub sentiment_disagrees: usize,
     pub signal_diagnostics: BTreeMap<String, usize>,
     pub rejections: BTreeMap<String, usize>,
     pub rejection_examples: BTreeMap<String, String>,
@@ -205,6 +208,7 @@ fn assemble(
         census.no_recent_rsi_cross += run.census.no_recent_rsi_cross;
         census.entry_spacing += run.census.entry_spacing;
         census.outside_entry_window += run.census.outside_entry_window;
+        census.sentiment_disagrees += run.census.sentiment_disagrees;
         census.ranking.merge(&run.census.ranking);
         for (gate, count) in &run.signal_diagnostics {
             *census.signal_diagnostics.entry(gate.clone()).or_default() += count;

@@ -1594,6 +1594,32 @@ convincing-looking cuts; seven weeks removed both. The one cell left standing
 (`mean_reversion_prevailing` CRPS skill +0.011 [+0.005, +0.029] when the news
 agrees with its fade, hit rate unchanged) is one of ~16 and is not adopted.
 
+**Gating the prevailing fade on sentiment's sign costs half the return.**
+`execution.sentiment_gate_half_life_hours` (`data::NewsSentiment`, the same
+reduction as the Python and the viz) vetoes a ranked choice whose direction
+disagrees with the sign of the decayed sentiment — the model still chooses,
+the news can only refuse; unknown sentiment and neutral structures pass, so
+the run matches its base until the cache is scored and warm (08-09).
+`mean_reversion_prevailing_sentiment` over every monthly chain, 48 h:
+
+| | trades | P&L | return | max DD | ret/dd | pf |
+|---|---|---|---|---|---|---|
+| `mean_reversion_prevailing` | 32 | +$9 928 | 49.6 % | 46.5 % | 1.07 | 1.86 |
+| + sentiment gate | 21 | +$4 062 | 20.3 % | 40.9 % | 0.50 | 1.53 |
+
+156 choices vetoed, 12 trades removed (+$7 392, 8 winners), one added
+(+$1 546). Eight of the twelve were bearish fades against positive sentiment,
+and those were the winners (COIN puts +$3 118, PLTR +$1 894, NFLX +$1 348).
+The LLM's sentiment leans positive, so a sign gate mostly vetoes bearish
+trades — and a mean-reversion fade is *by construction* a bet against the
+move the news describes. Do not read the inverse (fade *against* the
+sentiment) off this table: it would be chosen on the trades it is scored on.
+The full-cache tercile table leans the same contrarian way (low tone +0.15 sd
+at five sessions, high −0.07) and is equally in-sample; each weekly capture
+adds weeks to test it on. Several decisions sat on near-zero sentiment
+(TSLA −0.00 vetoed, IWM −0.00 kept), so a dead zone is the other open knob —
+also not to be tuned on these weeks.
+
 ## Test fixtures generate their own options
 
 `engine::testing::snapshot_with` builds a real on-disk snapshot whose ladder is
@@ -2048,6 +2074,7 @@ isolates that axis:
 | `exit_pop_trailing.toml` / `exit_momentum.toml` | exit | Structure-scoped give-ups: live-POP on debits, trailing vs momentum on nakeds. |
 | `equal_weight.toml` | portfolio | Fixed one-lot allocation instead of score-weighted sizing. |
 | `mean_reversion_prevailing.toml` | model | Fade a spike only against the 5-session prevailing trend. Oct-expiry +70.7 %, Aug-expiry −17.7 %; in the frontier. |
+| `mean_reversion_prevailing_sentiment.toml` | execution | The prevailing fade, vetoed when news sentiment disagrees with its direction. 49.6 % → 20.3 %: it vetoes the winning fades. |
 | `mean_reversion_no_horizon.toml` | exit | The base without the forecast-horizon cap. Halves the loss; nakeds gain, debit spreads lose. |
 | `naked_rsi_trailing.toml` | model+ranker+exit | Nakeds at RSI extremes on a trailing stop. Loses 53.9 %; the overbought half is 9/10 of it. |
 | `naked_rsi_recovery.toml` / `_tight.toml` | execution | Enter after RSI turns up through 30, within N bars. First positive arms — and one trade is ~all of it. |

@@ -1,0 +1,20 @@
+# mean_reversion_prevailing, vetoing any entry whose direction the news
+# disagrees with: bullish only on positive decayed sentiment, bearish only on
+# negative. One axis off the base (execution). Before the news cache is scored
+# and warm (3 half-lives) the gate refuses nothing, so the run matches the base.
+name      = "mean-reversion-prevailing-sentiment"
+mode      = "ranked"
+model     = "mean-reversion-prevailing"
+ranker    = "ev"
+portfolio = "shared_20k"
+exit      = "base"
+dataset   = "2026-08-21"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+post_earnings_blackout_sessions = 5
+sentiment_gate_half_life_hours = 48
+
+[costs]
+commission_per_contract = 0.65
