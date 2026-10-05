@@ -323,6 +323,7 @@ def recheck(data: Data, fc: list[dict]) -> dict:
         for state in ("none", "unflagged", "flagged"):
             out.append(dict(stat([r for r in frs if r["state"] == state], lambda r: r["m7"], lambda r: r["i7_rel"], null=1.0),
                             label=f"7-day realized / implied, news {state} (x symbol's own)", population=tag))
+    judge(out, 0.0)  # each a single test, run twice
     return dict(rows=out)
 
 
