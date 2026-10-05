@@ -51,6 +51,12 @@ our crude benchmark (monthly IV scaled to 7 days) rather than a mispricing.
 - **Replace the earnings multiplier with the market's event pricing** once weekly
   multi-expiry captures land: the event-implied move from near-over-far IV, and
   a post-event IV read from the chains after it instead of the trailing median.
+- **Scheduled macro releases as a vol input.** The snapshot's `events` table
+  has the calendar. Payroll sessions carry ~4× ETF variance and ETF ATM IV
+  falls ~4 % over an 08:30 release session (CLAUDE.md, *The news study*). A
+  release term — variance on the day, the premium released at the print — is
+  its own model label; a flat payrolls multiplier on the 7-day monthly-IV
+  horizon did nothing (diluted), so it wants the weekly chains' horizon.
 - **Event data.** XOM has one event in the whole table (calc `events-sync` gap).
   Live trading needs a forward earnings calendar: EDGAR only records a release
   once filed, which a backtest reads in hindsight.
@@ -83,6 +89,19 @@ structure that kept it after costs; its evidence is two ETFs and ~20 trades.
   they should agree.
 - **The validation scripts read a dataset's `expiry`** and fail on an
   `expiries` list.
+
+## News
+
+- **Make every "no news" reader coverage-aware.** Before a symbol's
+  `news_profile.complete_from` its quiet rows may hold headlines IB never
+  returned. `news_study.py` masks; `news_audit.py` and the engine's sentiment
+  gate (`data::NewsSentiment`) do not — the gate treats any scored window as
+  known.
+- **Re-run `scripts/news_study.py` on each weekly snapshot.** The two
+  pre-registered sentiment leads (balanced short-memory tone, `LEADS`) fill
+  their out-of-sample rows from data after 2026-10-02; each is a single test,
+  so its own interval decides it. The News Study page's prose is pinned to
+  the 2026-10-04 snapshot and says when the numbers move past it.
 
 ## Record keeping for models, rankers and backtests (to examine)
 

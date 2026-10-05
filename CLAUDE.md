@@ -35,7 +35,7 @@ read-only and writes only its own cache file; the rest of the repo stays
 hands-off.
 
 When changing the viz: it has its own `CLAUDE.md`, its own conventions and its own
-golden tests (`uv run pytest`, 90 of them, skipping cleanly without a snapshot).
+golden tests (`uv run pytest`, 96 of them, skipping cleanly without a snapshot).
 Run them. And note the dependency direction stays one-way: the viz reads this
 repo's `out/` artifacts, so a field must exist in the report **before** the page
 that renders it, and removing one breaks a consumer you now maintain.
@@ -68,7 +68,9 @@ windows that sync closed, and `scripts/fetch_news_cache.sh` copies its cache
 (`news-llm.sqlite3`) beside the snapshots, where `scripts/news_explore.py`
 (through `scripts/news_scores.py`) and the viz read it, and a read-only dated
 copy into `news/` there (a subfolder, so it never wins the default snapshot
-pick). `scripts/news_audit.py` checks the cache and runs the event study below.
+pick). `scripts/news_audit.py` checks the cache and runs the event study below;
+`scripts/news_study.py` runs the full study (*The news study*, below) into
+`out/news_study.json`, which the viz's News Study page renders as the report.
 
 `out/` holds only the **frontier** — the runs listed in `scripts/run_frontier.sh`,
 which is all the viz offers. Other runs are moved to `out_archive/`, not deleted.
@@ -1575,23 +1577,22 @@ day-block intervals, 43 days, 684 fresh material events ex-releases):
   at the fifth for all fresh news. The move happens with the news and the
   following days are quieter than a quiet bar's, not louder.
 
-**Against the option market's price the calm is mostly symbol mix.** The vol
-model asks whether a stock will move more or less than its options charge, so
-`news_audit.py` also reads the vol-timing run's forecast log: 7-day realized
-move over the ATM-IV-implied move, squared (1.00 = fairly priced), single names,
-no release within −3..+7 days, weekly blocks. Raw, news the LLM marks `vol:
-none` runs **0.68** [0.52, 0.86] against 0.93 for flagged news and for no news —
-which reads as "sell premium after harmless news". Against each symbol's own
-average it is 0.94 vs 1.07, flagged minus unflagged **+0.13 [−0.06, +0.35]**
-over 8 weeks, 7 of 13 symbols: names with constant news coverage simply sit at
-lower ratios. ATM IV relative to its median barely moves with news (0.92–0.97).
-Re-run weekly; a news term in the vol model waits on that interval clearing
-zero.
+**The record behind those numbers has holes.** IB returns only the newest 255
+headlines per provider and symbol, so a heavy name is complete only from
+`news_profile.complete_from` (NVDA 09-24, META 09-23, AAPL 09-10, AMZN 09-09,
+TSLA 08-24), and NVDA had no headline scored in the first three weeks of
+August. The audit reads those weeks as quiet. Inside complete coverage the
+window move holds (+0.12 sd) and so does the calm fifth close (0.76×), but the
+same-session vol flag falls to 1.21 [0.98, 1.42], within noise. A reader that
+counts "no news" must mask by `complete_from`; the audit and the engine's
+sentiment gate do not yet (BACKLOG).
 
-**`future_events` is not a forward calendar.** Its 17 earnings mentions are
-nearly all same-day or same-week (BA's 10-27 from 09-30 is the one with lead
-time), NVDA's 08-26 print was never announced, and CPI and payrolls appear on
-the day. A scheduled-macro term needs the published BLS/Fed calendars instead.
+**`future_events` is not a forward calendar, and the snapshot already has
+one.** Its 17 earnings mentions are nearly all same-day or same-week (BA's
+10-27 from 09-30 is the one with lead time), and NVDA's 08-26 print was never
+announced. The `events` table carries `fomc`, `cpi`, `ppi`, `jobs_report`,
+`gdp`, `pce` and `retail_sales` with release times, 31 releases from 05-27 to
+10-02.
 
 **A decayed sentiment indicator** (`news_scores.sentiment_index`, drawn as a
 pane in `ib-option-viz`): materiality × sentiment summed with a
@@ -1637,6 +1638,43 @@ at five sessions, high −0.07) and is equally in-sample; each weekly capture
 adds weeks to test it on. Several decisions sat on near-zero sentiment
 (TSLA −0.00 vetoed, IWM −0.00 kept), so a dead zone is the other open knob —
 also not to be tuned on these weeks.
+
+### The news study: what the headlines do not say, and what the calendar does
+
+`scripts/news_study.py` (~10 s) writes `out/news_study.json`; the viz's **News
+Study** page is the full report. Every row sits inside complete coverage, every
+interval resamples weeks, and every searched family carries a placebo (news
+shuffled across symbols within a day, or releases moved to random days, 200
+times): a cell is a finding only if its |t| beats the shuffles' 95th-percentile
+best. On the 2026-10-04 snapshot:
+
+- **Kinds of news** (392 events, 9 weeks): no split by type, materiality, vol
+  flag, horizon, read-through, arrival, attention or "priced in" survives
+  (bars |t| 4.9 and 8.1; a cluster t on 9 weeks has heavy tails). Pooled, news
+  describes its window (+0.12 sd), the next close continues it by +0.06
+  [+0.02, +0.14], the fifth close is calm (0.76×), and ATM IV does not reprice.
+- **Scheduled macro releases**: payroll sessions run 4.1× an ETF's non-release
+  variance and 1.9× [1.33, 2.45] a single name's, beyond 98–100 % of
+  random-day draws; CPI about 1×; FOMC afternoons 15×. ETF ATM IV falls 4.1 %
+  over an 08:30 release session, below every random-day draw: a small,
+  scheduled event premium, released at the print.
+- **The sentiment indicator, ~75 variants** (half-life 2 h to a week, boxcar,
+  trading clock, weights, floor, repeats, read-through, signal, optimism
+  balancing, transform): raw tone forecasts nothing, because it is almost always
+  positive. Balanced against the symbol's own history or its event type's
+  running mean, short-memory tone leans to next-day continuation (+0.11 sd at
+  12 h by event type, +0.20 at 6 h by symbol z, 6 of 7 weeks), and the day's own
+  move does not explain it; best |t| 4.6 against a search bar of 7.0. Both are
+  pre-registered (`LEADS`) and judged only on data after 2026-10-02.
+- **The forecaster, offline and cross-fitted**: no news vol multiplier or drift
+  improves the vol-timing model; the tone-change drift hurts (β +0.50 on one
+  half, −0.74 on the other). Mean-reversion forecasts better after a big move
+  with no news (+0.031) than one with news (+0.004), Chan's direction, within
+  noise.
+- **Day type**: vol-flagged morning news does not make trend days commoner.
+
+So headline news stays out of the models, the macro calendar is the next vol
+input, and the study re-runs on every weekly snapshot.
 
 ## Test fixtures generate their own options
 
