@@ -85,8 +85,15 @@ structure that kept it after costs; its evidence is two ETFs and ~20 trades.
   Backtest and Model Evaluation pages handle 15-minute runs, neutral trades and
   the skill interval; the chain pages' event thresholds were tuned on 30-minute
   boundaries and need re-checking before they read 15-minute chains.
-- **calc's weekly script passes `--bar-size 30min`**, while 15 is now the grid;
-  they should agree.
+- **Let a dataset run at 15.** The loader prefers coverage over cadence: 10-16's
+  30-minute tape starts a month before its 15-minute one, so it folds to 30. A
+  15-minute dataset needs either a start date (drop what precedes the 15-minute
+  tape; 10-16 loses 06-17 → 07-20) or chains that never had a 30-minute pass.
+  The second arrives on its own with the next monthly listed after the switch.
+- **Re-request live chains at 15 in calc, while IB still serves them.** Option
+  history ages out at ~52 days, so 11-20's (and 10-09's) 30-minute-only weeks can
+  be re-fetched at 15 only until they pass that age; after that they are 30 for
+  good. A calc-side task.
 - **The validation scripts read a dataset's `expiry`** and fail on an
   `expiries` list.
 

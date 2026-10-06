@@ -464,17 +464,47 @@ merged per contract, it takes 6 SPY trades and the run goes +1.4 % → +8.2 %
 leg found no strike within tolerance, so a short ladder no longer reads as no
 signal.
 
-**15 minutes is the operating cadence; 30-minute option captures are legacy.**
-The 2026-10-03 capture was taken at 30 minutes by mistake, so the October chain
-holds 15-minute bars to 09-25 and 30-minute bars to 10-01. A chain with both
-keeps its finest tape when that tape spans the coarser one; otherwise the finer
-tape is folded onto the coarser grid at load and the coarser fills its gaps, so
-no captured week is dropped. The 30-minute pass also took a *different* strike
-set (IWM 250–310 against 265–305), so legs opened on the 15-minute ladder can go
-unquoted across the seam and exit at intrinsic. The report counts those as
-synthetic exits. A variable-cadence timeline (15 where captured, 30 elsewhere)
-was judged not worth its cost while every dataset still includes a 30-minute
-chain.
+**Decided 2026-10-05: 15 minutes is the project's bar.** Options, the
+underlying's execution bars and the headline-score windows (prompt v8) are all
+15 minutes from now on, with 5-minute stock beneath them (back to 2016, TRADES
+only). New work targets 15; nothing new is designed around 30. But 30 is
+*legacy*, not *deletable*: expired options can never be re-fetched, so the
+August chain and every 30-minute stretch already captured stay 30 forever, and
+the fold, `coarsen` and the 08-28 goldens live as long as any dataset reads them.
+
+What that means while most of the data is still 30:
+
+- **Nothing executes at 15 yet.** On the 2026-10-05 snapshot 15-minute option
+  bars exist only for the 10-16 chain (07-20 → 10-02) and SPCX; 10-16 also has a
+  30-minute tape from 06-17, which the 15 does not span, so the loader folds it
+  to 30 — and 11-20, 10-09 and August are 30-only. Every frontier run is a
+  30-minute run. Execution reaches 15 only when a dataset's chains all start
+  inside their 15-minute tape.
+- **Every shipped model is a 30-minute model** (`cadence_minutes = 30`, periods
+  in 30-minute steps, `bars_per_year = 3276` = 252 × 13), and every record under
+  `models/` and `rankers/` was graded at 30. A 15-minute model is a new label
+  (BACKLOG has the rescaled periods) validated on 15-minute data only — today
+  ~10 weeks on one chain. Knobs counted in bars (`bars_held`,
+  `max_bars_since_rsi_cross_up`, `prevailing_*`) change meaning with cadence;
+  knobs in days and minutes do not.
+- **The headline record restarted.** Readers take the newest prompt version
+  only, so until the v8 re-score reaches 08-03 the windows before it read as
+  unknown, and the news numbers in this file (v7, 30-minute windows) will not
+  reproduce exactly.
+- **The stock tape is no longer the short one.** Ten years of 5-minute bars
+  fold to any cadence, so stock-only features can warm before the option tape
+  starts and earnings-move sizes can be measured on ~40 releases a symbol — but
+  anything needing IV is still bounded by the ~52 days of option history IB
+  keeps.
+
+Mixed tapes, as they load today: a chain with both keeps its finest tape when
+that tape spans the coarser one; otherwise the finer tape is folded onto the
+coarser grid and the coarser fills its gaps, so no captured week is dropped. The
+30-minute pass also took a *different* strike set (IWM 250–310 against
+265–305), so legs opened on the 15-minute ladder can go unquoted across the seam
+and exit at intrinsic; the report counts those as synthetic exits. A
+variable-cadence timeline (15 where captured, 30 elsewhere) was judged not worth
+its cost while every dataset still includes a 30-minute chain.
 
 - **Execution runs on every option bar**: fills, marks, P&L exits. A decision
   fills 15 minutes later instead of 30. `bars_held` counts option bars, so it
