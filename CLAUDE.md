@@ -1810,7 +1810,7 @@ open they had in another session (touch rates match, 60 sets):
   before 10:30. Counting only levels already known removed it entirely.
 
 The Monday session (decide Friday, hold Monday's session) is positive in both
-periods and on 29 of 32 symbols after 2022 (t 3.1) — not a discovery finding, so
+periods and on 29 of 32 symbols after 2022 (t 3.2) — not a discovery finding, so
 unguarded, and recorded so nobody re-discovers it as new.
 
 Mechanics: the 5-minute fold matches IB's daily bars to the cent on open, high
