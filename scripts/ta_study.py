@@ -549,11 +549,11 @@ def boot_idx(g: int) -> np.ndarray:
     return np.random.default_rng(1).integers(0, g, (BOOT, g))
 
 
-def ratio_t(s, c, null=0.0):
+def ratio_t(s, c, null=0.0, rows=None):
     k = c > 0
     s, c = s[k], c[k]
     g = len(c)
-    if c.sum() < MIN_N or g < MIN_WEEKS:
+    if (c.sum() if rows is None else rows[k].sum()) < MIN_N or g < MIN_WEEKS:
         return None
     p = s.sum() / c.sum()
     e = s - p * c
@@ -561,18 +561,20 @@ def ratio_t(s, c, null=0.0):
     return (p - null) / se if se > 1e-12 else None
 
 
-def ratio_cell(s, c, unit, null=0.0) -> dict:
+def ratio_cell(s, c, unit, null=0.0, rows=None) -> dict:
     """`news_study.stat` on pre-aggregated blocks: the ratio of sums, its
-    block-bootstrap 95 % interval and a block-clustered t."""
+    block-bootstrap 95 % interval and a block-clustered t. `rows` counts the
+    observations per block when the denominator is not a count (CRPS sums)."""
     k = c > 0
     s, c = s[k], c[k]
-    n, g = int(c.sum()), len(c)
+    rows = c if rows is None else rows[k]
+    n, g = int(rows.sum()), len(c)
     out = dict(n=n, weeks=g, block=unit, null=null, point=r5(s.sum() / c.sum()) if n else None, lo=None, hi=None, t=None)
     if n < MIN_N or g < MIN_WEEKS:
         return out
     idx = boot_idx(g)
     b = np.sort(s[idx].sum(1) / c[idx].sum(1))
-    out.update(lo=r5(b[int(0.025 * BOOT)]), hi=r5(b[int(0.975 * BOOT) - 1]), t=r5(ratio_t(s, c, null)))
+    out.update(lo=r5(b[int(0.025 * BOOT)]), hi=r5(b[int(0.975 * BOOT) - 1]), t=r5(ratio_t(s, c, null, rows)))
     return out
 
 
@@ -661,6 +663,13 @@ def agreement(S, C, gm, bm, years) -> dict:
     return dict(symbols_agree=same(sym), years_agree=same(yrs))
 
 
+def placebo(maxes: list[float], pairs: list[tuple], draws: int) -> dict:
+    """The family's bar, the median shuffle's best |t|, and the real best."""
+    real = [abs(p[0]["t"]) for p in pairs if p[0].get("t") is not None]
+    return dict(t95=r5(placebo_cut(maxes)), t50=r5(float(np.median(maxes))) if maxes else None,
+                best=r5(max(real, default=0.0)), draws=draws, cells=len(pairs))
+
+
 def finish(pairs: list[tuple], cut: float) -> None:
     """Judge discovery cells against the family's cut; a finding's holdout
     twin becomes its single pre-registered test, the rest stay unguarded."""
@@ -733,7 +742,7 @@ def family(data: Data, specs: list[dict], draws: int, name: str) -> dict:
     data.pairs[name] = pairs
     n_find = sum(p[0]["verdict"] == "finding" for p in pairs)
     log(f"{name}: {len(pairs)} discovery cells, cut |t| {cut:.2f}, {n_find} findings ({time.time() - t0:.0f}s)")
-    return dict(placebo=dict(t95=r5(cut), draws=draws, cells=len(pairs)), cells=cells)
+    return dict(placebo=placebo(maxes, pairs, draws), cells=cells)
 
 
 def direction(data: Data, draws: int) -> dict:
@@ -833,7 +842,7 @@ def skill_cell(c0, c1, sess, blk, period_mask) -> dict:
     key = blk.id[sess[m]]
     s = np.bincount(key, (c0 - c1)[m], blk.nb)
     c = np.bincount(key, c0[m], blk.nb)
-    return ratio_cell(s, c, blk.unit)
+    return ratio_cell(s, c, blk.unit, rows=np.bincount(key, minlength=blk.nb).astype(float))
 
 
 def estimators(data: Data) -> list[dict]:
@@ -970,7 +979,7 @@ def contexts(data: Data, draws: int) -> dict:
     data.pairs["context"] = pairs
     log(f"context: {len(pairs)} discovery cells, cut |t| {cut:.2f}, "
         f"{sum(p[0]['verdict'] == 'finding' for p in pairs)} findings ({time.time() - t0:.0f}s)")
-    return dict(placebo=dict(t95=r5(cut), draws=draws, cells=len(pairs)), cells=cells)
+    return dict(placebo=placebo(maxes, pairs, draws), cells=cells)
 
 
 def recent(mask):
@@ -1044,7 +1053,7 @@ def confirmation(data: Data, draws: int) -> dict:
     data.pairs["pairs"] = pairs
     log(f"pairs: {len(pairs)} discovery cells, cut |t| {cut:.2f}, "
         f"{sum(p[0]['verdict'] == 'finding' for p in pairs)} findings ({time.time() - t0:.0f}s)")
-    return dict(placebo=dict(t95=r5(cut), draws=draws, cells=len(pairs)), cells=cells)
+    return dict(placebo=placebo(maxes, pairs, draws), cells=cells)
 
 
 def consensus(data: Data) -> dict:

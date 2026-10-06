@@ -6,3 +6,4 @@
 /out
 .DS_Store
 /out_archive
+__pycache__/

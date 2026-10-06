@@ -63,6 +63,17 @@ our crude benchmark (monthly IV scaled to 7 days) rather than a mispricing.
 - The existing directional work (RSI gates, 14-day models, trend sweeps) stays
   in git and CLAUDE.md as history; re-check any of it against the Phase 0 gate
   before relying on it.
+- **HAR-RV as the stock-only vol** (CLAUDE.md, *The TA study*). It beats 20-day
+  close-to-close by 1.2–1.4 % CRPS out of period and needs no chain: the vol for
+  anything the option tape is too short to price, and the bar any vol signal
+  must clear. Port `ta_study.har` to Rust, pinned to the Python values.
+- **Size the earnings multiplier from the stock tape.** Pooled, a release in
+  the next five sessions is ~1.5× HAR's vol (fit 2016–22, scored 2023 →); ten
+  years hold ~40 releases a symbol, enough for a per-symbol move size to sit
+  beside the term-structure estimate.
+- **VIX9D × ~0.77 as SPY's five-session vol prior** (the same scale before and
+  after 2023). Check the ATM-IV equivalent on the capture window before it
+  touches `vol_multiplier`.
 
 ## The index put premium (the strongest lead, 2026-09-26)
 
@@ -96,6 +107,10 @@ structure that kept it after costs; its evidence is two ETFs and ~20 trades.
   good. A calc-side task.
 - **The validation scripts read a dataset's `expiry`** and fail on an
   `expiries` list.
+- **Re-run `uv run scripts/ta_study.py` when the 5-minute backfill lands.** 21
+  registered names have no bars; AMD, MSTR and SPCX hold only the capture
+  window; most of the cohort lags the calendar by two sessions. The TA Study
+  page's prose is pinned to the 2026-10-05 snapshot and says when it moves.
 
 ## News
 

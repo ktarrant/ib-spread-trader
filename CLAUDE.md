@@ -35,7 +35,7 @@ read-only and writes only its own cache file; the rest of the repo stays
 hands-off.
 
 When changing the viz: it has its own `CLAUDE.md`, its own conventions and its own
-golden tests (`uv run pytest`, 96 of them, skipping cleanly without a snapshot).
+golden tests (`uv run pytest`, 98 of them, skipping cleanly without a snapshot).
 Run them. And note the dependency direction stays one-way: the viz reads this
 repo's `out/` artifacts, so a field must exist in the report **before** the page
 that renders it, and removing one breaks a consumer you now maintain.
@@ -71,6 +71,9 @@ copy into `news/` there (a subfolder, so it never wins the default snapshot
 pick). `scripts/news_audit.py` checks the cache and runs the event study below;
 `scripts/news_study.py` runs the full study (*The news study*, below) into
 `out/news_study.json`, which the viz's News Study page renders as the report.
+`uv run scripts/ta_study.py` does the same for technical indicators on the
+10-year stock tape (*The TA study*, below) into `out/ta_study.json`; it is the
+one script with dependencies (numpy, pandas, declared inline for `uv`).
 
 `out/` holds only the **frontier** — the runs listed in `scripts/run_frontier.sh`,
 which is all the viz offers. Other runs are moved to `out_archive/`, not deleted.
@@ -1731,6 +1734,63 @@ TSLA 8b/2s buys; GS, UBER, XOM, AAPL, BA none in the window).
 
 What would settle it is daily bars back to 2020 for the cohort (a capture-side
 backfill): ARK's history already holds 1 227 cohort trade days.
+
+## The TA study: ten years of stock bars find vol, not direction
+
+`uv run scripts/ta_study.py` (~80 s) writes `out/ta_study.json`; the viz's **TA
+Study** page is the report. It reads the 5-minute TRADES backfill — every stock
+with ≥ 300 whole sessions (18 today, 2016-07 → 2026-10), with HYG, UUP, USO,
+GDX and the VIX family as inputs only. The catalog (`scripts/ta_indicators.py`:
+53 indicators, 124 signals, classic and modern, textbook parameters and
+readings) was committed before the first result. Discovery is 2016 → 2022, the
+holdout 2023 →, and every discovery finding is judged once on the holdout. A
+statistic is the excess over the symbol's own period mean, in trailing-sd
+units, entered at the next open; placebos shift each signal circularly by a
+year or more per symbol, which keeps its base rate and breaks its timing.
+
+On the 2026-10-05 snapshot (provisional: 21 registered names have no bars yet):
+
+- **Direction: nothing.** 1 032 daily cells (signal × 1/5/10 sessions, raw and
+  SPY-hedged × all / ETF / single): best |t| 2.8 against a bar of 4.2 (a
+  shuffled search's median best is 3.2). On 15-minute bars 10 cells cleared
+  their bar before 2023 — all momentum into the close: above VWAP, above the
+  upper band, RSI > 70, a rising MACD histogram — and **none** after. No event
+  is a better barrier entry than a random one, and no context filter (816,
+  Connors' RSI(2) above the 200-day included), confirmation pair (55) or
+  consensus count survives.
+- **Move size: real, and it repeats out of period.** An earnings release in
+  the next 5 sessions (+0.40 of log realized ÷ trailing vol before, +0.46
+  after), the Bollinger and TTM squeezes, VIX9D/VIX, and — against Crabel —
+  NR7/NR4 forecasting a *smaller* move. Intraday, relative volume, first-hour
+  range and the gap forecast the rest of the session. 38 of 40 move leads
+  survive.
+- **But HAR-RV already knows most of it.** Against log HAR-RV (daily, weekly,
+  monthly realized variance off the 5-minute tape, pooled, fit on discovery),
+  only the earnings calendar (vol × ~1.5 at five sessions, fit before 2023,
+  CRPS +0.5 % after) and the overnight variance share still add CRPS. The
+  overnight share is partly built in: the target path starts at the next open.
+- **The stock-only vol is HAR or a range estimator.** CRPS against 20-day
+  close-to-close after the split: HAR +1.4 % next session, +1.2 % next five;
+  Garman–Klass +1.1 % / +1.4 %, each scaled once on discovery (ranges miss the
+  overnight gap).
+- **SPY's variance premium, 2016 →:** realized ran below VIX-implied variance
+  every year but 2018 and 2020. VIX9D's best scale as a five-session vol is
+  0.78 before the split and 0.76 after; scaled, it edges HAR in both periods;
+  unscaled it is no better than trailing vol. VIX prices the whole strike
+  strip, so this is not the vol-timing model's 0.85 × ATM IV.
+
+The Monday session (decide Friday, hold Monday's session) is positive in both
+periods and on all 18 symbols after 2022 (t 3.4) — not a discovery finding, so
+unguarded, and recorded so nobody re-discovers it as new.
+
+Mechanics: the 5-minute fold matches IB's daily bars to the cent on open, high
+and low (1 393 days); the close differs (auction print against the last trade,
+median 1.3 bp). A session must open at 09:30 and run a half day. Two runs give
+identical JSON. `ta_indicators.py` uses Wilder's RSI and ATR, not the `ta`
+crate's EMA-smoothed RSI or the engine's SMA ATR, so whatever is adopted is
+ported to Rust and pinned to these values, as `pricing.py` pins the option
+maths. Re-run when the backfill lands: the catalog is frozen (`VERSION`,
+`POST_HOC`), so new symbols add evidence without adding search.
 
 ## Test fixtures generate their own options
 
