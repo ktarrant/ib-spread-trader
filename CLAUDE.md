@@ -2129,6 +2129,54 @@ of them before the release they were bought for (August: 12 trades, +25.7 %;
 October: 1 trade). Exits and structures have to follow the model (BACKLOG Phases
 2–3) before its trades mean anything.
 
+### HAR-RV and tape-sized earnings in the vol: built, measured, not adopted
+
+The TA study's three vol takeaways, taken to the forecast gate on the
+2026-10-06 snapshot. `ChainSeries` now computes each whole session's realized
+variance off the 5-minute tape it already loads (squared 5-minute returns plus
+the overnight gap, as `ta_study.py` does), giving HAR-RV's day/week/month
+inputs from completed sessions before the decision date — read off the stock
+tape before the option tape starts, so HAR exists from a chain's first bar — and
+each symbol's mean results-session variance over the month before, across
+releases already past. Two model switches, both off by default (the original
+path is untouched; goldens unchanged):
+
+- `har_weight` blends HAR's vol with ATM IV in variance; `vol_multiplier`
+  then scales the IV alone. Coefficients are the study's pooled 2016–22 fit
+  (`har_coefficients`, `har_resid_var`, `har_scale` 0.92) — nothing fit on the
+  option window; the weight 0.5 is a round prior.
+- `earnings_from_tape` replaces the flat `earnings_vol_multiplier` with each
+  symbol's event variance `e`: a horizon of `n` sessions holds `(n - 1 + e)/n`
+  normal sessions' variance. HAR takes all of it; the IV only the part its
+  expiry (`N` sessions) has not already spread, `((n-1+e)/n) / ((N-1+e)/N)`.
+  On the tape `e` runs from ~4 (banks, energy, TSLA with its deliveries) to 33
+  (META); the IV bump 1.17–1.68, every one below the flat ×2.0.
+
+| model | Aug-expiry | Oct-expiry |
+|---|---|---|
+| `vol-timing` (re-run on 10-06) | +0.0072 [−0.012, +0.028] | +0.0064 [−0.006, +0.022] |
+| `vol-timing-har` | +0.0023 [−0.016, +0.021] | +0.0078 [−0.002, +0.017] |
+| `vol-timing-tape` | −0.0033 [−0.019, +0.012] | +0.0065 [−0.005, +0.022] |
+| `vol-timing-har-tape` | −0.0066 [−0.021, +0.007] | +0.0080 [−0.001, +0.017] |
+
+None passes; nothing separates. Split by a release inside the horizon:
+**outside earnings weeks HAR is a wash** (Aug +0.0005 → −0.0035, Oct +0.0042 →
++0.0056) — over the option window it adds nothing ATM IV does not already
+know, now with the strongest stock-only estimator rather than 20-day
+close-to-close. **Inside earnings weeks the tape bump trades August's point for
+a much tighter interval** (−0.017 [−0.069, +0.028] against +0.032 [−0.093,
++0.108]; October +0.035 [−0.031, +0.046] against +0.033 [−0.115, +0.061]): the
+late-July prints moved ~2× the monthly IV's implied move, more than their own
+history said. About a dozen events a month cannot choose between them, so the
+strategy stays on `vol-timing`; the labels are frozen as the pre-registered
+comparison for the Q3 earnings season the October and November chains are
+now capturing.
+
+**VIX9D against SPY's ATM IV**: 1.08× (median, 64 days 06-23 → 09-24; the
+feature chain's ATM IV, usually a monthly). So the study's 0.77 × VIX9D is
+0.83 × ATM IV — a decade of SPY lands beside the 0.85 the vol-timing model fit
+on two months. `vol_multiplier` stays.
+
 ### Direction-neutral structures, the crush, and trades held through earnings
 
 `rankers/vol.toml` enumerates only structures that bet on the **size** of the move

@@ -1,0 +1,44 @@
+# vol-timing with HAR-RV in the vol: half ATM IV (x0.85, the premium), half
+# HAR-RV's five-session forecast, blended in variance. One axis off vol-timing.
+#
+# HAR-RV: log mean daily variance over the next five sessions on the log
+# variance of the last session, week and month (5-minute returns plus the
+# overnight gap), pooled over 32 stocks and fit on 2016-09 -> 2022 by
+# scripts/ta_study.py on the 2026-10-06 snapshot; har_scale is the CRPS-best
+# scale there (0.92). Nothing here was fit on the option window. The weight
+# 0.5 is a round prior, not a fit.
+#
+# A width-only forecast: no drift, and ATM IV rescaled by what moves have
+# actually followed it. Round numbers between the fits on each month (fit on
+# August, scored on October, and the reverse), not a fit to either:
+#   - outside earnings, weekly moves ran ~0.8-0.9x the IV-implied move in both
+#     months (the variance premium);
+#   - a week containing an earnings release moved ~2x what the *monthly* IV
+#     implied — partly because a monthly IV spreads the jump across the month.
+# Realized vol (1/5/22-day, 5-minute tape) added nothing beyond IV. Across a
+# release inside the horizon the legs are revalued at the trailing-median IV
+# (crush_to_median) rather than their entry IV.
+[features]
+trend_fast = 10
+trend_slow = 30
+atr_period = 14
+realized_vol_period = 20
+skew_moneyness = 0.05
+
+[model]
+horizon_days = 7.0
+bars_per_year = 3276.0
+realized_vol_weight = 0.0
+fallback_vol = 0.30
+trend_weight = 0.0
+vwap_reversion = 0.0
+skew_weight = 0.0
+grid_sigma = 4.0
+grid_points = 101
+vol_multiplier = 0.85
+earnings_vol_multiplier = 2.0
+crush_to_median = true
+har_weight = 0.5
+har_coefficients = [-0.9904, 0.2818, 0.24449, 0.36298]
+har_resid_var = 0.36842
+har_scale = 0.92

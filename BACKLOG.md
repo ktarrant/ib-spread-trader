@@ -63,14 +63,14 @@ our crude benchmark (monthly IV scaled to 7 days) rather than a mispricing.
 - The existing directional work (RSI gates, 14-day models, trend sweeps) stays
   in git and CLAUDE.md as history; re-check any of it against the Phase 0 gate
   before relying on it.
-- **HAR-RV as the stock-only vol** (CLAUDE.md, *The TA study*). It beats 20-day
-  close-to-close by 1.2–1.4 % CRPS out of period and needs no chain: the vol for
-  anything the option tape is too short to price, and the bar any vol signal
-  must clear. Port `ta_study.har` to Rust, pinned to the Python values.
-- **Size the earnings multiplier from the stock tape.** Pooled, a release in
-  the next five sessions is ~1.5× HAR's vol (fit 2016–22, scored 2023 →); ten
-  years hold ~40 releases a symbol, enough for a per-symbol move size to sit
-  beside the term-structure estimate.
+- **Judge `vol-timing-tape` against `vol-timing` on the Q3 earnings season.**
+  Both labels are frozen (CLAUDE.md, *HAR-RV and tape-sized earnings*); on
+  two months' dozen events the tape-sized bump tightened the earnings-week
+  interval and lost August's point. Score earnings-week forecasts only, on
+  snapshots after the late-October prints, before touching the strategy.
+- **HAR stays available, not adopted.** Over the option window it adds nothing
+  beyond ATM IV; it is the vol to use where a chain is missing (a symbol with
+  no options, a period before the option tape), which nothing needs yet.
 - **Drawn levels are not entry or exit rules** (CLAUDE.md, *The TA study*,
   section H). If an exit ever reads levels, the measured direction is that an
   obvious prior low or close tested from above tends to break, and an

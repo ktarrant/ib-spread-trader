@@ -2,19 +2,19 @@
   "label": "vol-timing",
   "dataset": "2026-08-21",
   "horizon_days": 7.0,
-  "crps_skill": 0.008415526861489164,
+  "crps_skill": 0.007209265843554968,
   "crps_skill_interval": [
-    -0.010830138657302868,
-    0.028714667343827105
+    -0.01243570179742437,
+    0.027908995017448146
   ],
   "weeks": 10,
-  "pit_error": 0.09465980376387326,
-  "coverage_50": 0.4886601254624417,
-  "coverage_80": 0.7592086215216343,
-  "coverage_90": 0.874859256876307,
+  "pit_error": 0.09317585301837271,
+  "coverage_50": 0.4784622510421491,
+  "coverage_80": 0.7508105604446503,
+  "coverage_90": 0.8670680870773506,
   "directional_hit_rate": null,
-  "symbols_with_skill": 6,
+  "symbols_with_skill": 7,
   "symbols_total": 12,
   "passed": false,
-  "evaluated_at": "2026-09-26T19:20:29.437482Z"
+  "evaluated_at": "2026-10-06T05:03:27.064636Z"
 }

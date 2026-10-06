@@ -1,0 +1,20 @@
+{
+  "label": "vol-timing-tape",
+  "dataset": "2026-08-21",
+  "horizon_days": 7.0,
+  "crps_skill": -0.0032693542116755125,
+  "crps_skill_interval": [
+    -0.019427817840783623,
+    0.012158325680301618
+  ],
+  "weeks": 10,
+  "pit_error": 0.08452987494210283,
+  "coverage_50": 0.46981627296587924,
+  "coverage_80": 0.7457156090782769,
+  "coverage_90": 0.8466882816118574,
+  "directional_hit_rate": null,
+  "symbols_with_skill": 7,
+  "symbols_total": 12,
+  "passed": false,
+  "evaluated_at": "2026-10-06T05:05:24.034729Z"
+}
