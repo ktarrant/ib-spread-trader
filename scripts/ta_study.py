@@ -81,6 +81,9 @@ SPLIT = dt.date(2023, 1, 1)
 MIN_SESSIONS = 300           # enough to warm a 200-day SMA and still have a year
 CONTEXT_ONLY = ("HYG", "UUP", "USO", "GDX", "GLD", "TLT", "SLV")  # not equities: inputs, not targets
 INDICES = ("VIX", "VIX3M", "VIX9D", "VVIX")
+# A ticker's tape from before the company traded under it: HIMS was the SPAC
+# Oaktree Acquisition Corp, flat near $9.85, until its merger closed.
+LISTED = {"HIMS": dt.date(2021, 1, 21)}
 HORIZONS = (1, 5, 10)
 PATH = 10
 BARRIER = 5
@@ -219,7 +222,7 @@ class Data:
         self.con = con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         registered = [r[0] for r in con.execute("SELECT DISTINCT symbol FROM contracts WHERE kind = 'stock' ORDER BY symbol")]
         tapes = {s: tape(con, s) for s in registered}
-        ok = {s: whole(g) for s, (_d, g) in tapes.items()}
+        ok = {s: whole(g) & (d >= LISTED.get(s, dt.date.min)) for s, (d, g) in tapes.items()}
         self.syms = [s for s in registered if s not in CONTEXT_ONLY and ok[s].sum() >= MIN_SESSIONS]
         self.sess = sorted(set().union(*(set(tapes[s][0][ok[s]]) for s in self.syms)))
         self.pos = {d: i for i, d in enumerate(self.sess)}
@@ -534,6 +537,9 @@ class Data:
                    "RB": self.D["RB"], "RS": self.D["RS"],
                    "CLOSE": self.I["CLOSE"], "NEXT": self.I["NEXT"], "MREST": self.I["MREST"]}
         for k, x in targets.items():
+            # A session with no intraday variance (a flat early tape) makes a
+            # log-vol target -inf: unmeasured, like any other missing row.
+            x = np.where(np.isfinite(x), x, np.nan)
             out = x.astype(float).copy()
             for p in (self.disc, ~self.disc):
                 out[:, p] -= np.nanmean(x[:, p], axis=1, keepdims=True)
