@@ -56,9 +56,15 @@ pub(crate) fn null_features(features: &Features) -> Features {
         skew: None,
         realized_vol: None,
         atr: None,
+        har: None,
+        earnings_variance_ratio: None,
         ..*features
     }
 }
+
+/// Sessions per year, to turn calendar horizons into sessions and daily
+/// variance into annual vol.
+const SESSIONS_PER_YEAR: f64 = 252.0;
 
 /// Tunable weights for [`LognormalDriftModel`]. Mapped from TOML in a later phase.
 #[derive(Debug, Clone, Copy)]
@@ -102,6 +108,24 @@ pub struct LognormalModelConfig {
     /// trend: fade a spike against the trend, hold no view on one with it (or
     /// while the prevailing trend is still warming).
     pub trend_with_prevailing_only: bool,
+    /// Weight on HAR-RV's vol in a *variance* blend with ATM IV; `1 - w` on the
+    /// IV. Zero keeps the original path. In the blended path `vol_multiplier`
+    /// scales the IV alone — the variance premium is the option market's, and
+    /// HAR forecasts realized variance directly.
+    pub har_weight: f64,
+    /// log HAR-RV: intercept and weights on the day, week and month log
+    /// variances, forecasting the mean daily variance over the next five
+    /// sessions. Fit off the stock tape, never on the option window.
+    pub har_coefficients: [f64; 4],
+    /// The fit's residual variance (the lognormal mean adds half of it).
+    pub har_resid_var: f64,
+    /// The scale on HAR's vol that minimised CRPS where it was fit.
+    pub har_scale: f64,
+    /// Size the earnings bump from the symbol's own past releases
+    /// (`Features::earnings_variance_ratio`) instead of the flat
+    /// `earnings_vol_multiplier`, which stays the fallback for a symbol with
+    /// too few releases.
+    pub earnings_from_tape: bool,
 }
 
 impl Default for LognormalModelConfig {
@@ -122,6 +146,11 @@ impl Default for LognormalModelConfig {
             earnings_vol_multiplier: 1.0,
             crush_to_median: false,
             trend_with_prevailing_only: false,
+            har_weight: 0.0,
+            har_coefficients: [0.0; 4],
+            har_resid_var: 0.0,
+            har_scale: 1.0,
+            earnings_from_tape: false,
         }
     }
 }
@@ -156,6 +185,51 @@ impl LognormalDriftModel {
         }
     }
 
+    /// HAR-RV's annualised vol from its three log variances.
+    fn har_vol(&self, x: [f64; 3]) -> f64 {
+        let b = self.config.har_coefficients;
+        let daily = (b[0] + b[1] * x[0] + b[2] * x[1] + b[3] * x[2] + 0.5 * self.config.har_resid_var).exp();
+        self.config.har_scale * (SESSIONS_PER_YEAR * daily).sqrt()
+    }
+
+    /// Whether the model asked for the blended path at all.
+    fn blended(&self) -> bool {
+        self.config.har_weight > 0.0 || self.config.earnings_from_tape
+    }
+
+    /// The blended path's annual vol. A release inside the horizon adds its
+    /// variance: with `e` the symbol's results-session variance in units of a
+    /// normal session's, a horizon of `n` sessions holds `(n - 1 + e) / n` of a
+    /// normal variance per session. HAR knows nothing of the event, so its vol
+    /// takes that whole factor; the chain's IV already spreads the event over
+    /// the `N` sessions to expiry, so it takes only the ratio of the two.
+    fn blended_vol(&self, features: &Features, horizon_years: f64) -> f64 {
+        let n = (horizon_years * SESSIONS_PER_YEAR).max(1.0);
+        let big_n = (features.year_fraction * SESSIONS_PER_YEAR).max(n);
+        let tape = features.earnings_variance_ratio.filter(|_| self.config.earnings_from_tape);
+        let (har_bump, iv_bump) = match (earnings_inside(features, horizon_years), tape) {
+            (false, _) => (1.0, 1.0),
+            (true, Some(e)) => {
+                let e = e.max(1.0);
+                let short = (n - 1.0 + e) / n;
+                (short.sqrt(), (short / ((big_n - 1.0 + e) / big_n)).sqrt())
+            }
+            (true, None) => (self.config.earnings_vol_multiplier, self.config.earnings_vol_multiplier),
+        };
+        let iv = features.atm_iv.map(|v| v * self.config.vol_multiplier * iv_bump);
+        let har = features
+            .har
+            .filter(|_| self.config.har_weight > 0.0)
+            .map(|x| self.har_vol(x) * har_bump);
+        let w = self.config.har_weight;
+        match (har, iv) {
+            (Some(h), Some(v)) => (w * h * h + (1.0 - w) * v * v).sqrt(),
+            (Some(h), None) => h,
+            (None, Some(v)) => v,
+            (None, None) => self.config.fallback_vol,
+        }
+    }
+
     /// Horizon log-drift: `E[S_h] = spot · exp(drift)`.
     fn drift(&self, features: &Features) -> f64 {
         let trend = self.config.trend_weight * features.trend.unwrap_or(0.0);
@@ -177,6 +251,9 @@ impl PriceModel for LognormalDriftModel {
     }
 
     fn forecast(&self, features: &Features, horizon_years: f64) -> PriceDistribution {
+        if self.blended() {
+            return self.distribution_at(features, horizon_years, self.blended_vol(features, horizon_years));
+        }
         let scale = self.config.vol_multiplier
             * if earnings_inside(features, horizon_years) {
                 self.config.earnings_vol_multiplier
@@ -204,8 +281,12 @@ impl PriceModel for LognormalDriftModel {
 impl LognormalDriftModel {
     /// The lognormal at `vol_scale` × the configured vol.
     fn distribution(&self, features: &Features, horizon_years: f64, vol_scale: f64) -> PriceDistribution {
+        self.distribution_at(features, horizon_years, self.annual_vol(features) * vol_scale)
+    }
+
+    /// The lognormal at an annual vol of `sigma_annual`.
+    fn distribution_at(&self, features: &Features, horizon_years: f64, sigma_annual: f64) -> PriceDistribution {
         let spot = features.spot;
-        let sigma_annual = self.annual_vol(features) * vol_scale;
 
         // Scale vol to the horizon, then floor it so the grid never collapses:
         // a per-bar ATR range is a sane minimum, and a hard epsilon guards the
@@ -267,7 +348,54 @@ mod tests {
             skew: None,
             days_to_earnings: None,
             days_since_earnings: None,
+            har: None,
+            earnings_variance_ratio: None,
         }
+    }
+
+    /// HAR alone at weight 1 is its own formula; at weight 0.5 the variances
+    /// blend; the premium scales only the IV; the null never sees HAR.
+    #[test]
+    fn the_blend_mixes_variances_and_keeps_the_null_on_iv() {
+        let model = |w| LognormalDriftModel::new(LognormalModelConfig {
+            har_weight: w,
+            har_coefficients: [0.0, 1.0, 0.0, 0.0],
+            vol_multiplier: 0.5,
+            ..Default::default()
+        });
+        let daily = 0.0001_f64; // a 1 % daily sd: 15.9 % a year
+        let f = Features { har: Some([daily.ln(), 0.0, 0.0]), ..features(None) };
+        let har = (252.0_f64 * daily).sqrt();
+        assert!((model(1.0).blended_vol(&f, 0.02) - har).abs() < 1e-12);
+        let iv = 0.20 * 0.5;
+        assert!((model(0.5).blended_vol(&f, 0.02) - (0.5 * har * har + 0.5 * iv * iv).sqrt()).abs() < 1e-12);
+        let null = model(1.0).null_forecast(&f, 0.02).stddev();
+        let iv_only = model(0.0).null_forecast(&features(None), 0.02).stddev();
+        assert!((null - iv_only).abs() < 1e-12, "the null is ATM IV, untouched");
+    }
+
+    /// A results session worth `e` normal ones, inside a 5-session horizon of a
+    /// 21-session chain: HAR takes sqrt((4 + e) / 5), the IV only the part its
+    /// month has not already spread. Too few releases falls back to the flat bump.
+    #[test]
+    fn the_tape_earnings_bump_is_the_event_variance_spread_over_the_horizon() {
+        let model = LognormalDriftModel::new(LognormalModelConfig {
+            earnings_from_tape: true,
+            earnings_vol_multiplier: 2.0,
+            ..Default::default()
+        });
+        let five = 5.0 / 252.0;
+        let at = |ratio| Features {
+            days_to_earnings: Some(2),
+            year_fraction: 21.0 / 252.0,
+            earnings_variance_ratio: ratio,
+            ..features(None)
+        };
+        let iv_bump = ((4.0_f64 + 9.0) / 5.0 / ((20.0 + 9.0) / 21.0)).sqrt();
+        assert!((model.blended_vol(&at(Some(9.0)), five) - 0.20 * iv_bump).abs() < 1e-9);
+        assert!((model.blended_vol(&at(None), five) - 0.40).abs() < 1e-12, "flat fallback");
+        let quiet = Features { days_to_earnings: None, ..at(Some(9.0)) };
+        assert!((model.blended_vol(&quiet, five) - 0.20).abs() < 1e-12, "no release, no bump");
     }
 
     /// Across a release the legs revert to the symbol's own median IV: a bar at

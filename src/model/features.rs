@@ -170,6 +170,13 @@ pub struct Features {
     pub skew: Option<f64>,
     pub days_to_earnings: Option<i64>,
     pub days_since_earnings: Option<i64>,
+    /// HAR-RV's inputs: log realized variance of the last completed session and
+    /// of the means over the last 5 and 22 (`ChainSeries::har_inputs`). Set by
+    /// the engine, which owns the stock tape; `None` until 22 sessions precede.
+    pub har: Option<[f64; 3]>,
+    /// The symbol's mean results-session variance as a multiple of the month
+    /// before, over releases already past (`ChainSeries::earnings_variance_ratio`).
+    pub earnings_variance_ratio: Option<f64>,
 }
 
 /// Stateful extractor. Advance it once per option bar with [`observe`], which
@@ -343,6 +350,8 @@ impl FeatureEngine {
             skew: chain.put_call_skew(self.skew_moneyness),
             days_to_earnings: earnings.days_to,
             days_since_earnings: earnings.days_since,
+            har: None,
+            earnings_variance_ratio: None,
         }
     }
 }

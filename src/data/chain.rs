@@ -13,7 +13,8 @@
 //! like a clean one.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Timelike, Utc};
+use chrono_tz::America::New_York;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -366,6 +367,12 @@ pub struct ChainSeries {
     /// Every option contract registered for this chain — the strikes a bar
     /// that did not print them can still interpolate.
     registered: Vec<(i64, f64, OptionRight)>,
+    /// Each whole session's realized variance off the 5-minute tape (see
+    /// [`daily_variance`]), the whole history the snapshot holds: HAR-RV's input.
+    daily_var: BTreeMap<NaiveDate, f64>,
+    /// Each past results release's reaction-session variance over the month
+    /// before it, by reaction session (see [`release_ratios`]).
+    release_ratios: Vec<(NaiveDate, f64)>,
 }
 
 impl ChainSeries {
@@ -432,6 +439,8 @@ impl ChainSeries {
         let sessions = sessions_tape.keys().map(|ts| ts.date_naive()).collect();
         let earnings = load_earnings(snapshot, &symbol, &sessions)?;
         let registered = load_registered(snapshot, &symbol, &expiry_text)?;
+        let daily_var = daily_variance(&five_minute);
+        let release_ratios = release_ratios(&daily_var, &earnings);
         let (signal_underlying, signal_quality, underlying_bar_size) = if !five_minute.is_empty() {
             (five_minute, five_minute_quality, "5min".to_string())
         } else {
@@ -452,6 +461,8 @@ impl ChainSeries {
             bar_minutes,
             earnings,
             registered,
+            daily_var,
+            release_ratios,
         })
     }
 
@@ -492,6 +503,29 @@ impl ChainSeries {
 
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
+    }
+
+    /// HAR-RV's inputs for a decision on `date`: the log realized variance of
+    /// the last completed session, and of the means over the last 5 and 22 — only
+    /// sessions strictly before `date`, so an intraday decision never reads its
+    /// own session. Read off the whole stock tape, which predates the option
+    /// tape, so they exist from a chain's first bar. `None` without 22 sessions,
+    /// or when the latest is more than a week stale (a hole in the tape).
+    pub fn har_inputs(&self, date: NaiveDate) -> Option<[f64; 3]> {
+        let recent: Vec<(NaiveDate, f64)> = self.daily_var.range(..date).rev().take(22).map(|(d, v)| (*d, *v)).collect();
+        if recent.len() < 22 || (date - recent[0].0).num_days() > 7 {
+            return None;
+        }
+        let mean = |k: usize| recent[..k].iter().map(|r| r.1).sum::<f64>() / k as f64;
+        Some([recent[0].1.ln(), mean(5).ln(), mean(22).ln()])
+    }
+
+    /// The symbol's mean reaction-session variance as a multiple of the month
+    /// before it, over the releases already priced before `date`. `None` with
+    /// fewer than four: an average of three earnings moves is an anecdote.
+    pub fn earnings_variance_ratio(&self, date: NaiveDate) -> Option<f64> {
+        let past: Vec<f64> = self.release_ratios.iter().filter(|(r, _)| *r < date).map(|r| r.1).collect();
+        (past.len() >= 4).then(|| past.iter().sum::<f64>() / past.len() as f64)
     }
 
     /// The 30-min underlying at any timestamp.
@@ -918,6 +952,94 @@ fn load_underlying(
     Ok((out, quality))
 }
 
+/// Each whole session's realized variance — squared 5-minute log returns, the
+/// first from the session's open, plus the squared gap from the previous whole
+/// session's close — exactly as `scripts/ta_study.py` measures it for HAR. A
+/// session must open at 09:30 New York and run at least a half day (40 bars),
+/// or a listing day or a mid-session capture would misstate its open; a return
+/// across a missing bar is left out.
+fn daily_variance(bars: &BTreeMap<DateTime<Utc>, UnderlyingBar>) -> BTreeMap<NaiveDate, f64> {
+    struct Session {
+        day: NaiveDate,
+        whole: bool,
+        open: Option<f64>,
+        close: Option<f64>,
+        last: Option<(DateTime<Utc>, f64)>,
+        rv: f64,
+        bars: usize,
+    }
+    let mut out = BTreeMap::new();
+    let mut prev_close: Option<f64> = None;
+    let mut cur: Option<Session> = None;
+    let mut finish = |s: Session, prev_close: &mut Option<f64>| {
+        if s.whole && s.bars >= 40 {
+            let gap = match (s.open, *prev_close) {
+                (Some(o), Some(c)) if o > 0.0 && c > 0.0 => (o / c).ln().powi(2),
+                _ => f64::NAN,
+            };
+            let total = s.rv + gap;
+            if total.is_finite() && total > 0.0 {
+                out.insert(s.day, total);
+            }
+            *prev_close = s.close;
+        }
+    };
+    for (ts, bar) in bars {
+        let local = ts.with_timezone(&New_York);
+        let day = local.date_naive();
+        if cur.as_ref().is_none_or(|s| s.day != day) {
+            if let Some(s) = cur.take() {
+                finish(s, &mut prev_close);
+            }
+            cur = Some(Session {
+                day,
+                whole: local.hour() == 9 && local.minute() == 30,
+                open: bar.open,
+                close: None,
+                last: None,
+                rv: 0.0,
+                bars: 0,
+            });
+        }
+        let s = cur.as_mut().expect("a session was just opened");
+        let Some(close) = bar.close.filter(|c| *c > 0.0) else { continue };
+        let from = match s.last {
+            None => bar.open.filter(|o| *o > 0.0),
+            Some((t, c)) if *ts - t == chrono::Duration::minutes(5) => Some(c),
+            Some(_) => None,
+        };
+        if let Some(from) = from {
+            s.rv += (close / from).ln().powi(2);
+        }
+        s.last = Some((*ts, close));
+        s.close = Some(close);
+        s.bars += 1;
+    }
+    if let Some(s) = cur.take() {
+        finish(s, &mut prev_close);
+    }
+    out
+}
+
+/// Each release's reaction session (the first whole session after its
+/// `close_on`, within four days) as a multiple of the mean of the 22 sessions
+/// before it. One entry per reaction session.
+fn release_ratios(daily: &BTreeMap<NaiveDate, f64>, earnings: &[EarningsEvent]) -> Vec<(NaiveDate, f64)> {
+    let mut out: Vec<(NaiveDate, f64)> = Vec::new();
+    for e in earnings {
+        let Some((&day, &var)) = daily.range(e.close_on.succ_opt().unwrap_or(e.close_on)..).next() else { continue };
+        if (day - e.close_on).num_days() > 4 || out.iter().any(|(d, _)| *d == day) {
+            continue;
+        }
+        let before: Vec<f64> = daily.range(..day).rev().take(22).map(|(_, v)| *v).collect();
+        if before.len() == 22 {
+            out.push((day, var / (before.iter().sum::<f64>() / 22.0)));
+        }
+    }
+    out.sort_by_key(|r| r.0);
+    out
+}
+
 /// `reaction_date` is the session the capture says absorbs the release; it
 /// already encodes before-open against after-close, so no timing rule is
 /// repeated here.
@@ -980,6 +1102,32 @@ fn parse_ts(text: &str) -> Result<DateTime<Utc>> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    /// A whole session's variance is its squared 5-minute returns, the first
+    /// from the open, plus the squared gap from the last whole session's close.
+    /// A session that opens after 09:30 is not whole and does not count.
+    #[test]
+    fn daily_variance_sums_the_session_and_its_overnight_gap() {
+        let bar = |c: f64, o: f64| UnderlyingBar { mid: None, open: Some(o), high: Some(c), low: Some(c), close: Some(c), volume: Some(1.0) };
+        let mut bars = BTreeMap::new();
+        // 2026-03-02 and -03 are Mondays-Tuesdays in EST: 09:30 New York = 14:30 UTC.
+        for (day, open, close) in [(2, 100.0, 101.0), (3, 102.0, 102.0)] {
+            let start = Utc.with_ymd_and_hms(2026, 3, day, 14, 30, 0).unwrap();
+            for i in 0..41 {
+                bars.insert(start + chrono::Duration::minutes(5 * i), bar(close, if i == 0 { open } else { close }));
+            }
+        }
+        let late = Utc.with_ymd_and_hms(2026, 3, 4, 15, 0, 0).unwrap();
+        for i in 0..41 {
+            bars.insert(late + chrono::Duration::minutes(5 * i), bar(100.0, 100.0));
+        }
+        let v = daily_variance(&bars);
+        let d = |day| NaiveDate::from_ymd_opt(2026, 3, day).unwrap();
+        assert!(!v.contains_key(&d(2)), "no prior close: the first session's gap is unknown");
+        let expect = (102.0_f64 / 101.0).ln().powi(2); // flat session, all variance in the gap
+        assert!((v[&d(3)] - expect).abs() < 1e-15, "{v:?}");
+        assert!(!v.contains_key(&d(4)), "opened at 10:00: not whole");
+    }
 
     #[test]
     fn quality_accounts_for_every_row_it_read() {

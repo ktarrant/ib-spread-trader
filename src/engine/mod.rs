@@ -1620,7 +1620,11 @@ fn ranked_observe(
             .previous_earnings_from(bar_date)
             .map(|e| (bar_date - e.date).num_days()),
     };
-    let features = ranked.features.observe(bar, earnings);
+    let features = Features {
+        har: series.har_inputs(bar_date),
+        earnings_variance_ratio: series.earnings_variance_ratio(bar_date),
+        ..ranked.features.observe(bar, earnings)
+    };
 
     let forecasts_by_chain: Vec<(NaiveDate, ChainForecast)> = chains
         .iter()

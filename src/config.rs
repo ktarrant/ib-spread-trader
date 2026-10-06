@@ -969,6 +969,13 @@ pub struct ModelConfig {
     pub crush_to_median: bool,
     /// See `LognormalModelConfig::trend_with_prevailing_only`.
     pub trend_with_prevailing_only: bool,
+    /// See `LognormalModelConfig::har_weight` and the three after it.
+    pub har_weight: f64,
+    pub har_coefficients: [f64; 4],
+    pub har_resid_var: f64,
+    pub har_scale: f64,
+    /// See `LognormalModelConfig::earnings_from_tape`.
+    pub earnings_from_tape: bool,
 }
 
 impl Default for ModelConfig {
@@ -988,6 +995,11 @@ impl Default for ModelConfig {
             earnings_vol_multiplier: d.earnings_vol_multiplier,
             crush_to_median: d.crush_to_median,
             trend_with_prevailing_only: d.trend_with_prevailing_only,
+            har_weight: d.har_weight,
+            har_coefficients: d.har_coefficients,
+            har_resid_var: d.har_resid_var,
+            har_scale: d.har_scale,
+            earnings_from_tape: d.earnings_from_tape,
         }
     }
 }
@@ -999,6 +1011,17 @@ impl ModelConfig {
         }
         if !(self.vol_multiplier > 0.0 && self.earnings_vol_multiplier > 0.0) {
             bail!("`model.vol_multiplier` and `model.earnings_vol_multiplier` must be positive");
+        }
+        if !(0.0..=1.0).contains(&self.har_weight) {
+            bail!("`model.har_weight` must be between 0 and 1");
+        }
+        if self.har_weight > 0.0 {
+            if self.har_coefficients == [0.0; 4] || !(self.har_scale > 0.0) {
+                bail!("`model.har_weight` needs `har_coefficients` and a positive `har_scale`");
+            }
+            if self.realized_vol_weight > 0.0 {
+                bail!("`model.har_weight` and `model.realized_vol_weight` are two realized-vol inputs; set one");
+            }
         }
         Ok(LognormalModelConfig {
             horizon_days: self.horizon_days,
@@ -1014,6 +1037,11 @@ impl ModelConfig {
             earnings_vol_multiplier: self.earnings_vol_multiplier,
             crush_to_median: self.crush_to_median,
             trend_with_prevailing_only: self.trend_with_prevailing_only,
+            har_weight: self.har_weight,
+            har_coefficients: self.har_coefficients,
+            har_resid_var: self.har_resid_var,
+            har_scale: self.har_scale,
+            earnings_from_tape: self.earnings_from_tape,
         })
     }
 }
