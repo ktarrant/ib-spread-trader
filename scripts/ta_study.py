@@ -22,6 +22,10 @@ Sections
                    the 5-minute path) after each signal fires, and the path
   F  combinations  signal x context, confirmation pairs, consensus counts
   G  leads         every discovery finding, re-judged once on the holdout
+  H  levels        support and resistance: do pivots, Fibonacci, the prior
+                   session's range and volume profile, and the initial balance
+                   reject price more often than a matched random level, alone
+                   and with a confirming signal? (catalog v2, added after v1)
 
 Method, shared by every section:
 
@@ -96,6 +100,9 @@ CORE = {  # confirmation pairs: (label, bullish signal, bearish signal), crossed
     "volume": (("obv_div", "obv_div_bull", "obv_div_bear"), ("cmf", "cmf_gt10", "cmf_lt10"), ("mfi", "mfi_lt20", "mfi_gt80")),
 }
 RECENT = 3                   # a pair agrees when both fired within this many sessions
+WIN, BAND = 12, 0.25         # a level's outcome: 12 five-minute bars, barriers +/-0.25 daily sd from it
+CONFLUENCE = 0.1             # another level within this many daily sd confirms
+LEVEL_DRAWS = 60             # placebo level sets: the baseline and the search bar
 
 
 def is_etf(sym: str) -> bool:
@@ -225,6 +232,7 @@ class Data:
         self.D: dict[str, np.ndarray] = {}
         self.I: dict[str, np.ndarray] = {}
         self.idx: list[np.ndarray] = []
+        self.lv: list[dict] = []
         log(f"loaded {len(registered)} registered stocks, universe {m}, {n} sessions ({time.time() - t0:.0f}s)")
 
         self.coverage_rows = self._coverage(registered, tapes, ok)
@@ -332,6 +340,27 @@ class Data:
         for name, v in barrier(O, C, g[:, :, 1], g[:, :, 2], sig).items():
             self.put(name, si, idx, v)
         self._intraday(si, idx, g, sig)
+        self._levels(idx, g, O, H, L, C, sig)
+
+    def _levels(self, idx, g, O, H, L, C, sig):
+        """Each session's support/resistance levels, all known before they can
+        be tested, and the 5-minute inputs a touch is scored on (section H)."""
+        n = len(g)
+        lv = {k: shift(v) for k, v in {**ti.pivots(H, L, C), **ti.fibs(H, L)}.items()}
+        lv.update(prev_high=shift(H), prev_low=shift(L), prev_close=shift(C))
+        va = np.array([ti.value_area(g[p, :, 1], g[p, :, 2], g[p, :, 4]) for p in range(n)])
+        lv["poc"], lv["vah"], lv["val"] = (shift(va[:, k]) for k in range(3))
+        lv["ib_high"], lv["ib_low"] = np.nanmax(g[:, :12, 1], 1), np.nanmin(g[:, :12, 2], 1)
+        flat = g[:, :, 3].ravel()
+        okb = ~np.isnan(flat)
+        r = np.full(flat.shape, np.nan)
+        r[okb] = ti.rsi(flat[okb], 14)
+        vol = g[:, :, 4]
+        sma50 = shift(ti.sma(C, 50))
+        self.lv.append(dict(H=g[:, :, 1], Lo=g[:, :, 2], C=g[:, :, 3], O0=O, sigp=shift(sig), cprev=shift(C),
+                            levels={x["name"]: lv[x["name"]] for x in ti.LEVELS}, rsi=r.reshape(n, S5),
+                            rvol=vol / pd.DataFrame(vol).rolling(20, min_periods=20).median().shift(1).to_numpy(),
+                            up=ti.flag(shift(C) > sma50, sma50), idx=idx))
 
     def _intraday(self, si, idx, g, sig):
         n = len(g)
@@ -1084,6 +1113,158 @@ def consensus(data: Data) -> dict:
     return out
 
 
+# ------------------------------------------------------------------ section H
+
+def touches(z: dict, L: np.ndarray, start: int, others: np.ndarray):
+    """First touch of a level per session: the first 5-minute bar from `start`
+    whose range holds it. The side is where price came from (support from
+    above, resistance from below). Outcome over the next WIN bars: +1 if price
+    gets BAND daily sd away on its own side first, -1 if it gets that far
+    through (a bar that reaches both counts as through), else the fraction of
+    the way it ended. Confirmers are read at the touch bar's close."""
+    H, Lo, C = z["H"], z["Lo"], z["C"]
+    n = len(L)
+    rows = np.arange(n)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        hit = (Lo <= L[:, None]) & (H >= L[:, None]) & (np.arange(S5) >= start)
+        t = hit.argmax(1)
+        prev = np.where(t > start, C[rows, np.maximum(t - 1, 0)], z["O0"] if start == 0 else C[:, start - 1])
+        side = np.sign(prev - L)
+        w = t[:, None] + 1 + np.arange(WIN)
+        inside = w < S5
+        wc = np.minimum(w, S5 - 1)
+        hw, lw, cw = (np.where(inside, np.take_along_axis(a, wc, 1), np.nan) for a in (H, Lo, C))
+        b = (BAND * z["sigp"])[:, None]
+        up, dn = np.log(hw / L[:, None]), np.log(lw / L[:, None])
+        sup = side[:, None] > 0
+        away, thru = np.where(sup, up >= b, dn <= -b), np.where(sup, dn <= -b, up >= b)
+        ia = np.where(away.any(1), away.argmax(1), WIN)
+        ib = np.where(thru.any(1), thru.argmax(1), WIN)
+        last = last_valid(cw)
+        disp = np.clip(side * np.log(last / L) / b[:, 0], -1, 1)
+        R = np.where(ia < ib, 1.0, np.where(ib < WIN, -1.0, disp))
+        cls = np.where(ia < ib, 0, np.where(ib < WIN, 1, 2))
+        ok = hit.any(1) & (side != 0) & np.isfinite(b[:, 0]) & np.isfinite(last) & np.isfinite(L)
+        rsi, close, rvol = z["rsi"][rows, t], C[rows, t], z["rvol"][rows, t]
+        near = np.nanmin(np.abs(np.log(others / L)), 0) / z["sigp"] if len(others) else np.full(n, np.inf)
+        conf = np.array([((side > 0) & (rsi < 30)) | ((side < 0) & (rsi > 70)),
+                         ((side > 0) & (close > L)) | ((side < 0) & (close < L)),
+                         rvol > 1.5,
+                         ((side > 0) & (z["up"] == 1)) | ((side < 0) & (z["up"] == 0)),
+                         near < CONFLUENCE])
+    return ok, side, R, cls, conf
+
+
+def level_pass(data: Data, k: np.ndarray | None):
+    """Block sums of the touch outcome for every level type, side, confirmer
+    and group: real levels when k is None, else every level moved to the
+    distance from the prior close (in sd) it had k sessions earlier — the same
+    shift for every type, so their geometry (and confluence) is kept."""
+    T, Q, nb = len(ti.LEVELS), 1 + len(ti.CONFIRMERS), data.week.nb
+    A = np.zeros((T, 2, Q, 2, 3, nb))      # type, side, confirmer, (sum, count), group, block
+    K = np.zeros((T, 2, 5))                 # type, period, (reject, break, timeout, touched, eligible)
+    for si, z in enumerate(data.lv):
+        stack = np.array([z["levels"][x["name"]] for x in ti.LEVELS])
+        if k is not None:
+            if k[si] < 0:
+                continue
+            d = np.log(stack / z["cprev"]) / z["sigp"]
+            stack = z["cprev"] * np.exp(np.roll(d, k[si] % stack.shape[1], 1) * z["sigp"])
+        blk = data.week.id[z["idx"]]
+        per = (~data.disc[z["idx"]]).astype(int)
+        gi = (0, 1 if data.etf[si] else 2)
+        for j, x in enumerate(ti.LEVELS):
+            L = stack[j]
+            ok, side, R, cls, conf = touches(z, L, 0 if x["start"] == "open" else 12, np.delete(stack, j, 0))
+            for p in (0, 1):
+                m = ok & (per == p)
+                K[j, p, :3] += np.bincount(cls[m], minlength=3)
+                K[j, p, 3] += m.sum()
+                K[j, p, 4] += (np.isfinite(L) & np.isfinite(z["sigp"]) & (per == p)).sum()
+            for s_i, sg in enumerate((1, -1)):
+                base = ok & (side == sg)
+                for q in range(Q):
+                    m = base if q == 0 else base & conf[q - 1]
+                    S, Cn = np.bincount(blk[m], R[m], nb), np.bincount(blk[m], minlength=nb)
+                    for g in gi:
+                        A[j, s_i, q, 0, g] += S
+                        A[j, s_i, q, 1, g] += Cn
+    return A, K
+
+
+def levels(data: Data, draws: int) -> dict:
+    """Section H. The statistic is the touch outcome at real levels minus the
+    same at placebo levels (the mean of LEVEL_DRAWS shifted sets, in the same
+    weeks); the search bar comes from scoring each placebo set against the
+    others. A combination asks whether a confirmed real level beats a
+    confirmed placebo level: a rejection bar flatters any level, so the
+    confirmer alone is not the question."""
+    t0 = time.time()
+    n_draws = max(2, min(draws, LEVEL_DRAWS))
+    Ar, Kr = level_pass(data, None)
+    sims = [level_pass(data, offsets(data, 100_000 + i)) for i in range(n_draws)]
+    Ap = np.array([a for a, _ in sims])
+    Kp = np.mean([k for _, k in sims], 0)
+    Ar = np.concatenate([Ar, Ar.sum(0, keepdims=True)])          # + "all levels"
+    Ap = np.concatenate([Ap, Ap.sum(1, keepdims=True)], 1)
+    base, tot = Ap.mean(0), Ap.sum(0)
+    names = [x["name"] for x in ti.LEVELS] + ["all levels"]
+    group_of = {x["name"]: x["group"] for x in ti.LEVELS} | {"all levels": "all"}
+    blk = data.week
+    sides = {"support": [0], "resistance": [1], "both": [0, 1]}
+    part = lambda A, j, ss, q, g, bm: (A[j, ss, q, 0, g].sum(0)[bm], A[j, ss, q, 1, g].sum(0)[bm])
+    rate = lambda sc: r5(sc[0].sum() / sc[1].sum()) if sc[1].sum() else None
+
+    def run(keys, label, fam):
+        cells, pairs = [], []
+        for j, ss, q, g, extra in keys:
+            twin = []
+            for period, bm in (("discovery", blk.disc), ("holdout", ~blk.disc)):
+                r, b = part(Ar, j, ss, q, g, bm), part(base, j, ss, q, g, bm)
+                c = diff_cell(*r, *b, blk.unit)
+                c.update(extra, real=rate(r), placebo=rate(b), signal=names[j], level_group=group_of[names[j]],
+                         group=GROUPS[g], period=period, horizon="60m", timeframe="5-min")
+                if q:
+                    alone = part(base, j, ss, 0, g, bm)
+                    c.update(confirmer_alone=r5((rate(b) or 0) - (rate(alone) or 0)) if rate(b) is not None else None,
+                             confirmed_share=r5(r[1].sum() / max(part(Ar, j, ss, 0, g, bm)[1].sum(), 1)))
+                cells.append(c)
+                twin.append(c)
+            pairs.append((twin[0], twin[1], extra, GROUPS[g]))
+        maxes = []
+        for i in range(n_draws):
+            bi = (tot - Ap[i]) / (n_draws - 1)
+            best = 0.0
+            for j, ss, q, g, _ in keys:
+                t = diff_t(*part(Ap[i], j, ss, q, g, blk.disc), *part(bi, j, ss, q, g, blk.disc))
+                if t is not None:
+                    best = max(best, abs(t))
+            maxes.append(best)
+        finish(pairs, placebo_cut(maxes))
+        data.pairs[fam] = pairs
+        log(f"{label}: {len(pairs)} discovery cells, cut |t| {placebo_cut(maxes):.2f}, "
+            f"{sum(p[0]['verdict'] == 'finding' for p in pairs)} findings")
+        return dict(placebo=placebo(maxes, pairs, n_draws), cells=cells)
+
+    main = run([(j, ss, 0, g, dict(target=side)) for j in range(len(names)) for side, ss in sides.items()
+                for g in range(3)], "levels", "levels")
+    combos = run([(j, [0, 1], q, 0, dict(target="both", context=c["name"]))
+                  for j in range(len(names)) for q, c in enumerate(ti.CONFIRMERS, 1)], "level combos", "level_combos")
+    outcomes = []
+    for j, x in enumerate(ti.LEVELS):
+        for p, period in enumerate(("discovery", "holdout")):
+            row = dict(signal=x["name"], period=period)
+            for src, K in (("real", Kr), ("placebo", Kp)):
+                touched, eligible = K[j, p, 3], K[j, p, 4]
+                row[src] = dict(touch_rate=r5(touched / eligible) if eligible else None,
+                                **{k: r5(K[j, p, i] / touched) if touched else None
+                                   for i, k in enumerate(("p_reject", "p_break", "p_timeout"))})
+            outcomes.append(row)
+    log(f"levels done ({time.time() - t0:.0f}s)")
+    return dict(params=dict(window_bars=WIN, bar_minutes=5, band_sd=BAND, confluence_sd=CONFLUENCE, draws=n_draws),
+                cells=main["cells"], placebo=main["placebo"], combos=combos, outcomes=outcomes)
+
+
 # ------------------------------------------------------------------ section G
 
 def leads(data: Data) -> dict:
@@ -1180,6 +1361,7 @@ def catalog(data: Data) -> dict:
             sigs.append(dict(s, active=int((x == 1).sum()) if s["kind"] != "continuous" else int(defined.sum()), rate=r5(rate)))
         out.append(dict(ind, signals=sigs))
     return dict(version=ti.VERSION, post_hoc=ti.POST_HOC, indicators=out, contexts=list(CONTEXTS),
+                levels=ti.LEVELS, confirmers=ti.CONFIRMERS,
                 pairs={f: [lab for lab, _u, _d in items] for f, items in CORE.items()}, recent=RECENT,
                 trend_consensus=list(ti.TREND_CONSENSUS))
 
@@ -1223,6 +1405,7 @@ def main() -> None:
     sections["entry_exit"] = entry_exit(data, args.draws)
     sections["combinations"] = dict(contexts=contexts(data, args.draws), pairs=confirmation(data, args.draws),
                                     consensus=consensus(data))
+    sections["levels"] = levels(data, args.draws)
     sections["leads"] = leads(data)
     commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
     report = dict(provenance=dict(

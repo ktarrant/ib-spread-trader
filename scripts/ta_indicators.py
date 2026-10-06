@@ -31,8 +31,11 @@ import numpy as np
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 
-VERSION = 1
-POST_HOC: list[str] = []
+VERSION = 2
+POST_HOC: list[str] = [
+    "v2 (2026-10-05): support/resistance levels (LEVELS) and their confirmers (CONFIRMERS) added after v1's "
+    "results were read; every v1 definition is unchanged.",
+]
 
 
 def sig(name: str, kind: str, target: str, sign: int, reading: str) -> dict:
@@ -232,6 +235,35 @@ CATALOG = [
     ind("Opening gap (15-min)", "calendar", "classic", "—", "first bar", I,
         sig("i_gap", "continuous", "direction", -1, "the opening gap, read as a fade, first bar only"),
         sig("i_abs_gap", "continuous", "move", 1, "size of the opening gap, first bar only")),
+]
+
+# Support and resistance: price levels known before they are tested. Each is
+# scored by what happens at its first touch in a session (study section H).
+LEVELS = [
+    dict(name="pivot_p", group="floor pivots", era="classic", source="floor traders", params="(H+L+C)/3 of the prior session", start="open"),
+    dict(name="pivot_r1", group="floor pivots", era="classic", source="floor traders", params="2P - L", start="open"),
+    dict(name="pivot_s1", group="floor pivots", era="classic", source="floor traders", params="2P - H", start="open"),
+    dict(name="pivot_r2", group="floor pivots", era="classic", source="floor traders", params="P + (H - L)", start="open"),
+    dict(name="pivot_s2", group="floor pivots", era="classic", source="floor traders", params="P - (H - L)", start="open"),
+    dict(name="prev_high", group="prior session", era="classic", source="—", params="prior session high", start="open"),
+    dict(name="prev_low", group="prior session", era="classic", source="—", params="prior session low", start="open"),
+    dict(name="prev_close", group="prior session", era="classic", source="—", params="prior session close", start="open"),
+    dict(name="fib_38", group="Fibonacci", era="classic", source="—", params="low + 38.2 % of the prior 20-session range", start="open"),
+    dict(name="fib_50", group="Fibonacci", era="classic", source="—", params="low + 50 % of the prior 20-session range", start="open"),
+    dict(name="fib_62", group="Fibonacci", era="classic", source="—", params="low + 61.8 % of the prior 20-session range", start="open"),
+    dict(name="poc", group="volume profile", era="modern", source="Steidlmayer (Market Profile)", params="prior session's point of control, 50 bins", start="open"),
+    dict(name="vah", group="volume profile", era="modern", source="Steidlmayer (Market Profile)", params="prior session's 70 % value area high", start="open"),
+    dict(name="val", group="volume profile", era="modern", source="Steidlmayer (Market Profile)", params="prior session's 70 % value area low", start="open"),
+    dict(name="ib_high", group="initial balance", era="modern", source="Steidlmayer (Market Profile)", params="first-hour high, tested from 10:30", start="10:30"),
+    dict(name="ib_low", group="initial balance", era="modern", source="Steidlmayer (Market Profile)", params="first-hour low, tested from 10:30", start="10:30"),
+]
+# Read at the touch bar's close, before the outcome window opens.
+CONFIRMERS = [
+    dict(name="rsi", reading="RSI(14) of 5-minute closes below 30 at support, above 70 at resistance"),
+    dict(name="rejection_bar", reading="the touch bar closes back on the side it came from"),
+    dict(name="volume", reading="touch-bar volume above 1.5x its slot's 20-session median"),
+    dict(name="trend", reading="prior close above its 50-day SMA at support, below it at resistance"),
+    dict(name="confluence", reading="another level type within 0.1 daily sd"),
 ]
 
 SIGNALS = {s["name"]: dict(s, indicator=i["name"], family=i["family"], era=i["era"], timeframe=i["timeframe"])
@@ -722,6 +754,48 @@ def market(spy: np.ndarray, vix, vix3m, vix9d, vvix, hyg, closes: np.ndarray) ->
     return s
 
 
+def pivots(h, l, c) -> dict:
+    """Floor pivots for the *next* session from one session's high, low, close."""
+    p = (h + l + c) / 3
+    return dict(pivot_p=p, pivot_r1=2 * p - l, pivot_s1=2 * p - h, pivot_r2=p + (h - l), pivot_s2=p - (h - l))
+
+
+def fibs(h, l, n=20) -> dict:
+    """38.2 / 50 / 61.8 % of the trailing n-session range, through this session."""
+    hh, ll = rmax(h, n), rmin(l, n)
+    return {f"fib_{round(100 * f)}": ll + f * (hh - ll) for f in (0.382, 0.5, 0.618)}
+
+
+def value_area(h, l, v, bins=50, share=0.70):
+    """(POC, VAH, VAL) of one session's bars: each bar's volume spread evenly
+    over the price range it traded, the POC the busiest bin, the value area
+    grown from it by the busier neighbour until it holds `share`."""
+    ok = ~np.isnan(h) & ~np.isnan(l) & (np.nan_to_num(v) > 0)
+    if ok.sum() < 2:
+        return np.nan, np.nan, np.nan
+    h, l, v = h[ok], l[ok], v[ok]
+    lo, hi = l.min(), h.max()
+    if hi <= lo:
+        return np.nan, np.nan, np.nan
+    edges = np.linspace(lo, hi, bins + 1)
+    eps = (hi - lo) * 1e-6
+    a, b = l[:, None] - eps, h[:, None] + eps
+    ov = np.clip(np.minimum(b, edges[1:]) - np.maximum(a, edges[:-1]), 0, None)
+    vol = (ov / (b - a) * v[:, None]).sum(0)
+    k = i = j = int(np.argmax(vol))
+    tot, need = vol[i], share * vol.sum()
+    while tot < need and (i > 0 or j < bins - 1):
+        down = vol[i - 1] if i > 0 else -1.0
+        up = vol[j + 1] if j < bins - 1 else -1.0
+        if up >= down:
+            j += 1
+            tot += vol[j]
+        else:
+            i -= 1
+            tot += vol[i]
+    return (edges[k] + edges[k + 1]) / 2, edges[j + 1], edges[i]
+
+
 # ------------------------------------------------------------------ check
 
 def erf(x):
@@ -769,6 +843,13 @@ def _check() -> None:
     # Cross: a touch is not a crossing; the warm-up is not a signal.
     a = np.array([np.nan, 1, 2, 3, 3, 2, 3, 4.0])
     assert list(np.nan_to_num(cross_up(a, np.full(8, 3.0)), nan=-1)) == [-1, -1, 0, 0, 0, 0, 0, 1]
+
+    # A session that trades mostly at 10 has its POC there, inside its value area.
+    hh = np.r_[np.full(20, 10.05), np.full(5, 10.2), 11.0, 12.0]
+    ll = np.r_[np.full(20, 9.95), np.full(5, 9.8), 10.5, 11.5]
+    poc, vah, val = value_area(hh, ll, np.r_[np.full(25, 100.0), 5, 5])
+    assert abs(poc - 10) < 0.05 and 9.8 <= val < 10 < vah <= 10.25, (poc, vah, val)
+    assert abs(pivots(12.0, 8.0, 10.0)["pivot_r1"] - 12.0) < 1e-12
 
     z = np.linspace(-4, 4, 81)
     assert np.max(np.abs(erf(z) - np.array([math.erf(t) for t in z]))) < 2e-7
