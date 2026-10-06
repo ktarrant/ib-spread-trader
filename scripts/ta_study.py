@@ -1175,9 +1175,14 @@ def level_pass(data: Data, k: np.ndarray | None):
         blk = data.week.id[z["idx"]]
         per = (~data.disc[z["idx"]]).astype(int)
         gi = (0, 1 if data.etf[si] else 2)
+        known = np.array([x["start"] == "open" for x in ti.LEVELS])
         for j, x in enumerate(ti.LEVELS):
             L = stack[j]
-            ok, side, R, cls, conf = touches(z, L, 0 if x["start"] == "open" else 12, np.delete(stack, j, 0))
+            # Confluence counts only levels already known: before 10:30 the
+            # first hour's high and low are not, and a touch near the morning's
+            # low would otherwise be "confirmed" by the low it is about to make.
+            mates = (known if x["start"] == "open" else np.ones(len(known), bool)) & (np.arange(len(known)) != j)
+            ok, side, R, cls, conf = touches(z, L, 0 if x["start"] == "open" else 12, stack[mates])
             for p in (0, 1):
                 m = ok & (per == p)
                 K[j, p, :3] += np.bincount(cls[m], minlength=3)
