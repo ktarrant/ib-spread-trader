@@ -1737,10 +1737,14 @@ backfill): ARK's history already holds 1 227 cohort trade days.
 
 ## The TA study: ten years of stock bars find vol, not direction
 
-`uv run scripts/ta_study.py` (~100 s) writes `out/ta_study.json`; the viz's **TA
-Study** page is the report. It reads the 5-minute TRADES backfill — every stock
-with ≥ 300 whole sessions (18 today, 2016-07 → 2026-10), with HYG, UUP, USO,
-GDX and the VIX family as inputs only. The catalog (`scripts/ta_indicators.py`:
+`uv run scripts/ta_study.py` (~8 min with 32 symbols; the level placebos are
+most of it) writes `out/ta_study.json`; the viz's **TA Study** page is the
+report. It reads the 5-minute TRADES backfill — every stock with ≥ 300 whole
+sessions (32 on the 2026-10-06 snapshot, 2016-07 → 2026-10), with HYG, UUP,
+USO, GDX and the VIX family as inputs only. A ticker's tape from before its
+company traded is dropped (`LISTED`: HIMS was a flat $9.85 SPAC until
+2021-01-21, and its zero-variance sessions once turned every one-session
+move cell into NaN). The catalog (`scripts/ta_indicators.py`:
 53 indicators, 124 signals, classic and modern, textbook parameters and
 readings) was committed before the first result. Discovery is 2016 → 2022, the
 holdout 2023 →, and every discovery finding is judged once on the holdout. A
@@ -1748,13 +1752,15 @@ statistic is the excess over the symbol's own period mean, in trailing-sd
 units, entered at the next open; placebos shift each signal circularly by a
 year or more per symbol, which keeps its base rate and breaks its timing.
 
-On the 2026-10-05 snapshot (provisional: 21 registered names have no bars yet):
+Rerun on the 2026-10-06 snapshot (32 symbols; XLB, XLI, XLK, XLP, XLY, AMD,
+MSTR and SPCX still waiting), against the first, 18-symbol run on 2026-10-05:
 
 - **Direction: nothing.** 1 032 daily cells (signal × 1/5/10 sessions, raw and
-  SPY-hedged × all / ETF / single): best |t| 2.8 against a bar of 4.2 (a
-  shuffled search's median best is 3.2). On 15-minute bars 10 cells cleared
-  their bar before 2023 — all momentum into the close: above VWAP, above the
-  upper band, RSI > 70, a rising MACD histogram — and **none** after. No event
+  SPY-hedged × all / ETF / single): best |t| 2.6 against a bar of 4.0 (a
+  shuffled search's median best is 3.1). On 15-minute bars the first run's 10
+  discovery cells — all momentum into the close (above VWAP, above the upper
+  band, RSI > 70, a rising MACD histogram), and all gone after 2022 — no
+  longer pass even before 2023 with 32 symbols. No event
   is a better barrier entry than a random one, and no context filter (816,
   Connors' RSI(2) above the 200-day included), confirmation pair (55) or
   consensus count survives.
@@ -1762,17 +1768,18 @@ On the 2026-10-05 snapshot (provisional: 21 registered names have no bars yet):
   the next 5 sessions (+0.40 of log realized ÷ trailing vol before, +0.46
   after), the Bollinger and TTM squeezes, VIX9D/VIX, and — against Crabel —
   NR7/NR4 forecasting a *smaller* move. Intraday, relative volume, first-hour
-  range and the gap forecast the rest of the session. 38 of 40 move leads
-  survive.
+  range and the gap forecast the rest of the session. 48 of 51 move leads
+  survive (38 of 40 on the first run).
 - **But HAR-RV already knows most of it.** Against log HAR-RV (daily, weekly,
   monthly realized variance off the 5-minute tape, pooled, fit on discovery),
-  only the earnings calendar (vol × ~1.5 at five sessions, fit before 2023,
-  CRPS +0.5 % after) and the overnight variance share still add CRPS. The
+  only the earnings calendar (vol × ~1.45 at five sessions, fit before 2023,
+  CRPS +0.5 % after, both runs) and the overnight variance share still add
+  CRPS; Bollinger bandwidth adds a hair (+0.04 to +0.09 %). The
   overnight share is partly built in: the target path starts at the next open.
 - **The stock-only vol is HAR or a range estimator.** CRPS against 20-day
-  close-to-close after the split: HAR +1.4 % next session, +1.2 % next five;
-  Garman–Klass +1.1 % / +1.4 %, each scaled once on discovery (ranges miss the
-  overnight gap).
+  close-to-close after the split: HAR +1.5 % next session, +1.2 % next five;
+  Garman–Klass +1.2 % / +1.3 %, each scaled once on discovery (ranges miss the
+  overnight gap). Unchanged by the larger universe.
 - **SPY's variance premium, 2016 →:** realized ran below VIX-implied variance
   every year but 2018 and 2020. VIX9D's best scale as a five-session vol is
   0.78 before the split and 0.76 after; scaled, it edges HAR in both periods;
@@ -1787,22 +1794,23 @@ balance, each scored at its first touch in a session (+/-0.25 daily sd
 barriers over 60 minutes) against placebo levels set at the distance from the
 open they had in another session (touch rates match, 60 sets):
 
-- Only the **pivot point** turns price more than chance in both periods
-  (+0.035 → +0.021 barrier units), by fewer breaks, not more rejections.
-- The **prior low and prior close, tested from above, break more often** than
-  a random level (−0.046 → −0.035, −0.041 → −0.026), and the pool of every
-  level as support does too. Fibonacci and the volume profile are noise.
+- **No level passes its search bar on the 32-symbol run.** The pivot point
+  leans toward holding (+0.020 → +0.018 barrier units) and the prior low,
+  tested from above, toward breaking (−0.022 → −0.028), with holdout
+  intervals clear of zero; both had passed on the 18-symbol run and shrank.
+  The prior close, Fibonacci, the volume profile and the IB are noise.
 - **An oversold touch of support (overbought of resistance) breaks far more
   at a real level than at a random one**: −0.04 pooled, −0.15 to −0.34 at the
-  prior close, pivot point, POC and value area, in both periods. RSI alone is
-  momentum at any price (−0.14). A rejection bar flatters every price (+0.37)
+  prior close, pivot point, POC and value area, in both periods and both runs.
+  RSI alone is momentum at any price (−0.15). A rejection bar flatters every
+  price (+0.39)
   and slightly less at real levels; volume, trend and confluence add nothing.
 - **Confluence first looked like the strongest combination of all, and was a
   look-ahead**: it counted the first hour's high and low as confirming levels
   before 10:30. Counting only levels already known removed it entirely.
 
 The Monday session (decide Friday, hold Monday's session) is positive in both
-periods and on all 18 symbols after 2022 (t 3.4) — not a discovery finding, so
+periods and on 29 of 32 symbols after 2022 (t 3.1) — not a discovery finding, so
 unguarded, and recorded so nobody re-discovers it as new.
 
 Mechanics: the 5-minute fold matches IB's daily bars to the cent on open, high
