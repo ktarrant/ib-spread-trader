@@ -1737,7 +1737,7 @@ backfill): ARK's history already holds 1 227 cohort trade days.
 
 ## The TA study: ten years of stock bars find vol, not direction
 
-`uv run scripts/ta_study.py` (~80 s) writes `out/ta_study.json`; the viz's **TA
+`uv run scripts/ta_study.py` (~100 s) writes `out/ta_study.json`; the viz's **TA
 Study** page is the report. It reads the 5-minute TRADES backfill — every stock
 with ≥ 300 whole sessions (18 today, 2016-07 → 2026-10), with HYG, UUP, USO,
 GDX and the VIX family as inputs only. The catalog (`scripts/ta_indicators.py`:
@@ -1778,6 +1778,28 @@ On the 2026-10-05 snapshot (provisional: 21 registered names have no bars yet):
   0.78 before the split and 0.76 after; scaled, it edges HAR in both periods;
   unscaled it is no better than trailing vol. VIX prices the whole strike
   strip, so this is not the vol-timing model's 0.85 × ATM IV.
+
+**Support and resistance levels (section H, catalog v2, added after the rest
+was read): they mostly do not hold, and RSI confirmation is backwards.** Floor
+pivots, the prior session's high/low/close, Fibonacci retracements of the
+20-session range, the prior session's POC and 70 % value area, and the initial
+balance, each scored at its first touch in a session (+/-0.25 daily sd
+barriers over 60 minutes) against placebo levels set at the distance from the
+open they had in another session (touch rates match, 60 sets):
+
+- Only the **pivot point** turns price more than chance in both periods
+  (+0.035 → +0.021 barrier units), by fewer breaks, not more rejections.
+- The **prior low and prior close, tested from above, break more often** than
+  a random level (−0.046 → −0.035, −0.041 → −0.026), and the pool of every
+  level as support does too. Fibonacci and the volume profile are noise.
+- **An oversold touch of support (overbought of resistance) breaks far more
+  at a real level than at a random one**: −0.04 pooled, −0.15 to −0.34 at the
+  prior close, pivot point, POC and value area, in both periods. RSI alone is
+  momentum at any price (−0.14). A rejection bar flatters every price (+0.37)
+  and slightly less at real levels; volume, trend and confluence add nothing.
+- **Confluence first looked like the strongest combination of all, and was a
+  look-ahead**: it counted the first hour's high and low as confirming levels
+  before 10:30. Counting only levels already known removed it entirely.
 
 The Monday session (decide Friday, hold Monday's session) is positive in both
 periods and on all 18 symbols after 2022 (t 3.4) — not a discovery finding, so

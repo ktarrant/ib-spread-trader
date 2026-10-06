@@ -71,6 +71,10 @@ our crude benchmark (monthly IV scaled to 7 days) rather than a mispricing.
   the next five sessions is ~1.5× HAR's vol (fit 2016–22, scored 2023 →); ten
   years hold ~40 releases a symbol, enough for a per-symbol move size to sit
   beside the term-structure estimate.
+- **Drawn levels are not entry or exit rules** (CLAUDE.md, *The TA study*,
+  section H). If an exit ever reads levels, the measured direction is that an
+  obvious prior low or close tested from above tends to break, and an
+  oversold test of one breaks more; nothing here supports buying the bounce.
 - **VIX9D × ~0.77 as SPY's five-session vol prior** (the same scale before and
   after 2023). Check the ATM-IV equivalent on the capture window before it
   touches `vol_multiplier`.
