@@ -357,7 +357,7 @@ class Data:
         r[okb] = ti.rsi(flat[okb], 14)
         vol = g[:, :, 4]
         sma50 = shift(ti.sma(C, 50))
-        self.lv.append(dict(H=g[:, :, 1], Lo=g[:, :, 2], C=g[:, :, 3], O0=O, sigp=shift(sig), cprev=shift(C),
+        self.lv.append(dict(H=g[:, :, 1], Lo=g[:, :, 2], C=g[:, :, 3], O0=O, sigp=shift(sig), ref_ib=g[:, 11, 3],
                             levels={x["name"]: lv[x["name"]] for x in ti.LEVELS}, rsi=r.reshape(n, S5),
                             rvol=vol / pd.DataFrame(vol).rolling(20, min_periods=20).median().shift(1).to_numpy(),
                             up=ti.flag(shift(C) > sma50, sma50), idx=idx))
@@ -1158,8 +1158,9 @@ def touches(z: dict, L: np.ndarray, start: int, others: np.ndarray):
 def level_pass(data: Data, k: np.ndarray | None):
     """Block sums of the touch outcome for every level type, side, confirmer
     and group: real levels when k is None, else every level moved to the
-    distance from the prior close (in sd) it had k sessions earlier — the same
-    shift for every type, so their geometry (and confluence) is kept."""
+    distance (in sd) it had k sessions earlier from the price where testing
+    starts — the open, or 10:30 for the initial balance. One shift for every
+    type, so their geometry (and confluence) is kept."""
     T, Q, nb = len(ti.LEVELS), 1 + len(ti.CONFIRMERS), data.week.nb
     A = np.zeros((T, 2, Q, 2, 3, nb))      # type, side, confirmer, (sum, count), group, block
     K = np.zeros((T, 2, 5))                 # type, period, (reject, break, timeout, touched, eligible)
@@ -1168,8 +1169,9 @@ def level_pass(data: Data, k: np.ndarray | None):
         if k is not None:
             if k[si] < 0:
                 continue
-            d = np.log(stack / z["cprev"]) / z["sigp"]
-            stack = z["cprev"] * np.exp(np.roll(d, k[si] % stack.shape[1], 1) * z["sigp"])
+            ref = np.array([z["ref_ib"] if x["start"] == "10:30" else z["O0"] for x in ti.LEVELS])
+            d = np.log(stack / ref) / z["sigp"]
+            stack = ref * np.exp(np.roll(d, k[si] % stack.shape[1], 1) * z["sigp"])
         blk = data.week.id[z["idx"]]
         per = (~data.disc[z["idx"]]).astype(int)
         gi = (0, 1 if data.etf[si] else 2)
