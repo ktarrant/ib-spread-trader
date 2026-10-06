@@ -594,6 +594,7 @@ pub fn run_symbol(
                 last_ctx = Some(ranked_observe(
                     ranked,
                     &[(series, &bar)],
+                    close_buffer_years(config),
                     next_earnings,
                     &mut forecasts,
                 ));
@@ -1124,6 +1125,7 @@ pub fn run_shared(
                 last_ctx[si] = Some(ranked_observe(
                     ranked,
                     &chains,
+                    close_buffer_years(config),
                     next_earnings,
                     &mut forecasts[si],
                 ));
@@ -1531,7 +1533,6 @@ struct RankedContext {
     /// One per chain quoting the bar it was computed on, keyed by expiry, so a
     /// later option bar inside the same cadence window can still find its own.
     chains: Vec<(NaiveDate, ChainForecast)>,
-    full_horizon_years: f64,
     /// What the model saw this bar, recorded onto any position opened from it.
     entry_features: crate::model::EntryFeatures,
 }
@@ -1542,6 +1543,9 @@ struct RankedContext {
 /// own expiry.
 struct ChainForecast {
     dist: PriceDistribution,
+    /// Years to this chain's horizon: the model's, or sooner when the
+    /// before-expiry exit will have closed a position in it first.
+    horizon_years: f64,
     /// Years from the horizon to the chain's expiry (zero scores at expiry),
     /// scaled by the square of the model's `horizon_vol_scale` — the crush.
     remaining_years: f64,
@@ -1575,6 +1579,13 @@ fn closes_cadence_window(ts: DateTime<Utc>, bar_minutes: i64, cadence: i64) -> b
     bar_minutes >= cadence || end_minute % cadence == 0
 }
 
+/// How long before expiry the before-expiry exit has closed a position, in
+/// years: it fires on the first bar with fewer than `min_days_before_expiry`
+/// days left, so a position is out by then.
+fn close_buffer_years(config: &RunConfig) -> f64 {
+    config.exits.min_days_before_expiry.map_or(0.0, |d| f64::from(d) / 365.25)
+}
+
 /// Which chain feeds the features: the nearest expiry that still covers the
 /// horizon, so its ATM IV is the vol of the period being forecast — failing
 /// that, the farthest. `chains` ascends by expiry; with one chain, that chain.
@@ -1586,9 +1597,12 @@ fn feature_chain(chains: &[(&ChainSeries, &ChainSnapshot)], horizon_years: f64) 
 }
 
 /// `chains` is every chain of one symbol quoting this bar, ascending by expiry.
+/// `close_buffer_years` is how long before expiry the before-expiry exit closes a
+/// position, so a chain is scored at the moment a position in it would be out.
 fn ranked_observe(
     ranked: &mut RankedStrategy,
     chains: &[(&ChainSeries, &ChainSnapshot)],
+    close_buffer_years: f64,
     next_earnings: Option<&EarningsEvent>,
     forecasts: &mut Vec<ForecastRecord>,
 ) -> RankedContext {
@@ -1629,12 +1643,26 @@ fn ranked_observe(
     let forecasts_by_chain: Vec<(NaiveDate, ChainForecast)> = chains
         .iter()
         .map(|(_, chain)| {
-            let horizon_years = full_horizon_years.min(chain.year_fraction).max(0.0);
+            let held = (chain.year_fraction - close_buffer_years).max(0.0);
+            let horizon_years = full_horizon_years.min(held);
+            // A chain expiring inside the model's horizon forecasts with its own
+            // ATM IV: that is the market's vol for exactly the period it covers,
+            // where the feature chain's spans a longer one.
+            let features = if chain.year_fraction < full_horizon_years {
+                Features {
+                    atm_iv: chain.atm_implied_vol().or(features.atm_iv),
+                    year_fraction: chain.year_fraction,
+                    ..features
+                }
+            } else {
+                features
+            };
             // Black-76 here reads vol and time only through σ√τ, so revaluing
             // every leg at k × its entry vol is exactly revaluing it at k²τ.
             let crush = ranked.model.horizon_vol_scale(&features, horizon_years);
             let forecast = ChainForecast {
                 dist: ranked.model.forecast(&features, horizon_years),
+                horizon_years,
                 remaining_years: (chain.year_fraction - horizon_years).max(0.0) * crush * crush,
                 forward_scale: if features.spot > 0.0 {
                     chain.forward / features.spot
@@ -1653,7 +1681,11 @@ fn ranked_observe(
         series,
         bar,
         &features,
-        &forecasts_by_chain[feature].1.dist,
+        // The model's own horizon, uncapped by expiry or any exit rule: this
+        // grades the forecaster against a realized price and a null read that
+        // far out. (Capping it at expiry once scored a feature chain's last week
+        // with a few days' spread against a week's move.)
+        &ranked.model.forecast(&features, full_horizon_years),
         full_horizon_years,
         ranked.model.as_ref(),
     ) {
@@ -1663,7 +1695,6 @@ fn ranked_observe(
     RankedContext {
         features,
         chains: forecasts_by_chain,
-        full_horizon_years,
         entry_features: (&features).into(),
     }
 }
@@ -1700,7 +1731,6 @@ fn ranked_choose(
             bar,
             &candidates,
             forecast,
-            ctx.full_horizon_years,
             cfg,
             scorer_records,
         );
@@ -1759,22 +1789,21 @@ fn ranked_choose(
 
 /// Sample up to `sample_per_bar` candidates (a deterministic stride across the
 /// enumerated list, so it spans widths and strikes) and price each forward to the
-/// option bar exactly a horizon later, to test whether the score predicts the
-/// realized outcome. Eval-only — never touches a decision. Skips the bar when
-/// there is no option bar a horizon out (a holiday, or past the last one near
-/// expiry).
+/// last option bar at or before the chain's horizon, to test whether the score
+/// predicts the realized outcome. Eval-only — never touches a decision. Skips
+/// the bar when the tape ends before the horizon.
 #[allow(clippy::too_many_arguments)]
 fn scorer_sample(
     series: &ChainSeries,
     bar: &ChainSnapshot,
     candidates: &[Candidate],
     forecast: &ChainForecast,
-    full_horizon_years: f64,
     cfg: &RankingConfig,
     out: &mut Vec<ScorerRecord>,
 ) {
     let ChainForecast {
         dist,
+        horizon_years,
         remaining_years,
         forward_scale,
     } = forecast;
@@ -1784,17 +1813,22 @@ fn scorer_sample(
     if sample_per_bar == 0 || candidates.is_empty() {
         return;
     }
-    let horizon_secs = (full_horizon_years * SECONDS_PER_YEAR) as i64;
+    let horizon_secs = (horizon_years * SECONDS_PER_YEAR) as i64;
     let horizon_ts = bar.ts + Duration::seconds(horizon_secs);
-    let Some(horizon_chain) = series.snapshot_at(horizon_ts) else {
+    // Past the end of the tape the outcome is unknown, not the last bar's.
+    if series.timestamps().last().is_none_or(|last| last < horizon_ts) {
         return;
-    };
+    }
     // Option bars strictly after entry, up to the horizon — the window a
-    // forecast-target exit could fire in.
+    // forecast-target exit could fire in. The last is where the horizon lands:
+    // a capped horizon (a forced close) falls between bars.
     let future_bars: Vec<DateTime<Utc>> = series
         .timestamps()
         .filter(|&ts| ts > bar.ts && ts <= horizon_ts)
         .collect();
+    let Some(horizon_chain) = future_bars.last().and_then(|&ts| series.snapshot_at(ts)) else {
+        return;
+    };
 
     let close_value = |chain: &ChainSnapshot, candidate: &Candidate| {
         crate::execution::exit_credit(&candidate.spread, chain)

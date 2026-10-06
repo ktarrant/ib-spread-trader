@@ -11,6 +11,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 
 use crate::data::ChainSnapshot;
+use crate::domain::OptionRight;
 use crate::execution::{Costs, FillError, entry_debit, exit_credit, fully_quoted};
 use crate::spread::{CONTRACT_MULTIPLIER, Side, Spread};
 
@@ -120,6 +121,42 @@ pub struct OpenPosition {
     pub peak_value: Option<f64>,
     /// Opened with a leg the bar did not quote, at an interpolated price.
     pub estimated_entry: bool,
+    /// Bars on which a short leg could have been assigned early in life.
+    pub early_assignment: Option<EarlyAssignment>,
+}
+
+/// When a short leg was open to early assignment: its bid at or below its
+/// intrinsic value, so whoever holds the other side does better exercising
+/// than selling. The backtest never assigns — a real account might have been,
+/// and been handed (or relieved of) stock overnight. A theoretical flag, read
+/// off the quotes; it cannot see dividends, which the capture does not hold.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct EarlyAssignment {
+    /// The first bar it happened on.
+    pub first_at: DateTime<Utc>,
+    /// How many of the position's bars it held on.
+    pub bars: usize,
+}
+
+/// Whether any short leg of `spread` quotes a bid at or below intrinsic on
+/// `bar`. Only real quotes count: an estimate is a model price, and Black-76
+/// never prices below intrinsic. Intrinsic is against the stock's own print,
+/// and only in the regular session: an ETF's 16:00–16:15 option bar has no
+/// stock to compare with but the parity forward (which carries the cost of
+/// carry an exercise would not pay) or an after-hours print.
+fn assignable(spread: &Spread, bar: &ChainSnapshot) -> bool {
+    let local = bar.ts.with_timezone(&chrono_tz::America::New_York);
+    let minute = chrono::Timelike::hour(&local) * 60 + chrono::Timelike::minute(&local);
+    let Some(spot) = bar.underlying.price().filter(|_| (570..960).contains(&minute)) else {
+        return false;
+    };
+    spread.legs.iter().filter(|leg| leg.side == Side::Short).any(|leg| {
+        let intrinsic = match leg.right {
+            OptionRight::Call => spot - leg.strike,
+            OptionRight::Put => leg.strike - spot,
+        };
+        intrinsic > 0.0 && bar.quote(leg.contract_id).is_some_and(|q| q.bid <= intrinsic)
+    })
 }
 
 impl OpenPosition {
@@ -158,6 +195,9 @@ pub struct ClosedTrade {
     /// off its smile (`ChainSnapshot::interpolated`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub estimated_entry: bool,
+    /// A short leg was open to early assignment while this was held.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub early_assignment: Option<EarlyAssignment>,
     /// Structural worst case at entry, net of cost — the capital at risk, and the
     /// denominator of realized P/L-per-risk. `None` for an unbounded structure.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -226,8 +266,9 @@ impl Portfolio {
             .sum()
     }
 
-    /// Update each open position's running peak gross P&L against `bar` — the
-    /// state the naked-long trailing stop reads. Only positions in `bar`'s own
+    /// Update each open position's per-bar state against `bar`: its running
+    /// peak gross P&L (what the naked-long trailing stop reads) and whether a
+    /// short leg is open to early assignment. Only positions in `bar`'s own
     /// chain are touched: another chain's smile would happily estimate legs it
     /// does not quote. A position the bar cannot price keeps its last peak.
     pub fn update_peaks(&mut self, bar: &ChainSnapshot, _costs: &Costs) {
@@ -236,6 +277,10 @@ impl Portfolio {
             if let Ok(credit) = exit_credit(&p.spread, bar) {
                 let gross = credit - p.entry_debit;
                 p.peak_value = Some(p.peak_value.map_or(gross, |peak| peak.max(gross)));
+            }
+            if assignable(&p.spread, bar) {
+                let flag = p.early_assignment.get_or_insert(EarlyAssignment { first_at: bar.ts, bars: 0 });
+                flag.bars += 1;
             }
         }
     }
@@ -273,6 +318,7 @@ impl Portfolio {
             leg_vols: Vec::new(),
             peak_value: None,
             estimated_entry,
+            early_assignment: None,
         });
         Ok(id)
     }
@@ -311,6 +357,7 @@ impl Portfolio {
             synthetic_price: false,
             estimated_price,
             estimated_entry: position.estimated_entry,
+            early_assignment: position.early_assignment,
             max_loss: position.max_loss,
             prediction: position.prediction,
             forecast_target: position.forecast_target,
@@ -360,6 +407,7 @@ impl Portfolio {
             synthetic_price: true,
             estimated_price: false,
             estimated_entry: position.estimated_entry,
+            early_assignment: position.early_assignment,
             max_loss: position.max_loss,
             prediction: position.prediction,
             forecast_target: position.forecast_target,
@@ -410,6 +458,7 @@ impl Portfolio {
             synthetic_price: false,
             estimated_price: false,
             estimated_entry: position.estimated_entry,
+            early_assignment: position.early_assignment,
             max_loss: position.max_loss,
             prediction: position.prediction,
             forecast_target: position.forecast_target,
@@ -550,6 +599,33 @@ mod tests {
             p.cash
         );
         assert_eq!(p.open.len(), 1);
+    }
+
+    /// The short 755 call with the stock at 760 is worth 5 exercised. A bid of
+    /// 4.90 means its holder does better exercising than selling, so the bar is
+    /// flagged; a bid of 5.20 is not. The flag rides through to the closed trade.
+    #[test]
+    fn a_short_leg_bid_at_or_below_intrinsic_flags_early_assignment() {
+        let mut p = Portfolio::new(10_000.0);
+        let costs = Costs::default();
+        let id = p.open(bull_call(), &bar_at(15, (2.90, 3.10), (1.40, 1.60)), &costs).unwrap();
+        let rallied = |hour, short_bid: f64| {
+            let mut bar = bar_at(hour, (9.90, 10.10), (short_bid, short_bid + 0.20));
+            bar.underlying.mid = Some(760.0);
+            bar.underlying.close = Some(760.0);
+            bar.forward = 760.0;
+            bar
+        };
+        p.update_peaks(&bar_at(16, (2.90, 3.10), (1.40, 1.60)), &costs);
+        assert_eq!(p.open[0].early_assignment, None, "out of the money");
+        p.update_peaks(&rallied(17, 4.90), &costs);
+        p.update_peaks(&rallied(18, 5.20), &costs);
+        p.update_peaks(&rallied(19, 5.00), &costs);
+        let flag = p.open[0].early_assignment.expect("flagged");
+        assert_eq!((flag.first_at, flag.bars), (rallied(17, 4.90).ts, 2));
+
+        let trade = p.close(id, &rallied(19, 5.00), &costs, ExitReason::ProfitTarget, 4).unwrap().unwrap();
+        assert_eq!(trade.early_assignment, Some(flag));
     }
 
     /// Max profit is net of what was paid, because that is what a profit target

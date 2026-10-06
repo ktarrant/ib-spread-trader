@@ -252,8 +252,8 @@ fn a_shared_account_respects_its_pool_cap_and_per_symbol_limit() {
     // One $20k pool, and the forecast beats the null (it is the mean-reversion
     // model). Trade P&L on ~51 trades is noise; the invariants are the point.
     assert!((totals.capital_deployed - 20_000.0).abs() < 1e-6);
-    assert_eq!(totals.trades, 39);
-    assert!((totals.total_pnl - -1719.98).abs() < 0.01, "{}", totals.total_pnl);
+    assert_eq!(totals.trades, 38);
+    assert!((totals.total_pnl - -1818.96).abs() < 0.01, "{}", totals.total_pnl);
     assert!(built.model_eval.as_ref().unwrap().pooled.crps_skill > 0.0);
     // The directional forecast diversifies the mix beyond credit-only.
     let naked = built.trades.iter().filter(|t| !t.description.contains('-')).count();
@@ -340,23 +340,29 @@ fn the_driftless_model_reproduces_its_recorded_run() {
 /// 49 -> 40 trades, -3504.12 -> -2327.73, with no entry in the five sessions
 /// after a release (559 bars refused). Then 40 -> 39 trades, -2327.73 ->
 /// -1719.98, with interpolated strikes taken from same-right neighbours and
-/// bounded by them (interpolated entries 24 -> 14 of the run).
+/// bounded by them (interpolated entries 24 -> 14 of the run). Then 39 -> 38
+/// trades, -1719.98 -> -1818.96, when a chain was scored to its forced close
+/// (three days before expiry) rather than a full week past it: only the 08-12
+/// entries, nine days out, moved. The same change graded the forecast eval at
+/// the model's own horizon in a feature chain's last week, where it had been
+/// capped at expiry against a full week's null — skill interval [-0.0087,
+/// +0.0313] -> [-0.0076, +0.0320].
 #[test]
 fn the_mean_reversion_model_reproduces_its_recorded_run() {
     let snapshot = snapshot_or_skip!();
     let (built, _) = shared_run(&snapshot, "strategies/mean_reversion.toml");
     let totals = &built.totals;
 
-    assert_eq!(totals.trades, 39);
+    assert_eq!(totals.trades, 38);
     assert_eq!(totals.census.ranking.enumerated, 17_639_750);
-    assert!((totals.total_pnl - -1719.98).abs() < 0.01, "{}", totals.total_pnl);
+    assert!((totals.total_pnl - -1818.96).abs() < 0.01, "{}", totals.total_pnl);
     let pooled = &built.model_eval.as_ref().unwrap().pooled;
     assert!(pooled.crps_skill > 0.0, "skill {}", pooled.crps_skill);
     // ...and within noise of zero. Ten weekly blocks put the interval across it,
     // which is why the model registry no longer labels this model.
     assert_eq!(pooled.weeks, 10);
     let [lo, hi] = pooled.crps_skill_interval;
-    assert!((lo - -0.0087).abs() < 1e-4 && (hi - 0.0313).abs() < 1e-4, "[{lo}, {hi}]");
+    assert!((lo - -0.0076).abs() < 1e-4 && (hi - 0.0320).abs() < 1e-4, "[{lo}, {hi}]");
     assert!(pooled.directional_hit_rate > 0.5, "dir {}", pooled.directional_hit_rate);
     let naked = built.trades.iter().filter(|t| !t.description.contains('-')).count();
     let debit = built
@@ -386,7 +392,9 @@ fn the_mean_reversion_model_reproduces_its_recorded_run() {
 /// the 0.20 leg-delta band. Then 75 -> 61 trades, -10634.40 -> -7918.27,
 /// pop_floor 25 -> 20, trailing 21 -> 17, under the post-earnings blackout.
 /// Then 61 -> 59 trades, -7918.27 -> -5045.24, pop_floor 20 -> 18 (credit 2 ->
-/// 3), trailing 17 -> 18, with same-right bounded interpolation.
+/// 3), trailing 17 -> 18, with same-right bounded interpolation. Then 59 -> 58
+/// trades, -5045.24 -> -7342.26, pop_floor 18 -> 19, when chains were scored to
+/// their forced close and a truncated horizon took a pro-rata drift.
 #[test]
 fn the_pop_trailing_exit_variant_reproduces_its_recorded_run() {
     use ib_spread_trader::portfolio::ExitReason;
@@ -394,10 +402,10 @@ fn the_pop_trailing_exit_variant_reproduces_its_recorded_run() {
     let (built, _) = shared_run(&snapshot, "strategies/exit_pop_trailing.toml");
     let totals = &built.totals;
 
-    assert_eq!(totals.trades, 59);
-    assert!((totals.total_pnl - -5045.24).abs() < 0.01, "{}", totals.total_pnl);
+    assert_eq!(totals.trades, 58);
+    assert!((totals.total_pnl - -7342.26).abs() < 0.01, "{}", totals.total_pnl);
     // The two structure-scoped give-ups actually fire on the real chain.
-    assert_eq!(totals.exits_by_reason["pop_floor"], 18, "vertical give-ups");
+    assert_eq!(totals.exits_by_reason["pop_floor"], 19, "vertical give-ups");
     assert_eq!(totals.exits_by_reason["trailing_stop"], 18, "naked let-it-run");
     // The floor reaches credit spreads now, which is the point of the change.
     let credit_give_ups = built

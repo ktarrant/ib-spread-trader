@@ -300,7 +300,10 @@ impl LognormalDriftModel {
             .max(atr_floor)
             .max(1e-4);
 
-        let drift = self.drift(features);
+        // The drift is the model's view over its whole horizon; a chain that is
+        // closed sooner gets the share of it that accrues by then.
+        let full = self.config.horizon_days / 365.25;
+        let drift = self.drift(features) * (horizon_years / full).clamp(0.0, 1.0);
         // Lognormal: ln(S_h / spot) ~ Normal(m, sigma) with m = drift - σ²/2, so
         // that the mean of S_h is spot·exp(drift) rather than the median.
         let m = drift - 0.5 * sigma * sigma;
@@ -462,6 +465,21 @@ mod tests {
         let flat = model.forecast(&features(None), 0.05).mean();
         let rising = model.forecast(&features(Some(0.02)), 0.05).mean();
         assert!(rising > flat + 1.0, "flat {flat}, rising {rising}");
+    }
+
+    /// A chain closed halfway through the horizon gets half the drift, and a
+    /// horizon past the model's own gets no more than all of it.
+    #[test]
+    fn the_drift_accrues_with_the_horizon() {
+        let model = LognormalDriftModel::new(LognormalModelConfig {
+            trend_weight: 1.0,
+            ..Default::default()
+        });
+        let week = 7.0 / 365.25;
+        let log_mean = |h| (model.forecast(&features(Some(0.02)), h).mean() / 100.0).ln();
+        assert!((log_mean(week) - 0.02).abs() < 1e-3, "{}", log_mean(week));
+        assert!((log_mean(week / 2.0) - 0.01).abs() < 1e-3, "{}", log_mean(week / 2.0));
+        assert!((log_mean(2.0 * week) - 0.02).abs() < 1e-3, "{}", log_mean(2.0 * week));
     }
 
     #[test]

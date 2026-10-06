@@ -315,6 +315,34 @@ holds more than one expiry, the intended replacement is *rolling* to the next mo
 rather than blacking out. The settlement path stays because a config can still lift
 the blackout, and its P&L is still reported apart.
 
+**The entry blackout no longer has to cover the horizon.** A chain is scored to
+the moment the before-expiry exit closes a position in it — `min(horizon,
+time to expiry − min_days_before_expiry)` — so an entry nearer expiry than the
+model's horizon is scored honestly rather than refused, and its drift is the
+pro-rata share of the horizon's. `validate` now asks only that
+`min_entry_days_before_expiry` exceed `min_days_before_expiry` (an entry inside
+the exit would close on its next bar). Short-dated rules for weeklies are
+`min_entry_days_before_expiry = 3` with `min_days_before_expiry = 2`, which closes
+on the session before a Friday expiry — the last one the tape quotes. On the
+defaults this re-scored the 9-day-out entries (6 days to their forced close, not
+7): `mean_reversion`'s golden went 39 → 38 trades.
+
+### Early assignment is flagged, never simulated
+
+The backtest never assigns, and a short leg near expiry is where a real account
+gets assigned. So every bar a short leg's **bid is at or below its intrinsic
+value** — when its holder does better exercising than selling — is counted on
+the position (`OpenPosition::early_assignment`: first bar, bar count), carried
+to the trade, totalled (`early_assignment_trades`/`_pnl`), named in a caveat, and
+badged in the viz trade card. A model-free read of the quotes; regular-session
+bars with a stock print only (the 16:00–16:15 ETF option bar compares against
+the parity forward or an after-hours print, and fired spuriously on a SPY call).
+It cannot see **dividends** — the classic early exercise of a short call the day
+before ex-date — because `underlying_snapshots.next_dividend_*` is empty in every
+snapshot so far. On the 2026-10-06 snapshot the direction + width model with
+every structure flags 2 of 115 trades, both deep-ITM short puts in their final
+week (META 592.5, 14 bars; XOM 167.5, 2).
+
 ## Indicators are incremental, and warm-up is suppressed on purpose
 
 Each indicator is fed one value per bar and carries its own state. The parked
@@ -546,8 +574,15 @@ Per bar and symbol:
   forecast (the farthest when none covers it). Its expiry is logged on every
   forecast row. Switching chains as one expires steps ATM IV along the term
   structure, and `iv_vs_median`'s trailing window sees that step.
-- **Each chain gets its own forecast**: horizon capped at *that* chain's expiry,
-  and a sampled spot mapped through *that* chain's forward.
+- **Each chain gets its own forecast**: horizon capped at *that* chain's forced
+  close (expiry less `min_days_before_expiry`), drift pro rata to the capped
+  horizon, and a sampled spot mapped through *that* chain's forward. A chain
+  expiring **inside** the model's horizon forecasts with its **own** ATM IV
+  (and its own expiry for `earnings_from_tape`), the market's vol for exactly
+  the days it covers; any other chain uses the feature chain's. The scorer
+  sample realizes each candidate at its chain's horizon (the last bar at or
+  before it); `model_eval` always grades the forecaster at the model's full
+  horizon, uncapped.
 - **Entries go to the front month**: the nearest chain outside the entry
   blackout (`min_entry_days_before_expiry`), so a run trades August until it
   blacks out and then October. `execution.expiry_choice = "best"` instead ranks
@@ -2019,8 +2054,9 @@ symbols under leave-one-symbol-out. Momentum was exactly backwards: short horizo
 are the reversion regime, momentum needs weeks-to-months. Two companion findings:
 **ATM-IV-only vol** (`realized_vol_weight = 0`) calibrates best (pooled coverage
 53/81/88), and the directional edge **decays to a coin-flip by two weeks** — so the
-horizon is deliberately short and, via the guard in `validate()`, must stay ≤ the
-entry blackout so a scored entry always gets the full horizon.
+horizon is deliberately short. (A `validate()` guard once kept it ≤ the entry
+blackout so every entry got the full horizon; chains are now scored to their
+forced close instead — see *Expiry settlement*.)
 
 **Correction, 2026-09-26: that edge was never established.** The gate then read
 the point estimate. Forecasts inside one week share most of a seven-day horizon,

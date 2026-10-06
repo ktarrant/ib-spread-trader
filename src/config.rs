@@ -1447,22 +1447,21 @@ impl StrategyConfig {
         {
             bail!("execution.min_entry_rsi ({lo}) exceeds max_entry_rsi ({hi})");
         }
-        if self.mode == StrategyMode::Ranked {
-            let model = self.resolved_model()?;
-            match self.execution.min_entry_days_before_expiry {
-                Some(min_days) if (min_days as f64) < model.model.horizon_days => bail!(
-                    "execution.min_entry_days_before_expiry ({}) must be >= model.horizon_days ({}) \
-                     so a scored entry always gets the full horizon",
-                    min_days,
-                    model.model.horizon_days
-                ),
-                None => bail!(
-                    "ranked mode needs execution.min_entry_days_before_expiry set to at least \
-                     model.horizon_days ({}), or a late entry is scored on a truncated horizon",
-                    model.model.horizon_days
-                ),
-                _ => {}
-            }
+        // A chain expiring before the horizon is scored to the moment the
+        // before-expiry exit closes a position in it, so a short-dated entry is
+        // honest; one opened inside that exit would close on its next bar.
+        if self.mode == StrategyMode::Ranked
+            && let Some(exit_days) = self.exit.resolve()?.min_days_before_expiry
+            && self
+                .execution
+                .min_entry_days_before_expiry
+                .is_none_or(|entry_days| entry_days <= exit_days)
+        {
+            bail!(
+                "execution.min_entry_days_before_expiry must exceed the exit's \
+                 min_days_before_expiry ({exit_days}), or an entry opens inside the \
+                 before-expiry exit and closes on its next bar"
+            );
         }
         Ok(())
     }
@@ -1870,11 +1869,10 @@ min_score = 0.2
         assert!(config.candidates.allow_credit);
     }
 
-    /// The horizon must fit inside the entry blackout, or a late entry is scored
-    /// on a horizon the engine silently truncates at expiry.
+    /// A horizon longer than the time to expiry is fine — the chain is scored
+    /// to its forced close — but an entry inside the before-expiry exit is not.
     #[test]
-    fn a_horizon_longer_than_the_entry_blackout_is_refused() {
-        // horizon 10 days > the default 8-day blackout: refused.
+    fn entries_must_sit_outside_the_before_expiry_exit() {
         let src = "\
 symbols = [\"SPY\"]
 expiry = \"2026-08-21\"
@@ -1882,15 +1880,12 @@ mode = \"ranked\"
 [model]
 horizon_days = 10.0
 ";
-        let err = toml::from_str::<StrategyConfig>(src)
-            .unwrap()
-            .validate()
-            .unwrap_err();
-        assert!(err.to_string().contains("min_entry_days_before_expiry"), "{err}");
+        toml::from_str::<StrategyConfig>(src).unwrap().validate().unwrap();
 
-        // Widening the blackout to match makes it valid again.
-        let ok = format!("{src}[execution]\nmin_entry_days_before_expiry = 11\n");
-        toml::from_str::<StrategyConfig>(&ok).unwrap().validate().unwrap();
+        // The default exit closes 3 days out, so a 3-day entry blackout is refused.
+        let late = format!("{src}[execution]\nmin_entry_days_before_expiry = 3\n");
+        let err = toml::from_str::<StrategyConfig>(&late).unwrap().validate().unwrap_err();
+        assert!(err.to_string().contains("min_entry_days_before_expiry"), "{err}");
     }
 
     #[test]

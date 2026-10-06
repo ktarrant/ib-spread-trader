@@ -81,6 +81,11 @@ pub struct Totals {
     /// binary events, apart so they can neither hide in nor swamp the rest.
     pub earnings_trades: usize,
     pub earnings_pnl: f64,
+    /// Trades with a short leg that could have been assigned early in life (bid
+    /// at or below intrinsic on some bar), and their P&L — the backtest held
+    /// them to the end; a real account might not have been allowed to.
+    pub early_assignment_trades: usize,
+    pub early_assignment_pnl: f64,
     pub commission_paid: f64,
     pub trades: usize,
     pub wins: usize,
@@ -272,6 +277,8 @@ fn assemble(
         settled_pnl,
         earnings_trades: trades.iter().filter(|t| t.held_through_earnings).count(),
         earnings_pnl: trades.iter().filter(|t| t.held_through_earnings).map(|t| t.pnl).sum(),
+        early_assignment_trades: trades.iter().filter(|t| t.early_assignment.is_some()).count(),
+        early_assignment_pnl: trades.iter().filter(|t| t.early_assignment.is_some()).map(|t| t.pnl).sum(),
         commission_paid,
         trades: trades.len(),
         wins,
@@ -481,6 +488,13 @@ fn caveats(
             totals.earnings_trades, totals.earnings_pnl, totals.total_pnl
         ));
     }
+    if totals.early_assignment_trades > 0 {
+        out.push(format!(
+            "{} trade(s) had a short leg bid at or below intrinsic — open to early \
+             assignment in a real account — and made ${:.2}. The backtest never assigns.",
+            totals.early_assignment_trades, totals.early_assignment_pnl
+        ));
+    }
     let rejections = totals.census.rejections.values().sum::<usize>();
     if rejections > totals.trades && rejections > 0 {
         out.push(format!(
@@ -643,11 +657,11 @@ pub fn write_csvs(
         .with_context(|| format!("creating output directory {}", dir.display()))?;
 
     let mut trades = String::from(
-        "id,symbol,description,opened_at,closed_at,bars_held,entry_debit,exit_credit,commission,pnl,exit_reason,expiry\n",
+        "id,symbol,description,opened_at,closed_at,bars_held,entry_debit,exit_credit,commission,pnl,exit_reason,expiry,early_assignment_from\n",
     );
     for t in &report.trades {
         trades.push_str(&format!(
-            "{},{},\"{}\",{},{},{},{:.2},{:.2},{:.2},{:.2},{},{}\n",
+            "{},{},\"{}\",{},{},{},{:.2},{:.2},{:.2},{:.2},{},{},{}\n",
             t.id,
             t.symbol,
             t.description,
@@ -660,6 +674,7 @@ pub fn write_csvs(
             t.pnl,
             reason_key(t.exit_reason),
             t.expiry,
+            t.early_assignment.map(|a| a.first_at.to_rfc3339()).unwrap_or_default(),
         ));
     }
     std::fs::write(dir.join("trades.csv"), trades)?;

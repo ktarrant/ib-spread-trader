@@ -536,6 +536,7 @@ mod tests {
             leg_vols: Vec::new(),
             peak_value: None,
             estimated_entry: false,
+            early_assignment: None,
         }
     }
 
@@ -746,6 +747,7 @@ mod tests {
             leg_vols: Vec::new(),
             peak_value: None,
             estimated_entry: false,
+            early_assignment: None,
         };
         let rules = ExitRules {
             underlying_past_short_strike: true,
@@ -802,6 +804,7 @@ mod tests {
             leg_vols: Vec::new(),
             peak_value: None,
             estimated_entry: false,
+            early_assignment: None,
         };
         let rules = ExitRules {
             underlying_past_short_strike: true,
