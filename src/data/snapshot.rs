@@ -17,14 +17,32 @@ const SNAPSHOT_DIR: &str = "Documents/Options Database";
 /// assumes both are present.
 pub const MIN_SCHEMA_VERSION: i64 = 6;
 
+/// The research DB's `format_version` this crate reads (ib-option-calc's
+/// docs/research-db.md).
+pub const RESEARCH_FORMAT_VERSION: i64 = 1;
+
+/// Which layout a snapshot file has. Both are read-only and read through the
+/// same loaders; only their SQL differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// A capture snapshot (`VACUUM INTO` of the capture DB): `bars` keyed by
+    /// text timestamp, bar size and data type.
+    Capture,
+    /// A research DB built by ib-option-calc's `scripts/research.py`: option
+    /// quote closes as integers, possibly with UW's tape merged in.
+    Research,
+}
+
 #[derive(Debug)]
 pub struct Snapshot {
     conn: Connection,
     path: PathBuf,
+    format: Format,
 }
 
 impl Snapshot {
-    /// Open a snapshot read-only, refusing anything older than [`MIN_SCHEMA_VERSION`].
+    /// Open a snapshot read-only: a capture snapshot no older than
+    /// [`MIN_SCHEMA_VERSION`], or a research DB of [`RESEARCH_FORMAT_VERSION`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if !path.exists() {
@@ -34,26 +52,55 @@ impl Snapshot {
         // SQLITE_OPEN_READ_ONLY alone would still be honoured, but passing both
         // means a future refactor cannot quietly drop the guarantee by editing
         // one of them.
-        let uri = format!("file:{}?mode=ro", path.canonicalize()?.display());
+        let uri = format!("{}?mode=ro", file_uri(&path.canonicalize()?));
         let conn = Connection::open_with_flags(
             &uri,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
         )
         .with_context(|| format!("opening snapshot {}", path.display()))?;
 
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version < MIN_SCHEMA_VERSION {
-            bail!(
-                "snapshot {} is schema v{version}; this tool needs v{MIN_SCHEMA_VERSION} or newer \
-                 (v6 added the stock bars and events table the backtester reads)",
-                path.display()
-            );
-        }
+        let research: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'research_meta')",
+            [],
+            |row| row.get(0),
+        )?;
+        let format = if research {
+            let version: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM research_meta WHERE key = 'format_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok();
+            if version.as_deref() != Some(&RESEARCH_FORMAT_VERSION.to_string()) {
+                bail!(
+                    "research DB {} is format {}; this tool reads format {RESEARCH_FORMAT_VERSION}",
+                    path.display(),
+                    version.as_deref().unwrap_or("(none)")
+                );
+            }
+            Format::Research
+        } else {
+            let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            if version < MIN_SCHEMA_VERSION {
+                bail!(
+                    "snapshot {} is schema v{version}; this tool needs v{MIN_SCHEMA_VERSION} or newer \
+                     (v6 added the stock bars and events table the backtester reads)",
+                    path.display()
+                );
+            }
+            Format::Capture
+        };
 
         Ok(Self {
             conn,
             path: path.to_path_buf(),
+            format,
         })
+    }
+
+    pub fn format(&self) -> Format {
+        self.format
     }
 
     /// Open the newest snapshot in `~/Documents/Options Database`, judged by the
@@ -70,10 +117,40 @@ impl Snapshot {
         &self.path
     }
 
+    /// The capture schema's `user_version`; for a research DB, that of the
+    /// snapshot it was built from.
     pub fn schema_version(&self) -> Result<i64> {
+        if self.format == Format::Research {
+            return Ok(self.conn.query_row(
+                "SELECT CAST(value AS INTEGER) FROM research_meta WHERE key = 'snapshot_schema'",
+                [],
+                |row| row.get(0),
+            )?);
+        }
         Ok(self
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))?)
+    }
+}
+
+/// A `file:` URI SQLite accepts for an absolute path. On Windows `canonicalize`
+/// returns a verbatim `\\?\C:\...` path, which SQLite cannot open as a URI, so
+/// the prefix goes and the separators turn to `/` (`file:///C:/...`). `%`, `?`
+/// and `#` are escaped, since SQLite's URI parser gives them meaning.
+fn file_uri(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let text = text
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&text)
+        .replace('\\', "/");
+    let escaped = text
+        .replace('%', "%25")
+        .replace('?', "%3F")
+        .replace('#', "%23");
+    if escaped.starts_with('/') {
+        format!("file://{escaped}")
+    } else {
+        format!("file:///{escaped}")
     }
 }
 
@@ -110,8 +187,7 @@ mod tests {
     #[test]
     fn the_newest_snapshot_is_judged_by_the_date_in_its_name() {
         let pick = |names: &[&str]| {
-            newest(names.iter().map(PathBuf::from).collect())
-                .map(|p| p.display().to_string())
+            newest(names.iter().map(PathBuf::from).collect()).map(|p| p.display().to_string())
         };
         assert_eq!(
             pick(&[
@@ -123,6 +199,24 @@ mod tests {
         );
         assert_eq!(pick(&["scratch.sqlite3"]), Some("scratch.sqlite3".into()));
         assert_eq!(pick(&[]), None);
+    }
+
+    #[test]
+    fn file_uris_open_on_windows_and_unix_alike() {
+        assert_eq!(
+            file_uri(Path::new("/Users/k/Documents/Options Database/a.sqlite3")),
+            "file:///Users/k/Documents/Options Database/a.sqlite3"
+        );
+        assert_eq!(
+            file_uri(Path::new(
+                r"\\?\C:\Users\Kevin\Documents\Options Database\a.sqlite3"
+            )),
+            "file:///C:/Users/Kevin/Documents/Options Database/a.sqlite3"
+        );
+        assert_eq!(
+            file_uri(Path::new("/tmp/odd?#%.sqlite3")),
+            "file:///tmp/odd%3F%23%25.sqlite3"
+        );
     }
 
     #[test]

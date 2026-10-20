@@ -102,8 +102,8 @@ impl Default for IntradayConfig {
 
 impl IntradayConfig {
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 
@@ -130,7 +130,9 @@ impl IntradayConfig {
             }
         }
         if self.fade_min_extension <= self.retest_band {
-            bail!("fade_min_extension must exceed retest_band, or no break is ever outside yet near");
+            bail!(
+                "fade_min_extension must exceed retest_band, or no break is ever outside yet near"
+            );
         }
         NaiveTime::parse_from_str(&self.last_entry, "%H:%M")
             .with_context(|| format!("last_entry '{}' is not HH:MM", self.last_entry))
@@ -288,6 +290,13 @@ ORDER BY b.ts";
 type Row = (f64, f64, f64, f64, f64);
 
 fn load_bars(snapshot: &Snapshot, symbol: &str, census: &mut Census) -> Result<Vec<Bar>> {
+    // The stock bid/ask opens this path checks for crossed quotes are capture
+    // data a research DB doesn't carry (it keeps their closes only).
+    if snapshot.format() == crate::data::snapshot::Format::Research {
+        bail!(
+            "the intraday path reads stock bid/ask OHLC: run it on a capture snapshot, not a research DB"
+        );
+    }
     let mut stmt = snapshot.conn().prepare(BARS_SQL)?;
     let rows = stmt.query_map([symbol], |r| {
         Ok((
@@ -306,10 +315,17 @@ fn load_bars(snapshot: &Snapshot, symbol: &str, census: &mut Census) -> Result<V
         };
         by_ts.entry(ts).or_default()[slot] = Some(values);
     }
-    let quote = |r: Row| Quote { open: r.0, high: r.1, low: r.2, close: r.3 };
+    let quote = |r: Row| Quote {
+        open: r.0,
+        high: r.1,
+        low: r.2,
+        close: r.3,
+    };
     let mut bars = Vec::new();
     for (ts, [trades, bid, ask]) in by_ts {
-        let Some((open, high, low, close, volume)) = trades else { continue };
+        let Some((open, high, low, close, volume)) = trades else {
+            continue;
+        };
         let ts = DateTime::parse_from_rfc3339(&ts)
             .with_context(|| format!("timestamp '{ts}'"))?
             .with_timezone(&Utc);
@@ -326,7 +342,16 @@ fn load_bars(snapshot: &Snapshot, symbol: &str, census: &mut Census) -> Result<V
             census.crossed_quotes += 1;
             (bid, ask) = (None, None);
         }
-        bars.push(Bar { ts, open, high, low, close, volume, bid, ask });
+        bars.push(Bar {
+            ts,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            bid,
+            ask,
+        });
     }
     Ok(bars)
 }
@@ -348,7 +373,10 @@ fn stock_symbols(snapshot: &Snapshot) -> Result<Vec<String>> {
 pub fn value_area(bars: &[Bar], share: f64) -> Option<(f64, f64)> {
     const BINS: usize = 200;
     let lo = bars.iter().map(|b| b.low).fold(f64::INFINITY, f64::min);
-    let hi = bars.iter().map(|b| b.high).fold(f64::NEG_INFINITY, f64::max);
+    let hi = bars
+        .iter()
+        .map(|b| b.high)
+        .fold(f64::NEG_INFINITY, f64::max);
     if hi <= lo {
         return None;
     }
@@ -393,16 +421,17 @@ fn session_levels(
 ) -> Option<(f64, f64, usize)> {
     let ib_bars = (cfg.ib_minutes / 5) as usize;
     let levels = match cfg.levels {
-        Levels::InitialBalance => (session.len() > ib_bars && minute(session[0].ts) == 570)
-            .then(|| {
+        Levels::InitialBalance => {
+            (session.len() > ib_bars && minute(session[0].ts) == 570).then(|| {
                 let ib = &session[..ib_bars];
                 let lo = ib.iter().map(|b| b.low).fold(f64::INFINITY, f64::min);
                 let hi = ib.iter().map(|b| b.high).fold(f64::NEG_INFINITY, f64::max);
                 (lo, hi, ib_bars)
-            }),
-        Levels::PriorValueArea => {
-            prior.and_then(|p| value_area(p, cfg.value_area)).map(|(lo, hi)| (lo, hi, 0))
+            })
         }
+        Levels::PriorValueArea => prior
+            .and_then(|p| value_area(p, cfg.value_area))
+            .map(|(lo, hi)| (lo, hi, 0)),
     };
     levels.filter(|(lo, hi, _)| hi > lo)
 }
@@ -415,7 +444,13 @@ fn level_positions(cfg: &IntradayConfig, bars: &[Bar]) -> HashMap<DateTime<Utc>,
     for session in sessions(bars) {
         if let Some((lo, hi, first)) = session_levels(cfg, session, prior) {
             for b in &session[first..] {
-                let side = if b.close > hi { 1.0 } else if b.close < lo { -1.0 } else { 0.0 };
+                let side = if b.close > hi {
+                    1.0
+                } else if b.close < lo {
+                    -1.0
+                } else {
+                    0.0
+                };
                 out.insert(b.ts, side);
             }
         }
@@ -469,7 +504,9 @@ impl Side {
             return None;
         }
         let reach = if s > 0.0 { bar.high } else { bar.low };
-        let extreme = self.extreme.map_or(reach, |e| if s > 0.0 { e.max(reach) } else { e.min(reach) });
+        let extreme = self
+            .extreme
+            .map_or(reach, |e| if s > 0.0 { e.max(reach) } else { e.min(reach) });
         self.extreme = Some(extreme);
         let far = beyond(extreme) >= cfg.fade_min_extension;
         match self.state {
@@ -586,10 +623,18 @@ pub fn run_symbol(
     for session in sessions(bars) {
         census.sessions += 1;
         let levels = session_levels(cfg, session, prior);
-        let open_side = prior.and_then(|p| value_area(p, cfg.value_area)).map(|(val, vah)| {
-            let open = session[0].open;
-            if open > vah { 1.0 } else if open < val { -1.0 } else { 0.0 }
-        });
+        let open_side = prior
+            .and_then(|p| value_area(p, cfg.value_area))
+            .map(|(val, vah)| {
+                let open = session[0].open;
+                if open > vah {
+                    1.0
+                } else if open < val {
+                    -1.0
+                } else {
+                    0.0
+                }
+            });
         prior = Some(session);
         let Some((lower, upper, first)) = levels else {
             census.sessions_without_levels += 1;
@@ -597,13 +642,23 @@ pub fn run_symbol(
             continue;
         };
         let width = upper - lower;
-        let width_ratio = (widths.len() >= 5)
-            .then(|| width / median(&widths[widths.len().saturating_sub(20)..]));
+        let width_ratio =
+            (widths.len() >= 5).then(|| width / median(&widths[widths.len().saturating_sub(20)..]));
         widths.push(width);
 
         let mut sides = [
-            Side { sign: 1.0, level: upper, state: State::Waiting, extreme: None },
-            Side { sign: -1.0, level: lower, state: State::Waiting, extreme: None },
+            Side {
+                sign: 1.0,
+                level: upper,
+                state: State::Waiting,
+                extreme: None,
+            },
+            Side {
+                sign: -1.0,
+                level: lower,
+                state: State::Waiting,
+                extreme: None,
+            },
         ];
         let mut pending: Option<(Order, Features)> = None;
         let mut open: Option<Open> = None;
@@ -630,7 +685,15 @@ pub fn run_symbol(
                 let shares = price.map_or(0.0, |p| (cfg.notional / p).floor());
                 match price {
                     Some(entry) if shares > 0.0 => {
-                        open = Some(Open { order, features, width, width_ratio, entry_ts: bar.ts, entry, shares })
+                        open = Some(Open {
+                            order,
+                            features,
+                            width,
+                            width_ratio,
+                            entry_ts: bar.ts,
+                            entry,
+                            shares,
+                        })
                     }
                     _ => census.unfillable += 1,
                 }
@@ -650,8 +713,7 @@ pub fn run_symbol(
                 if let Some((exit, reason)) = exit {
                     let p = open.take().unwrap();
                     let o = &p.order;
-                    let net = o.dir * (exit - p.entry) * p.shares
-                        - commission(cfg, p.shares) * 2.0;
+                    let net = o.dir * (exit - p.entry) * p.shares - commission(cfg, p.shares) * 2.0;
                     trades.push(Trade {
                         symbol: symbol.to_string(),
                         day: bar.ts.with_timezone(&New_York).date_naive(),
@@ -775,8 +837,7 @@ fn summarize<'a>(trades: impl IntoIterator<Item = &'a Trade>) -> Summary {
     }
     s.profit_factor = (lost > 0.0).then(|| won / lost);
     s.days = days.len();
-    s.avg_net_bp_interval =
-        bootstrap_interval(&days.into_values().collect::<Vec<_>>(), mean_of);
+    s.avg_net_bp_interval = bootstrap_interval(&days.into_values().collect::<Vec<_>>(), mean_of);
     s
 }
 
@@ -790,7 +851,10 @@ fn by_setup<K: Ord>(trades: &[Trade], key: impl Fn(&Trade) -> K) -> BySetup<K> {
             for t in trades.iter().filter(|t| t.setup == setup) {
                 groups.entry(key(t)).or_default().push(t);
             }
-            (setup, groups.into_iter().map(|(k, v)| (k, summarize(v))).collect())
+            (
+                setup,
+                groups.into_iter().map(|(k, v)| (k, summarize(v))).collect(),
+            )
         })
         .collect()
 }
@@ -841,7 +905,11 @@ fn window_moves(bars: &[Bar], acc: &mut WindowDays) {
             continue;
         }
         // Price at a boundary: the open of the bar starting there, or the close.
-        let at = |m: u32| session.get(((m - 570) / 5) as usize).map_or(last.close, |b| b.open);
+        let at = |m: u32| {
+            session
+                .get(((m - 570) / 5) as usize)
+                .map_or(last.close, |b| b.open)
+        };
         let day = session[0].ts.with_timezone(&New_York).date_naive();
         for (w, &(from, to)) in WINDOWS.iter().enumerate() {
             let (a, b) = (at(from), at(to));
@@ -897,7 +965,11 @@ pub struct Report {
 
 pub fn run(snapshot: &Snapshot, cfg: &IntradayConfig, include_trades: bool) -> Result<Report> {
     cfg.validate()?;
-    let symbols = if cfg.symbols.is_empty() { stock_symbols(snapshot)? } else { cfg.symbols.clone() };
+    let symbols = if cfg.symbols.is_empty() {
+        stock_symbols(snapshot)?
+    } else {
+        cfg.symbols.clone()
+    };
     let spy = load_bars(snapshot, "SPY", &mut Census::default())?;
     let market = (!spy.is_empty()).then(|| level_positions(cfg, &spy));
     let mut census = Census::default();
@@ -910,7 +982,13 @@ pub fn run(snapshot: &Snapshot, cfg: &IntradayConfig, include_trades: bool) -> R
         }
         census.symbols += 1;
         window_moves(&bars, &mut windows);
-        trades.extend(run_symbol(cfg, symbol, &bars, market.as_ref(), &mut census)?);
+        trades.extend(run_symbol(
+            cfg,
+            symbol,
+            &bars,
+            market.as_ref(),
+            &mut census,
+        )?);
     }
 
     let mut caveats = vec![
@@ -921,31 +999,52 @@ pub fn run(snapshot: &Snapshot, cfg: &IntradayConfig, include_trades: bool) -> R
             .to_string(),
     ];
     if market.is_none() {
-        caveats.push("No SPY tape in this snapshot; the `spy` feature is unknown throughout.".into());
+        caveats
+            .push("No SPY tape in this snapshot; the `spy` feature is unknown throughout.".into());
     }
     for (setup, s) in by_setup(&trades, |_| ()) {
         let n = s.get(&()).map_or(0, |s| s.trades);
         if n < 100 {
-            caveats.push(format!("{setup:?}: {n} trades; the win rate is descriptive, not a finding."));
+            caveats.push(format!(
+                "{setup:?}: {n} trades; the win rate is descriptive, not a finding."
+            ));
         }
     }
     let by_feature = BTreeMap::from([
-        ("width_ratio", by_setup(&trades, |t| match t.width_ratio {
-            None => "unknown",
-            Some(r) if r < 0.8 => "narrow_<0.8",
-            Some(r) if r <= 1.25 => "normal",
-            Some(_) => "wide_>1.25",
-        })),
-        ("open_vs_prior_va", by_setup(&trades, |t| t.features.open_vs_prior_va)),
+        (
+            "width_ratio",
+            by_setup(&trades, |t| match t.width_ratio {
+                None => "unknown",
+                Some(r) if r < 0.8 => "narrow_<0.8",
+                Some(r) if r <= 1.25 => "normal",
+                Some(_) => "wide_>1.25",
+            }),
+        ),
+        (
+            "open_vs_prior_va",
+            by_setup(&trades, |t| t.features.open_vs_prior_va),
+        ),
         ("spy", by_setup(&trades, |t| t.features.spy)),
-        ("reaction_1030", by_setup(&trades, |t| t.features.reaction_1030)),
-        ("reaction_1300", by_setup(&trades, |t| t.features.reaction_1300)),
-        ("entry_window", by_setup(&trades, |t| t.features.entry_window)),
-        ("day_close_hindsight", by_setup(&trades, |t| match t.day_close_beyond {
-            x if x < 0.0 => "back_inside",
-            x if x < 1.0 => "beyond_<1w",
-            _ => "trend_>=1w",
-        })),
+        (
+            "reaction_1030",
+            by_setup(&trades, |t| t.features.reaction_1030),
+        ),
+        (
+            "reaction_1300",
+            by_setup(&trades, |t| t.features.reaction_1300),
+        ),
+        (
+            "entry_window",
+            by_setup(&trades, |t| t.features.entry_window),
+        ),
+        (
+            "day_close_hindsight",
+            by_setup(&trades, |t| match t.day_close_beyond {
+                x if x < 0.0 => "back_inside",
+                x if x < 1.0 => "beyond_<1w",
+                _ => "trend_>=1w",
+            }),
+        ),
     ]);
     Ok(Report {
         config: cfg.clone(),
@@ -974,7 +1073,12 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, &c)| {
-                let q = |d: f64| Quote { open: c + d, high: c + 0.05 + d, low: c - 0.05 + d, close: c + d };
+                let q = |d: f64| Quote {
+                    open: c + d,
+                    high: c + 0.05 + d,
+                    low: c - 0.05 + d,
+                    close: c + d,
+                };
                 Bar {
                     ts: open + chrono::Duration::minutes(5 * i as i64),
                     open: c,
@@ -1012,18 +1116,27 @@ mod tests {
         assert_eq!(census.breakout_signals, 1);
         assert_eq!(trades.len(), 1, "{trades:?}");
         let t = &trades[0];
-        assert_eq!((t.setup, t.direction, t.exit_reason), (Setup::Breakout, 1, ExitReason::Target));
+        assert_eq!(
+            (t.setup, t.direction, t.exit_reason),
+            (Setup::Breakout, 1, ExitReason::Target)
+        );
         // Decided on the 101.1 close, filled at the next bar's opening ask.
         assert!((t.entry - 101.51).abs() < 1e-9);
         assert!(t.net_pnl > 0.0);
         // Decided on the 10:40 bar's close: before the 10:30-11:00 reaction is known.
-        assert_eq!((t.features.entry_window, t.features.reaction_1030), ("10:30-11:00", "unknown"));
+        assert_eq!(
+            (t.features.entry_window, t.features.reaction_1030),
+            ("10:30-11:00", "unknown")
+        );
     }
 
     #[test]
     fn the_context_gate_refuses_a_breakout_nothing_supports() {
         // No SPY tape, no prior session, decided before 11:00: every label unknown.
-        let cfg = IntradayConfig { breakout_min_context: 1, ..IntradayConfig::default() };
+        let cfg = IntradayConfig {
+            breakout_min_context: 1,
+            ..IntradayConfig::default()
+        };
         let mut census = Census::default();
         let bars = day(&[101.3, 101.4, 101.1, 101.5, 101.9, 102.3]);
         let trades = run_symbol(&cfg, "T", &bars, None, &mut census).unwrap();
@@ -1037,7 +1150,11 @@ mod tests {
         let mut acc: WindowDays = vec![BTreeMap::new(); WINDOWS.len()];
         window_moves(&session(&closes), &mut acc);
         let stats = window_stats(acc);
-        assert!(stats.iter().all(|w| w.sessions == 1 && w.follow_rate == 1.0 && w.follow_bp > 0.0));
+        assert!(
+            stats
+                .iter()
+                .all(|w| w.sessions == 1 && w.follow_rate == 1.0 && w.follow_bp > 0.0)
+        );
         assert_eq!(stats[3].window, "10:30-11:00");
     }
 
@@ -1048,7 +1165,10 @@ mod tests {
         let down: Vec<f64> = (1..=12).map(|i| 101.96 - 0.08 * i as f64).collect();
         let (trades, census) = run(&day(&[up, down].concat()));
         assert_eq!((census.fades_armed, census.breakout_signals), (1, 0));
-        let t = trades.iter().find(|t| t.setup == Setup::Fade).expect("a fade");
+        let t = trades
+            .iter()
+            .find(|t| t.setup == Setup::Fade)
+            .expect("a fade");
         assert_eq!((t.direction, t.exit_reason), (-1, ExitReason::Target));
         assert!((t.target - 101.05).abs() < 1e-9 && t.entry > t.target);
     }

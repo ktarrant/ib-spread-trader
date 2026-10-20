@@ -13,7 +13,7 @@
 use anyhow::Result;
 use serde::Serialize;
 
-use super::snapshot::Snapshot;
+use super::snapshot::{Format, Snapshot};
 
 /// The option bar sizes this crate trades on, finest first. Captures from
 /// 2026-09 on take 15-minute option bars; the reference snapshot is 30-minute.
@@ -61,13 +61,25 @@ pub fn chain_coverage(snapshot: &Snapshot) -> Result<Vec<ChainCoverage>> {
     for (option_size, stock_size) in STOCK_BAR_SIZE {
         chains.extend(coverage_at(snapshot, option_size, stock_size)?);
     }
-    chains.sort_by(|a, b| (&a.symbol, &a.expiry, &a.bar_size).cmp(&(&b.symbol, &b.expiry, &b.bar_size)));
+    chains.sort_by(|a, b| {
+        (&a.symbol, &a.expiry, &a.bar_size).cmp(&(&b.symbol, &b.expiry, &b.bar_size))
+    });
     Ok(chains)
 }
 
-fn coverage_at(snapshot: &Snapshot, option_size: &str, stock_size: &str) -> Result<Vec<ChainCoverage>> {
-    let mut stmt = snapshot.conn().prepare(SQL)?;
-    let rows = stmt.query_map([option_size, stock_size], |row| {
+fn coverage_at(
+    snapshot: &Snapshot,
+    option_size: &str,
+    stock_size: &str,
+) -> Result<Vec<ChainCoverage>> {
+    // A research DB has the same aggregates precomputed in `chains`, with the
+    // stock overlap counted against the same STOCK_BAR_SIZE pairing.
+    let (sql, params): (&str, Vec<&str>) = match snapshot.format() {
+        Format::Capture => (SQL, vec![option_size, stock_size]),
+        Format::Research => (SQL_RESEARCH, vec![option_size]),
+    };
+    let mut stmt = snapshot.conn().prepare(sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
         Ok(ChainCoverage {
             symbol: row.get("symbol")?,
             expiry: row.get("expiry")?,
@@ -85,6 +97,23 @@ fn coverage_at(snapshot: &Snapshot, option_size: &str, stock_size: &str) -> Resu
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
+
+const SQL_RESEARCH: &str = r#"
+SELECT ch.symbol, ch.expiry, ch.strikes, ch.paired_strikes, ch.timestamps, ch.sessions,
+       strftime('%Y-%m-%dT%H:%M:%S+00:00', ch.first_t * 60, 'unixepoch') AS first_ts,
+       strftime('%Y-%m-%dT%H:%M:%S+00:00', ch.last_t * 60, 'unixepoch') AS last_ts,
+       ch.quote_bars,
+       ch.stock_overlap AS stock_ts_overlap,
+       (SELECT COUNT(*) FROM events e
+         WHERE e.symbol = ch.symbol
+           AND e.kind   = 'earnings'
+           AND COALESCE(json_extract(e.detail_json, '$.reaction_date'), e.event_date)
+               BETWEEN date(ch.first_t * 60, 'unixepoch') AND date(ch.last_t * 60, 'unixepoch')
+       ) AS earnings_in_window
+FROM chains ch
+WHERE ch.minutes = CAST(replace(?1, 'min', '') AS INTEGER)
+ORDER BY ch.symbol, ch.expiry
+"#;
 
 /// `quote` is the spine: one row per (contract, ts) that printed a bid *and* an
 /// ask. Every count below is derived from it, so no aggregate can credit a chain

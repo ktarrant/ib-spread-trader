@@ -22,7 +22,7 @@ use crate::domain::{OptionRight, normalize_symbol};
 use crate::pricing::{self, PairedStrike};
 
 use super::catalog::OPTION_BAR_SIZES;
-use super::snapshot::Snapshot;
+use super::snapshot::{Format, Snapshot};
 
 /// What was dropped on the way to a clean two-sided series. Surfaced, never hidden.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -153,8 +153,11 @@ impl ChainSnapshot {
 
     /// A real quote, else an interpolated one — what a position can be opened at.
     pub fn quote_or_interpolated(&self, contract_id: i64) -> Option<&OptionQuote> {
-        self.quote(contract_id)
-            .or_else(|| self.interpolated.iter().find(|q| q.contract_id == contract_id))
+        self.quote(contract_id).or_else(|| {
+            self.interpolated
+                .iter()
+                .find(|q| q.contract_id == contract_id)
+        })
     }
 
     /// Quotes of one right — real and interpolated — restricted to those a delta
@@ -227,8 +230,18 @@ impl ChainSnapshot {
             self.quotes
                 .iter()
                 .filter(|q| q.right == right && q.implied_vol.is_some())
-                .filter(|q| if below { q.strike < strike } else { q.strike > strike })
-                .min_by(|a, b| (a.strike - strike).abs().total_cmp(&(b.strike - strike).abs()))
+                .filter(|q| {
+                    if below {
+                        q.strike < strike
+                    } else {
+                        q.strike > strike
+                    }
+                })
+                .min_by(|a, b| {
+                    (a.strike - strike)
+                        .abs()
+                        .total_cmp(&(b.strike - strike).abs())
+                })
         };
         let (lo, hi) = (nearest(true)?, nearest(false)?);
         let ln = |k: f64| (k / self.forward).ln();
@@ -242,7 +255,8 @@ impl ChainSnapshot {
         } else {
             lo.mid.max(hi.mid - (hi.strike - strike))
         };
-        let mid = pricing::black76(self.forward, strike, t, vol, is_call).clamp(floor, line.max(floor));
+        let mid =
+            pricing::black76(self.forward, strike, t, vol, is_call).clamp(floor, line.max(floor));
         let vol = pricing::implied_vol(mid, self.forward, strike, t, is_call).unwrap_or(vol);
         let half = 0.5 * (lo.ask - lo.bid).max(hi.ask - hi.bid);
         Some(OptionQuote {
@@ -259,13 +273,22 @@ impl ChainSnapshot {
 
     /// Black-76 at the OTM smile's vol for the strike, crossed by the nearest
     /// same-right quote's spread — for a strike no two same-right quotes bracket.
-    fn smile_estimate(&self, contract_id: i64, strike: f64, right: OptionRight) -> Option<OptionQuote> {
+    fn smile_estimate(
+        &self,
+        contract_id: i64,
+        strike: f64,
+        right: OptionRight,
+    ) -> Option<OptionQuote> {
         let vol = interp_smile_iv(&self.otm_smile(), (strike / self.forward).ln())?;
         let nearest = self
             .quotes
             .iter()
             .filter(|q| q.right == right)
-            .min_by(|a, b| (a.strike - strike).abs().total_cmp(&(b.strike - strike).abs()))?;
+            .min_by(|a, b| {
+                (a.strike - strike)
+                    .abs()
+                    .total_cmp(&(b.strike - strike).abs())
+            })?;
         let half = 0.5 * (nearest.ask - nearest.bid);
         let (t, is_call) = (self.year_fraction, right.is_call());
         let mid = pricing::black76(self.forward, strike, t, vol, is_call);
@@ -381,7 +404,9 @@ impl ChainSeries {
         let expiry_text = expiry.format("%Y-%m-%d").to_string();
 
         let mut sizes = option_bar_sizes(snapshot, &symbol, &expiry_text)?.into_iter();
-        let finest = sizes.next().unwrap_or(OPTION_BAR_SIZES[OPTION_BAR_SIZES.len() - 1]);
+        let finest = sizes
+            .next()
+            .unwrap_or(OPTION_BAR_SIZES[OPTION_BAR_SIZES.len() - 1]);
         let mut bar_minutes = bar_minutes_of(finest)?;
         let (mut quotes, mut option_quality) =
             load_option_quotes(snapshot, &symbol, &expiry_text, finest)?;
@@ -407,7 +432,11 @@ impl ChainSeries {
             // quote wins where both have one and the coarser fills the rest.
             let have: BTreeSet<(DateTime<Utc>, i64)> =
                 quotes.iter().map(|q| (q.ts, q.contract_id)).collect();
-            quotes.extend(coarse.into_iter().filter(|q| !have.contains(&(q.ts, q.contract_id))));
+            quotes.extend(
+                coarse
+                    .into_iter()
+                    .filter(|q| !have.contains(&(q.ts, q.contract_id))),
+            );
             // The loader's own order: timestamp, then strike, calls before puts.
             quotes.sort_by(|a, b| {
                 a.ts.cmp(&b.ts)
@@ -435,7 +464,11 @@ impl ChainSeries {
         };
         // Sessions from the widest tape: a chain's native bars can stop near its
         // expiry, and a later chain's release must still map to its own session.
-        let sessions_tape = if five_minute.is_empty() { &underlying } else { &five_minute };
+        let sessions_tape = if five_minute.is_empty() {
+            &underlying
+        } else {
+            &five_minute
+        };
         let sessions = sessions_tape.keys().map(|ts| ts.date_naive()).collect();
         let earnings = load_earnings(snapshot, &symbol, &sessions)?;
         let registered = load_registered(snapshot, &symbol, &expiry_text)?;
@@ -512,7 +545,13 @@ impl ChainSeries {
     /// tape, so they exist from a chain's first bar. `None` without 22 sessions,
     /// or when the latest is more than a week stale (a hole in the tape).
     pub fn har_inputs(&self, date: NaiveDate) -> Option<[f64; 3]> {
-        let recent: Vec<(NaiveDate, f64)> = self.daily_var.range(..date).rev().take(22).map(|(d, v)| (*d, *v)).collect();
+        let recent: Vec<(NaiveDate, f64)> = self
+            .daily_var
+            .range(..date)
+            .rev()
+            .take(22)
+            .map(|(d, v)| (*d, *v))
+            .collect();
         if recent.len() < 22 || (date - recent[0].0).num_days() > 7 {
             return None;
         }
@@ -524,7 +563,12 @@ impl ChainSeries {
     /// before it, over the releases already priced before `date`. `None` with
     /// fewer than four: an average of three earnings moves is an anecdote.
     pub fn earnings_variance_ratio(&self, date: NaiveDate) -> Option<f64> {
-        let past: Vec<f64> = self.release_ratios.iter().filter(|(r, _)| *r < date).map(|r| r.1).collect();
+        let past: Vec<f64> = self
+            .release_ratios
+            .iter()
+            .filter(|(r, _)| *r < date)
+            .map(|r| r.1)
+            .collect();
         (past.len() >= 4).then(|| past.iter().sum::<f64>() / past.len() as f64)
     }
 
@@ -739,17 +783,58 @@ GROUP BY b.ts
 ORDER BY b.ts
 "#;
 
+/// The research DB's form of [`OPTION_SQL`]: the same columns, in the same
+/// types and order, so the loader below reads either. Times go back to the
+/// capture's text form and prices to dollars; integer 1/10000 $ divided back
+/// is the same double the capture stored for a cent price.
+const OPTION_SQL_RESEARCH: &str = r#"
+SELECT strftime('%Y-%m-%dT%H:%M:%S+00:00', q.t * 60, 'unixepoch') AS ts,
+       c.id AS contract_id, c.strike, c.right,
+       q.bid / 10000.0 AS bid,
+       q.ask / 10000.0 AS ask
+FROM quotes q
+JOIN contracts c ON c.id = q.contract_id
+WHERE q.minutes = CAST(replace(?1, 'min', '') AS INTEGER)
+  AND c.symbol = ?2
+  AND c.expiry = ?3
+ORDER BY q.t, c.strike, c.right
+"#;
+
+/// The research DB's form of [`UNDERLYING_SQL`].
+const UNDERLYING_SQL_RESEARCH: &str = r#"
+SELECT strftime('%Y-%m-%dT%H:%M:%S+00:00', t * 60, 'unixepoch') AS ts,
+       bid, ask, open, high, low, close, volume
+FROM stock_bars
+WHERE minutes = CAST(replace(?1, 'min', '') AS INTEGER)
+  AND symbol = ?2
+ORDER BY t
+"#;
+
+fn sql_for<'a>(snapshot: &Snapshot, capture: &'a str, research: &'a str) -> &'a str {
+    match snapshot.format() {
+        Format::Capture => capture,
+        Format::Research => research,
+    }
+}
+
 fn load_registered(
     snapshot: &Snapshot,
     symbol: &str,
     expiry: &str,
 ) -> Result<Vec<(i64, f64, OptionRight)>> {
-    let mut stmt = snapshot.conn().prepare(
+    let mut stmt = snapshot.conn().prepare(sql_for(
+        snapshot,
         "SELECT id, strike, right FROM contracts
          WHERE kind = 'option' AND symbol = ?1 AND expiry = ?2",
-    )?;
+        // A research DB's contracts are all options.
+        "SELECT id, strike, right FROM contracts WHERE symbol = ?1 AND expiry = ?2",
+    ))?;
     let rows = stmt.query_map((symbol, expiry), |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, String>(2)?))
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, f64>(1)?,
+            row.get::<_, String>(2)?,
+        ))
     })?;
     let mut out = Vec::new();
     for row in rows {
@@ -762,12 +847,17 @@ fn load_registered(
 /// The option bar sizes the capture took for this chain, finest first. Empty
 /// when it took none (an empty chain loads empty either way).
 fn option_bar_sizes(snapshot: &Snapshot, symbol: &str, expiry: &str) -> Result<Vec<&'static str>> {
-    let mut stmt = snapshot.conn().prepare(
+    let mut stmt = snapshot.conn().prepare(sql_for(
+        snapshot,
         "SELECT 1 FROM bars b JOIN contracts c ON c.id = b.contract_id
          WHERE c.kind = 'option' AND c.symbol = ?1 AND c.expiry = ?2
            AND b.bar_size = ?3 AND b.data_type = 'bid'
          LIMIT 1",
-    )?;
+        "SELECT 1 FROM quotes q JOIN contracts c ON c.id = q.contract_id
+         WHERE c.symbol = ?1 AND c.expiry = ?2
+           AND q.minutes = CAST(replace(?3, 'min', '') AS INTEGER) AND q.bid IS NOT NULL
+         LIMIT 1",
+    ))?;
     let mut sizes = Vec::new();
     for size in OPTION_BAR_SIZES {
         if stmt.exists((symbol, expiry, size))? {
@@ -855,7 +945,9 @@ fn load_option_quotes(
     expiry: &str,
     bar_size: &str,
 ) -> Result<(Vec<RawQuote>, Quality)> {
-    let mut stmt = snapshot.conn().prepare(OPTION_SQL)?;
+    let mut stmt = snapshot
+        .conn()
+        .prepare(sql_for(snapshot, OPTION_SQL, OPTION_SQL_RESEARCH))?;
     let rows = stmt.query_map((bar_size, symbol, expiry), |row| {
         Ok((
             row.get::<_, String>("ts")?,
@@ -901,7 +993,10 @@ fn load_underlying(
     symbol: &str,
     bar_size: &str,
 ) -> Result<(BTreeMap<DateTime<Utc>, UnderlyingBar>, Quality)> {
-    let mut stmt = snapshot.conn().prepare(UNDERLYING_SQL)?;
+    let mut stmt =
+        snapshot
+            .conn()
+            .prepare(sql_for(snapshot, UNDERLYING_SQL, UNDERLYING_SQL_RESEARCH))?;
     let rows = stmt.query_map((bar_size, symbol), |row| {
         Ok((
             row.get::<_, String>("ts")?,
@@ -1002,7 +1097,9 @@ fn daily_variance(bars: &BTreeMap<DateTime<Utc>, UnderlyingBar>) -> BTreeMap<Nai
             });
         }
         let s = cur.as_mut().expect("a session was just opened");
-        let Some(close) = bar.close.filter(|c| *c > 0.0) else { continue };
+        let Some(close) = bar.close.filter(|c| *c > 0.0) else {
+            continue;
+        };
         let from = match s.last {
             None => bar.open.filter(|o| *o > 0.0),
             Some((t, c)) if *ts - t == chrono::Duration::minutes(5) => Some(c),
@@ -1024,10 +1121,18 @@ fn daily_variance(bars: &BTreeMap<DateTime<Utc>, UnderlyingBar>) -> BTreeMap<Nai
 /// Each release's reaction session (the first whole session after its
 /// `close_on`, within four days) as a multiple of the mean of the 22 sessions
 /// before it. One entry per reaction session.
-fn release_ratios(daily: &BTreeMap<NaiveDate, f64>, earnings: &[EarningsEvent]) -> Vec<(NaiveDate, f64)> {
+fn release_ratios(
+    daily: &BTreeMap<NaiveDate, f64>,
+    earnings: &[EarningsEvent],
+) -> Vec<(NaiveDate, f64)> {
     let mut out: Vec<(NaiveDate, f64)> = Vec::new();
     for e in earnings {
-        let Some((&day, &var)) = daily.range(e.close_on.succ_opt().unwrap_or(e.close_on)..).next() else { continue };
+        let Some((&day, &var)) = daily
+            .range(e.close_on.succ_opt().unwrap_or(e.close_on)..)
+            .next()
+        else {
+            continue;
+        };
         if (day - e.close_on).num_days() > 4 || out.iter().any(|(d, _)| *d == day) {
             continue;
         }
@@ -1108,13 +1213,23 @@ mod tests {
     /// A session that opens after 09:30 is not whole and does not count.
     #[test]
     fn daily_variance_sums_the_session_and_its_overnight_gap() {
-        let bar = |c: f64, o: f64| UnderlyingBar { mid: None, open: Some(o), high: Some(c), low: Some(c), close: Some(c), volume: Some(1.0) };
+        let bar = |c: f64, o: f64| UnderlyingBar {
+            mid: None,
+            open: Some(o),
+            high: Some(c),
+            low: Some(c),
+            close: Some(c),
+            volume: Some(1.0),
+        };
         let mut bars = BTreeMap::new();
         // 2026-03-02 and -03 are Mondays-Tuesdays in EST: 09:30 New York = 14:30 UTC.
         for (day, open, close) in [(2, 100.0, 101.0), (3, 102.0, 102.0)] {
             let start = Utc.with_ymd_and_hms(2026, 3, day, 14, 30, 0).unwrap();
             for i in 0..41 {
-                bars.insert(start + chrono::Duration::minutes(5 * i), bar(close, if i == 0 { open } else { close }));
+                bars.insert(
+                    start + chrono::Duration::minutes(5 * i),
+                    bar(close, if i == 0 { open } else { close }),
+                );
             }
         }
         let late = Utc.with_ymd_and_hms(2026, 3, 4, 15, 0, 0).unwrap();
@@ -1123,7 +1238,10 @@ mod tests {
         }
         let v = daily_variance(&bars);
         let d = |day| NaiveDate::from_ymd_opt(2026, 3, day).unwrap();
-        assert!(!v.contains_key(&d(2)), "no prior close: the first session's gap is unknown");
+        assert!(
+            !v.contains_key(&d(2)),
+            "no prior close: the first session's gap is unknown"
+        );
         let expect = (102.0_f64 / 101.0).ln().powi(2); // flat session, all variance in the gap
         assert!((v[&d(3)] - expect).abs() < 1e-15, "{v:?}");
         assert!(!v.contains_key(&d(4)), "opened at 10:00: not whole");
@@ -1149,10 +1267,22 @@ mod tests {
         // 2026-09-07 is Labor Day; the tape trades Thu 3, Fri 4, Tue 8, Wed 9.
         let tape: BTreeSet<NaiveDate> = [d(9, 3), d(9, 4), d(9, 8), d(9, 9)].into();
 
-        assert_eq!(session_before(d(9, 9), &tape), d(9, 8), "after-close Tuesday");
-        assert_eq!(session_before(d(9, 8), &tape), d(9, 4), "pre-open after the holiday");
+        assert_eq!(
+            session_before(d(9, 9), &tape),
+            d(9, 8),
+            "after-close Tuesday"
+        );
+        assert_eq!(
+            session_before(d(9, 8), &tape),
+            d(9, 4),
+            "pre-open after the holiday"
+        );
         // Past the tape: the previous weekday, never the tape's last session.
-        assert_eq!(session_before(d(9, 21), &tape), d(9, 18), "a Monday past the data");
+        assert_eq!(
+            session_before(d(9, 21), &tape),
+            d(9, 18),
+            "a Monday past the data"
+        );
         assert_eq!(session_before(d(9, 16), &tape), d(9, 15));
     }
 
@@ -1181,8 +1311,22 @@ mod tests {
         assert_eq!(fifteen.len(), 2);
         let first = fifteen[&at(30)];
         assert_eq!(
-            (first.open, first.high, first.low, first.close, first.volume, first.mid),
-            (Some(100.0), Some(102.0), Some(98.0), Some(99.0), Some(30.0), Some(99.1))
+            (
+                first.open,
+                first.high,
+                first.low,
+                first.close,
+                first.volume,
+                first.mid
+            ),
+            (
+                Some(100.0),
+                Some(102.0),
+                Some(98.0),
+                Some(99.0),
+                Some(30.0),
+                Some(99.1)
+            )
         );
         assert_eq!(fifteen[&at(45)].close, Some(99.2));
     }
@@ -1285,6 +1429,103 @@ mod tests {
         }
     }
 
+    /// A capture fixture in research form, converted the way ib-option-calc's
+    /// `scripts/research.py build` makes an IB-only research DB.
+    fn to_research(capture: &std::path::Path) -> std::path::PathBuf {
+        let path = capture.with_extension("research.sqlite3");
+        let _ = std::fs::remove_file(&path);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("ATTACH ?1 AS cap", [capture.to_str().unwrap()])
+            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE research_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO research_meta VALUES ('format_version', '1'), ('snapshot_schema', '6'),
+                                              ('build', 'ib-only');
+             CREATE TABLE contracts (id INTEGER PRIMARY KEY, symbol TEXT, expiry TEXT,
+                 strike REAL, right TEXT);
+             INSERT INTO contracts SELECT id, symbol, expiry, strike, right
+                 FROM cap.contracts WHERE kind = 'option';
+             CREATE TABLE quotes (contract_id INTEGER, minutes INTEGER, t INTEGER, bid INTEGER,
+                 ask INTEGER, source INTEGER, PRIMARY KEY (contract_id, minutes, t)) WITHOUT ROWID;
+             INSERT INTO quotes
+                 SELECT b.contract_id, CAST(replace(b.bar_size, 'min', '') AS INTEGER),
+                        CAST(strftime('%s', b.ts) AS INTEGER) / 60,
+                        CAST(round(MAX(CASE WHEN b.data_type = 'bid' THEN b.close END) * 10000) AS INTEGER),
+                        CAST(round(MAX(CASE WHEN b.data_type = 'ask' THEN b.close END) * 10000) AS INTEGER),
+                        0
+                 FROM cap.bars b JOIN contracts c ON c.id = b.contract_id
+                 WHERE b.data_type IN ('bid', 'ask')
+                 GROUP BY b.contract_id, b.ts, b.bar_size;
+             CREATE TABLE stock_bars (symbol TEXT, minutes INTEGER, t INTEGER, open REAL, high REAL,
+                 low REAL, close REAL, volume REAL, bid REAL, ask REAL,
+                 PRIMARY KEY (symbol, minutes, t)) WITHOUT ROWID;
+             INSERT INTO stock_bars
+                 SELECT c.symbol, CAST(replace(b.bar_size, 'min', '') AS INTEGER),
+                        CAST(strftime('%s', b.ts) AS INTEGER) / 60,
+                        MAX(CASE WHEN b.data_type = 'trades' THEN b.open END),
+                        MAX(CASE WHEN b.data_type = 'trades' THEN b.high END),
+                        MAX(CASE WHEN b.data_type = 'trades' THEN b.low END),
+                        MAX(CASE WHEN b.data_type = 'trades' THEN b.close END),
+                        MAX(CASE WHEN b.data_type = 'trades' THEN b.volume END),
+                        MAX(CASE WHEN b.data_type = 'bid' THEN b.close END),
+                        MAX(CASE WHEN b.data_type = 'ask' THEN b.close END)
+                 FROM cap.bars b JOIN cap.contracts c ON c.id = b.contract_id
+                 WHERE c.kind = 'stock'
+                 GROUP BY c.symbol, b.bar_size, b.ts;
+             CREATE TABLE events AS SELECT * FROM cap.events;",
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn a_research_db_loads_exactly_what_its_snapshot_does() {
+        let same = |capture: std::path::PathBuf| {
+            let research = to_research(&capture);
+            let (a, b) = (
+                Snapshot::open(&capture).unwrap(),
+                Snapshot::open(&research).unwrap(),
+            );
+            assert_eq!(
+                (a.format(), b.format()),
+                (Format::Capture, Format::Research)
+            );
+            let (a, b) = (
+                ChainSeries::load(&a, "test", expiry()).unwrap(),
+                ChainSeries::load(&b, "test", expiry()).unwrap(),
+            );
+            assert_eq!((a.len(), a.bar_minutes), (b.len(), b.bar_minutes));
+            assert_eq!(a.underlying_bar_size, b.underlying_bar_size);
+            assert_eq!(format!("{:?}", a.registered), format!("{:?}", b.registered));
+            for i in 0..a.len() {
+                assert_eq!(
+                    format!("{:?}", a.snapshot(i)),
+                    format!("{:?}", b.snapshot(i)),
+                    "bar {i}"
+                );
+            }
+        };
+        same(fixture("research-basic"));
+        // Both bar sizes: the research DB keeps each, so the 15-onto-30 fold is the same.
+        let mixed = fixture("research-mixed");
+        add_fifteen(
+            &mixed,
+            &["2026-07-01T13:15:00+00:00", "2026-07-01T13:45:00+00:00"],
+        );
+        same(mixed);
+        // Registered strikes with no quote are interpolated from either.
+        let registered = fixture("research-registered");
+        rusqlite::Connection::open(&registered)
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO contracts (id, symbol, kind, exchange, currency, expiry, strike, right)
+                 VALUES (6, 'TEST', 'option', 'SMART', 'USD', '2026-08-21', 102.5, 'C'),
+                        (7, 'TEST', 'option', 'SMART', 'USD', '2026-08-21', 102.5, 'P');",
+            )
+            .unwrap();
+        same(registered);
+    }
+
     #[test]
     fn registered_strikes_inside_the_smile_are_interpolated_and_none_past_it() {
         let path = fixture("interpolated");
@@ -1300,12 +1541,19 @@ mod tests {
         let series = ChainSeries::load(&Snapshot::open(&path).unwrap(), "test", expiry()).unwrap();
         let bar = series.snapshot(0).unwrap();
         let ids: Vec<i64> = bar.interpolated.iter().map(|q| q.contract_id).collect();
-        assert_eq!(ids, [6, 7], "102.5 sits inside the quoted 100-105 smile; 120 does not");
+        assert_eq!(
+            ids,
+            [6, 7],
+            "102.5 sits inside the quoted 100-105 smile; 120 does not"
+        );
         assert!(bar.quote(6).is_none() && bar.quote_or_interpolated(6).is_some());
         // The smile is built from real quotes only, so registering strikes moves nothing.
         let plain = fixture("not-interpolated");
         let plain = ChainSeries::load(&Snapshot::open(&plain).unwrap(), "test", expiry()).unwrap();
-        assert_eq!(bar.atm_implied_vol(), plain.snapshot(0).unwrap().atm_implied_vol());
+        assert_eq!(
+            bar.atm_implied_vol(),
+            plain.snapshot(0).unwrap().atm_implied_vol()
+        );
         assert_eq!(bar.selectable(OptionRight::Call).count(), 3);
     }
 
@@ -1314,26 +1562,44 @@ mod tests {
         // 15-minute bars end before the 30-minute tape begins: the 13:15 bar
         // closes at 13:30, so it is the 13:00 thirty-minute quote; 13:00 is dropped.
         let path = fixture("mixed-short");
-        add_fifteen(&path, &["2026-07-01T13:00:00+00:00", "2026-07-01T13:15:00+00:00"]);
+        add_fifteen(
+            &path,
+            &["2026-07-01T13:00:00+00:00", "2026-07-01T13:15:00+00:00"],
+        );
         let series = ChainSeries::load(&Snapshot::open(&path).unwrap(), "test", expiry()).unwrap();
         assert_eq!(series.bar_minutes, 30);
-        let ts: Vec<String> = series.timestamps().map(|t| t.format("%H:%M").to_string()).collect();
+        let ts: Vec<String> = series
+            .timestamps()
+            .map(|t| t.format("%H:%M").to_string())
+            .collect();
         assert_eq!(ts, ["13:00", "13:30", "14:00"]);
 
         // Where both tapes quote the same instant, strikes only the coarse pass
         // took are kept: the 13:45 bar (strike 100 only) is the 13:30 quote, and
         // the 30-minute 13:30 bar adds strike 105.
         let path = fixture("mixed-overlap");
-        add_fifteen(&path, &["2026-07-01T13:15:00+00:00", "2026-07-01T13:45:00+00:00"]);
+        add_fifteen(
+            &path,
+            &["2026-07-01T13:15:00+00:00", "2026-07-01T13:45:00+00:00"],
+        );
         let series = ChainSeries::load(&Snapshot::open(&path).unwrap(), "test", expiry()).unwrap();
-        let bar = series.snapshot_at(parse_ts("2026-07-01T13:30:00+00:00").unwrap()).unwrap();
+        let bar = series
+            .snapshot_at(parse_ts("2026-07-01T13:30:00+00:00").unwrap())
+            .unwrap();
         let strikes: Vec<f64> = bar.quotes.iter().map(|q| q.strike).collect();
         assert_eq!(strikes, [100.0, 100.0, 105.0, 105.0]);
-        assert_eq!(bar.quote(2).unwrap().bid, 4.8, "the finer tape's quote wins where both have one");
+        assert_eq!(
+            bar.quote(2).unwrap().bid,
+            4.8,
+            "the finer tape's quote wins where both have one"
+        );
 
         // 15-minute bars spanning the 30-minute tape keep the chain at 15.
         let path = fixture("mixed-spanning");
-        add_fifteen(&path, &["2026-07-01T13:30:00+00:00", "2026-07-01T14:15:00+00:00"]);
+        add_fifteen(
+            &path,
+            &["2026-07-01T13:30:00+00:00", "2026-07-01T14:15:00+00:00"],
+        );
         let series = ChainSeries::load(&Snapshot::open(&path).unwrap(), "test", expiry()).unwrap();
         assert_eq!(series.bar_minutes, 15);
         assert_eq!(series.len(), 2);
@@ -1392,7 +1658,10 @@ mod tests {
         };
         let est = bar.estimate_quote(1025, 102.5, OptionRight::Call).unwrap();
         assert!((4.9..=4.95).contains(&est.mid), "{}", est.mid);
-        assert!(est.ask - est.bid >= 0.1 - 1e-12, "the wider neighbour's spread");
+        assert!(
+            est.ask - est.bid >= 0.1 - 1e-12,
+            "the wider neighbour's spread"
+        );
     }
 
     #[test]
