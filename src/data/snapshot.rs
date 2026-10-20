@@ -103,6 +103,33 @@ impl Snapshot {
         self.format
     }
 
+    /// What a result was computed from, for its report: the file, its
+    /// format, and a research DB's build metadata (which snapshot, which UW
+    /// quotes, whether tape spreads were corrected).
+    pub fn provenance(&self) -> Result<serde_json::Value> {
+        let mut out = serde_json::json!({
+            "path": self.path.display().to_string(),
+            "format": match self.format {
+                Format::Capture => "capture",
+                Format::Research => "research",
+            },
+            "schema_version": self.schema_version()?,
+        });
+        if self.format == Format::Research {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT key, value FROM research_meta ORDER BY key")?;
+            let meta: serde_json::Map<String, serde_json::Value> = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .map(|row| row.map(|(k, v)| (k, serde_json::Value::String(v))))
+                .collect::<rusqlite::Result<_>>()?;
+            out["research"] = serde_json::Value::Object(meta);
+        }
+        Ok(out)
+    }
+
     /// Open the newest snapshot in `~/Documents/Options Database`, judged by the
     /// ISO date that ends its filename.
     pub fn open_default() -> Result<Self> {

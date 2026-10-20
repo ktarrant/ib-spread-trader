@@ -139,7 +139,10 @@ fn main() -> Result<()> {
             let sentiment_gate = match strategy_config.execution.sentiment_gate_half_life_hours {
                 None => None,
                 Some(hours) => {
-                    let dir = snapshot.path().parent().context("snapshot has no directory")?;
+                    let dir = snapshot
+                        .path()
+                        .parent()
+                        .context("snapshot has no directory")?;
                     Some(engine::SentimentGate {
                         news: std::sync::Arc::new(NewsSentiment::load(dir.join(news::CACHE_NAME))?),
                         half_life: chrono::Duration::seconds((hours * 3600.0).round() as i64),
@@ -184,11 +187,19 @@ fn main() -> Result<()> {
             // One timeline needs one bar grid: a 15-minute and a 30-minute bar
             // starting together do not close together, so they cannot be marked
             // as one instant. Finer chains are folded to the coarsest.
-            let bar_minutes = symbols.iter().flatten().map(|s| s.bar_minutes).max().unwrap_or(30);
+            let bar_minutes = symbols
+                .iter()
+                .flatten()
+                .map(|s| s.bar_minutes)
+                .max()
+                .unwrap_or(30);
             let mut folded = Vec::new();
             for series in symbols.iter_mut().flatten() {
                 if series.bar_minutes < bar_minutes {
-                    folded.push(format!("{} {} ({}-min)", series.symbol, series.expiry, series.bar_minutes));
+                    folded.push(format!(
+                        "{} {} ({}-min)",
+                        series.symbol, series.expiry, series.bar_minutes
+                    ));
                     series.coarsen(bar_minutes);
                 }
             }
@@ -197,7 +208,8 @@ fn main() -> Result<()> {
             // merged timeline; the per-symbol account runs each independently.
             // Both yield: the report, per-symbol runs (for the CSV logs), and the
             // equity curve to write.
-            let (mut built, runs, curve) = if strategy_config.account_mode()? == AccountMode::Shared {
+            let (mut built, runs, curve) = if strategy_config.account_mode()? == AccountMode::Shared
+            {
                 let mut strategies: Vec<engine::Strategy> = symbols
                     .iter()
                     .map(|_| strategy())
@@ -228,7 +240,11 @@ fn main() -> Result<()> {
                 built.caveats.push(format!(
                     "{} chain(s) had no two-sided option bars and were not run: {}.",
                     partial.len(),
-                    partial.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ")
+                    partial
+                        .iter()
+                        .map(|c| c.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
             built.bar_minutes = bar_minutes;
@@ -260,6 +276,9 @@ fn main() -> Result<()> {
                 if let Some(obj) = full.as_object_mut() {
                     obj.insert("config".into(), reported_config.clone());
                     obj.insert("labels".into(), labels.clone());
+                    // Which data the run read: publish-results.sh cuts its
+                    // bundle from this same file.
+                    obj.insert("snapshot".into(), snapshot.provenance()?);
                 }
                 std::fs::write(
                     dir.join("backtest.json"),
