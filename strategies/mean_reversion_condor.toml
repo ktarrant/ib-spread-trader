@@ -1,0 +1,16 @@
+# mean_reversion with iron condors allowed in the ranker (ranker axis only).
+name      = "mean-reversion-condor"
+mode      = "ranked"
+model     = "mean-reversion"
+ranker    = "ev_condor"
+portfolio = "shared_20k"
+exit      = "base"
+dataset   = "all"
+
+[execution]
+timing = "next_bar"
+earnings_blackout_days = 3
+post_earnings_blackout_sessions = 5
+
+[costs]
+commission_per_contract = 0.65
