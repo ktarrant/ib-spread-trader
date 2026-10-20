@@ -2477,6 +2477,14 @@ more volatile than a pure credit harvester's.
 - Tests are inline `#[cfg(test)] mod tests` blocks. The one exception is
   `tests/golden.rs`, which runs against the real snapshot and **skips cleanly
   when none is present** — the file is 213 MB and lives outside the repo.
+- **The crate isn't rustfmt-clean.** `cargo fmt` reformats about twenty files nobody
+  touched. Format only the files you change (`rustfmt --edition 2024 <file>`).
+- `--db` takes a capture snapshot or a **research DB** (ib-option-calc's
+  `docs/research-db.md`: IB's data with UW's tape merged in, back to 2023-11).
+  `Snapshot::format` says which; the loaders have a research form of each query
+  returning the same columns, and `a_research_db_loads_exactly_what_its_snapshot_does`
+  pins that. Every `backtest.json` records which file it read (`snapshot`), which is
+  what `scripts/publish-results.sh` cuts each run's bundle from.
 
 ## When a golden test fails
 
