@@ -16,7 +16,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, NaiveDate, Timelike, Utc};
 use chrono_tz::America::New_York;
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use crate::domain::{OptionRight, normalize_symbol};
 use crate::pricing::{self, PairedStrike};
@@ -370,11 +371,11 @@ pub struct ChainSeries {
     /// bar's window. The capture's own bars where they cover the chain; folded
     /// from the 5-minute tape where they do not (a 15-minute chain whose capture
     /// took no 15-minute stock bars).
-    underlying: BTreeMap<DateTime<Utc>, UnderlyingBar>,
+    underlying: Tape,
     /// Fine-grained underlying bars for the signal. 5-min if the snapshot has
     /// them, otherwise the same 30-min data. Only stock-only bars draw from
     /// this; option bars always use `underlying` above.
-    signal_underlying: BTreeMap<DateTime<Utc>, UnderlyingBar>,
+    signal_underlying: Tape,
     expiry_instant: DateTime<Utc>,
     pub option_quality: Quality,
     pub underlying_quality: Quality,
@@ -398,8 +399,57 @@ pub struct ChainSeries {
     release_ratios: Vec<(NaiveDate, f64)>,
 }
 
+/// A symbol's stock bars, shared by every chain loaded from it.
+type Tape = Arc<BTreeMap<DateTime<Utc>, UnderlyingBar>>;
+
+/// The underlying's bars per (symbol, bar size), loaded once per backtest and
+/// shared by that symbol's chains (see [`ChainSeries::load_shared`]).
+#[derive(Default)]
+pub struct UnderlyingCache {
+    tapes: HashMap<(String, String), (Tape, Quality)>,
+    resampled: HashMap<(String, i64), Tape>,
+}
+
+impl UnderlyingCache {
+    fn tape(
+        &mut self,
+        snapshot: &Snapshot,
+        symbol: &str,
+        bar_size: &str,
+    ) -> Result<(Tape, Quality)> {
+        let key = (symbol.to_string(), bar_size.to_string());
+        if let Some(hit) = self.tapes.get(&key) {
+            return Ok(hit.clone());
+        }
+        let (bars, quality) = load_underlying(snapshot, symbol, bar_size)?;
+        let hit = (Arc::new(bars), quality);
+        self.tapes.insert(key, hit.clone());
+        Ok(hit)
+    }
+
+    fn resampled(&mut self, symbol: &str, tape: &Tape, minutes: i64) -> Tape {
+        self.resampled
+            .entry((symbol.to_string(), minutes))
+            .or_insert_with(|| Arc::new(resample(tape, minutes)))
+            .clone()
+    }
+}
+
 impl ChainSeries {
     pub fn load(snapshot: &Snapshot, symbol: &str, expiry: NaiveDate) -> Result<Self> {
+        Self::load_shared(snapshot, symbol, expiry, &mut UnderlyingCache::default())
+    }
+
+    /// [`ChainSeries::load`], taking the underlying's bars from `cache`. A
+    /// symbol's stock tape (ten years of 5-minute bars) is the same for each of
+    /// its chains, and a history backtest on a research DB loads ~40 chains a
+    /// symbol: held once per chain it took 6 GB for three symbols, shared 1.1.
+    pub fn load_shared(
+        snapshot: &Snapshot,
+        symbol: &str,
+        expiry: NaiveDate,
+        cache: &mut UnderlyingCache,
+    ) -> Result<Self> {
         let symbol = normalize_symbol(symbol);
         let expiry_text = expiry.format("%Y-%m-%d").to_string();
 
@@ -448,8 +498,8 @@ impl ChainSeries {
         }
         let bar_size = format!("{bar_minutes}min");
         let bar_size = bar_size.as_str();
-        let (native, native_quality) = load_underlying(snapshot, &symbol, bar_size)?;
-        let (five_minute, five_minute_quality) = load_underlying(snapshot, &symbol, "5min")?;
+        let (native, native_quality) = cache.tape(snapshot, &symbol, bar_size)?;
+        let (five_minute, five_minute_quality) = cache.tape(snapshot, &symbol, "5min")?;
         // Native stock bars when they reach the chain's last option bar; else the
         // 5-minute tape folded to the chain's resolution.
         let last_option = quotes.last().map(|q| q.ts);
@@ -460,7 +510,10 @@ impl ChainSeries {
         let (underlying, underlying_quality) = if native_covers || five_minute.is_empty() {
             (native, native_quality)
         } else {
-            (resample(&five_minute, bar_minutes), five_minute_quality)
+            (
+                cache.resampled(&symbol, &five_minute, bar_minutes),
+                five_minute_quality,
+            )
         };
         // Sessions from the widest tape: a chain's native bars can stop near its
         // expiry, and a later chain's release must still map to its own session.
@@ -508,7 +561,7 @@ impl ChainSeries {
         }
         fold_quotes(&mut self.quotes, self.bar_minutes, minutes);
         self.blocks = blocks(&self.quotes);
-        self.underlying = resample(&self.signal_underlying, minutes);
+        self.underlying = Arc::new(resample(&self.signal_underlying, minutes));
         self.bar_minutes = minutes;
     }
 

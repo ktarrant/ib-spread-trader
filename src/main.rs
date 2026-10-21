@@ -6,7 +6,8 @@ use chrono::{DateTime, NaiveDate, Utc};
 use clap::{Parser, Subcommand};
 use ib_spread_trader::config::{AccountMode, StrategyConfig};
 use ib_spread_trader::data::{
-    ChainSeries, NewsSentiment, Snapshot, chain_coverage, news, snapshot::default_snapshot_path,
+    ChainSeries, NewsSentiment, Snapshot, UnderlyingCache, chain_coverage, news,
+    snapshot::default_snapshot_path,
 };
 use ib_spread_trader::{engine, intraday, report};
 use std::path::PathBuf;
@@ -163,10 +164,13 @@ fn main() -> Result<()> {
             let mut symbols: Vec<Vec<ChainSeries>> = Vec::new();
             let mut skipped = Vec::new();
             let mut missing_chains = Vec::new();
+            // Each symbol's stock bars are loaded once and shared by its chains.
+            let mut underlying = UnderlyingCache::default();
             for symbol in &strategy_config.symbols {
                 let mut chains = Vec::new();
                 for &expiry in &expiries {
-                    let series = ChainSeries::load(&snapshot, symbol, expiry)?;
+                    let series =
+                        ChainSeries::load_shared(&snapshot, symbol, expiry, &mut underlying)?;
                     if series.is_empty() {
                         missing_chains.push(format!("{symbol} {expiry}"));
                     } else {
