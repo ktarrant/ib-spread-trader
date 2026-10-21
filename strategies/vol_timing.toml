@@ -10,6 +10,10 @@ dataset   = "2026-08-21"
 
 [execution]
 timing = "next_bar"
+# A research DB's tape quotes are the NBBO at a bar's last print, a median 4
+# minutes old; ranking by price picks stale ones. Decide entries on quotes at
+# most a minute old (IB's are always fresh). See CLAUDE.md, "Stale tape quotes".
+max_entry_quote_age_secs = 60
 
 [costs]
 commission_per_contract = 0.65
