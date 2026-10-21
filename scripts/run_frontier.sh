@@ -8,11 +8,18 @@ cd "$(dirname "$0")/.."
 
 # strategy  dataset — `all` / `etf-all` span every monthly chain, so a new
 # capture lands by adding its expiry to those datasets, not a row here.
+# `history` / `etf-history` are every monthly a research DB holds, back to
+# 2023-11 from UW's tape (scripts/history_datasets.py); run them with --db on
+# one. On a capture snapshot they have only the captured chains.
 FRONTIER="
 vol_timing     all
 skewed_condor  etf-all
 mean_reversion all
 mean_reversion_prevailing all
+vol_timing     history
+skewed_condor  etf-history
+mean_reversion history
+mean_reversion_prevailing history
 "
 
 cargo build -q --release
