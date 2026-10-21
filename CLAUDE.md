@@ -2407,6 +2407,32 @@ code stays dormant behind `Strategy::Staged` and keeps its inline unit tests. A
 future **RSI-oversold** model would reuse `indicators::Rsi` (independent of the
 staged pipeline) as a new drift term, validated on the same null-beating gate.
 
+## The frontier on three years of tape: measured 2026-10-21, not yet trustworthy
+
+The frontier ran on the research DB built 2026-10-21 (IB plus UW's tape, `history.toml`: 37 monthlies, 2023-11-17 → 2026-11-20). It took 96 minutes and peaked at ~5 GB once a symbol's stock tape was shared across its chains (`UnderlyingCache`). Every strategy loses:
+
+| Run | Trades | Avg P&L | Win |
+|---|---|---|---|
+| `vol_timing_history` | 974 | −65 | 27% |
+| `skewed_condor_etf-history` | 444 | −46 | 44% |
+| `mean_reversion_history` | 2 221 | −293 | 32% |
+| `mean_reversion_prevailing_history` | 1 896 | −391 | 30% |
+
+**Don't read those as the strategies' verdict yet. The tape biases them.** The seam check (ib-option-calc's `research.py build --tape-only`) took all.toml's three monthlies, the only ones IB's capture quotes (08-21, 10-16, 11-20), and read them three ways. Inside the IB run's own entry window (Jun 24 → Oct 12, 2026), the average trade was:
+
+| Strategy | IB capture only | Full (IB + tape) | Tape only |
+|---|---|---|---|
+| `vol_timing` | +103 (21) | +17 (41) | −31 (57) |
+| `skewed_condor` | +43 (31) | +25 (40) | +16 (38) |
+| `mean_reversion` | −41 (101) | −174 (134) | −247 (169) |
+| `mean_reversion_prevailing` | +243 (39) | −305 (76) | −309 (132) |
+
+- **The more of a run's quotes come from the tape, the worse it does, and the more it trades.** The condor, which picks a fixed structure, barely moves. The strategies that rank candidates by price are hit hardest. That is selection on noisy prices: a tape quote is the NBBO at the bar's last print, up to 15 minutes stale, so the candidates that look best are disproportionately stale quotes. The spread correction fixes the average cost, not this.
+- **all.toml on a research DB is a different backtest.** It lists three monthlies, so with the tape's history behind them the front month is months out (median 79–135 DTE at entry outside the IB window, which capture data never offered). On a research DB, compare with the `history` rows.
+- **The shared account trades through ruin.** Sizing bounds capital *at risk* by `initial_cash`, not equity, so mean reversion's equity ends near −$634k and it is still opening trades. Per-trade averages and win rates are the meaningful numbers there; cumulative dollars aren't.
+
+What would make the tape usable for ranked strategies: keep each tape quote's staleness (minutes from its last print to the bar's close; the Parquet has it) and refuse entries on stale quotes, or validate every tape-era finding against the IB era before trusting it. The condor's result is the one closest to source-independent.
+
 ## The account model: one shared pool is the default
 
 A backtest runs **every symbol against one `initial_cash`** — the default
