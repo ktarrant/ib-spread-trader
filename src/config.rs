@@ -322,6 +322,13 @@ pub struct ExecutionConfig {
     /// week apart — rather than filling every slot on consecutive bars.
     #[serde(default)]
     pub min_days_between_entries: Option<f64>,
+    /// Decide entries without tape quotes older than this many seconds (a
+    /// research DB's `quotes.age`): the strike is interpolated from the bar's
+    /// fresh quotes instead. A ranked strategy choosing by price otherwise
+    /// picks stale tape quotes disproportionately. No effect on IB's quotes,
+    /// or on exits, marks and fills.
+    #[serde(default)]
+    pub max_entry_quote_age_secs: Option<u32>,
     /// Decide entries only on bars starting inside this New York window, e.g.
     /// `["10:00", "15:00"]`. The first and last bars of a session quote about
     /// twice the spread of midday, and a decision fills on the next bar.
@@ -381,6 +388,7 @@ impl Default for ExecutionConfig {
             entry_rsi_zone: RsiZone::default(),
             max_bars_since_rsi_cross_up: None,
             min_days_between_entries: None,
+            max_entry_quote_age_secs: None,
             entry_window: None,
             sentiment_gate_half_life_hours: None,
             earnings_blackout_days: None,
@@ -1739,6 +1747,7 @@ impl StrategyConfig {
             entry_rsi_zone: self.execution.entry_rsi_zone,
             max_bars_since_rsi_cross_up: self.execution.max_bars_since_rsi_cross_up,
             min_days_between_entries: self.execution.min_days_between_entries,
+            max_entry_quote_age_secs: self.execution.max_entry_quote_age_secs,
             entry_window: match &self.execution.entry_window {
                 None => None,
                 Some([from, to]) => Some((minute_of_day(from)?, minute_of_day(to)?)),

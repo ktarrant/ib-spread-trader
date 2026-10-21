@@ -60,6 +60,10 @@ struct RawQuote {
     right: OptionRight,
     bid: f64,
     ask: f64,
+    /// A tape quote's staleness: seconds from its last print to the bar's end
+    /// (a research DB's `quotes.age`). `None` for IB's own quotes, whose bar
+    /// close is the quote at the bar's end.
+    age: Option<u32>,
 }
 
 /// The underlying at one timestamp.
@@ -722,8 +726,27 @@ impl ChainSeries {
     /// derive delta. One pass, no allocation beyond the returned quotes.
     pub fn snapshot(&self, index: usize) -> Option<ChainSnapshot> {
         let &(ts, start, end) = self.blocks.get(index)?;
-        let raw = &self.quotes[start..end];
+        self.resolve(ts, &self.quotes[start..end])
+    }
 
+    /// The bar at `ts` without tape quotes older than `max_age` seconds: what
+    /// an entry decision sees under `execution.max_entry_quote_age_secs`. A
+    /// stale tape quote is the NBBO minutes before the bar's end, and a ranker
+    /// choosing by price picks those disproportionately; here such a strike is
+    /// unquoted, so it is interpolated from the bar's fresh quotes like any
+    /// strike that didn't print. IB's quotes are never stale.
+    pub fn snapshot_fresh_at(&self, ts: DateTime<Utc>, max_age: u32) -> Option<ChainSnapshot> {
+        let index = self.blocks.binary_search_by_key(&ts, |&(t, _, _)| t).ok()?;
+        let &(ts, start, end) = self.blocks.get(index)?;
+        let fresh: Vec<RawQuote> = self.quotes[start..end]
+            .iter()
+            .filter(|q| q.age.is_none_or(|age| age <= max_age))
+            .copied()
+            .collect();
+        self.resolve(ts, &fresh)
+    }
+
+    fn resolve(&self, ts: DateTime<Utc>, raw: &[RawQuote]) -> Option<ChainSnapshot> {
         // Pair calls with puts by strike for the parity fit. The ladder is small
         // (30-49 strikes) and already sorted by strike, so a BTreeMap here costs
         // nothing and keeps the pairing obvious.
@@ -806,7 +829,8 @@ impl ChainSeries {
 const OPTION_SQL: &str = r#"
 SELECT b.ts, c.id AS contract_id, c.strike, c.right,
        MAX(CASE WHEN b.data_type = 'bid' THEN b.close END) AS bid,
-       MAX(CASE WHEN b.data_type = 'ask' THEN b.close END) AS ask
+       MAX(CASE WHEN b.data_type = 'ask' THEN b.close END) AS ask,
+       NULL AS age
 FROM bars b
 JOIN contracts c ON c.id = b.contract_id
 WHERE b.bar_size = ?1
@@ -844,7 +868,8 @@ const OPTION_SQL_RESEARCH: &str = r#"
 SELECT strftime('%Y-%m-%dT%H:%M:%S+00:00', q.t * 60, 'unixepoch') AS ts,
        c.id AS contract_id, c.strike, c.right,
        q.bid / 10000.0 AS bid,
-       q.ask / 10000.0 AS ask
+       q.ask / 10000.0 AS ask,
+       q.age AS age
 FROM quotes q
 JOIN contracts c ON c.id = q.contract_id
 WHERE q.minutes = CAST(replace(?1, 'min', '') AS INTEGER)
@@ -998,9 +1023,15 @@ fn load_option_quotes(
     expiry: &str,
     bar_size: &str,
 ) -> Result<(Vec<RawQuote>, Quality)> {
+    // A research DB built before quote ages (UW quotes v3) has no age column.
+    let research = if snapshot.has_quote_age() {
+        OPTION_SQL_RESEARCH.to_string()
+    } else {
+        OPTION_SQL_RESEARCH.replace("q.age AS age", "NULL AS age")
+    };
     let mut stmt = snapshot
         .conn()
-        .prepare(sql_for(snapshot, OPTION_SQL, OPTION_SQL_RESEARCH))?;
+        .prepare(sql_for(snapshot, OPTION_SQL, &research))?;
     let rows = stmt.query_map((bar_size, symbol, expiry), |row| {
         Ok((
             row.get::<_, String>("ts")?,
@@ -1009,13 +1040,14 @@ fn load_option_quotes(
             row.get::<_, String>("right")?,
             row.get::<_, Option<f64>>("bid")?,
             row.get::<_, Option<f64>>("ask")?,
+            row.get::<_, Option<i64>>("age")?,
         ))
     })?;
 
     let mut quality = Quality::default();
     let mut quotes = Vec::new();
     for row in rows {
-        let (ts, contract_id, strike, right, bid, ask) = row?;
+        let (ts, contract_id, strike, right, bid, ask, age) = row?;
         quality.rows_read += 1;
         let (Some(bid), Some(ask)) = (bid, ask) else {
             quality.dropped_unpaired += 1;
@@ -1036,6 +1068,7 @@ fn load_option_quotes(
             right: right.parse()?,
             bid,
             ask,
+            age: age.map(|a| a.clamp(0, i64::from(u32::MAX)) as u32),
         });
     }
     Ok((quotes, quality))
@@ -1529,6 +1562,29 @@ mod tests {
         )
         .unwrap();
         path
+    }
+
+    #[test]
+    fn an_entry_view_leaves_out_stale_tape_quotes_and_nothing_else() {
+        let research = to_research(&fixture("research-fresh"));
+        let conn = rusqlite::Connection::open(&research).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE quotes ADD COLUMN age INTEGER;
+             UPDATE quotes SET age = 600 WHERE contract_id = 4;  -- the 105 call, ten minutes stale
+             UPDATE quotes SET age = 30 WHERE contract_id = 2;   -- the 100 call, fresh",
+        )
+        .unwrap();
+        drop(conn);
+        let snap = Snapshot::open(&research).unwrap();
+        assert!(snap.has_quote_age());
+        let series = ChainSeries::load(&snap, "test", expiry()).unwrap();
+        let ts = series.timestamps().next().unwrap();
+        let all = series.snapshot_at(ts).unwrap();
+        assert!(all.quote(4).is_some(), "marks and exits still see the stale quote");
+        let fresh = series.snapshot_fresh_at(ts, 300).unwrap();
+        assert!(fresh.quote(4).is_none(), "an entry decision doesn't");
+        assert!(fresh.quote(2).is_some() && fresh.quote(3).is_some() && fresh.quote(5).is_some());
+        assert_eq!(series.snapshot_fresh_at(ts, 900).unwrap().quotes.len(), all.quotes.len());
     }
 
     #[test]

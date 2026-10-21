@@ -38,6 +38,8 @@ pub struct Snapshot {
     conn: Connection,
     path: PathBuf,
     format: Format,
+    /// A research DB built with UW quotes v3 or later carries `quotes.age`.
+    quote_age: bool,
 }
 
 impl Snapshot {
@@ -92,15 +94,27 @@ impl Snapshot {
             Format::Capture
         };
 
+        let quote_age = format == Format::Research
+            && conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM pragma_table_info('quotes') WHERE name = 'age')",
+                [],
+                |row| row.get(0),
+            )?;
         Ok(Self {
             conn,
             path: path.to_path_buf(),
             format,
+            quote_age,
         })
     }
 
     pub fn format(&self) -> Format {
         self.format
+    }
+
+    /// Whether the option quotes carry their staleness (`quotes.age`).
+    pub fn has_quote_age(&self) -> bool {
+        self.quote_age
     }
 
     /// What a result was computed from, for its report: the file, its

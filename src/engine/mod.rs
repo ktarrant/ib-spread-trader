@@ -101,6 +101,10 @@ pub struct RunConfig {
     /// Refuse a symbol's entry until this many days after its last fill — the
     /// spacing that turns a per-symbol cap above one into a ladder.
     pub min_days_between_entries: Option<f64>,
+    /// Decide entries on bars resolved without tape quotes older than this
+    /// (seconds); see `ChainSeries::snapshot_fresh_at`. Exits, marks and fills
+    /// still read every quote.
+    pub max_entry_quote_age_secs: Option<u32>,
     /// Decide entries only on bars starting inside this New York window, as
     /// minutes past midnight.
     pub entry_window: Option<(u16, u16)>,
@@ -127,6 +131,7 @@ impl Default for RunConfig {
             entry_rsi_zone: RsiZone::default(),
             max_bars_since_rsi_cross_up: None,
             min_days_between_entries: None,
+            max_entry_quote_age_secs: None,
             entry_window: None,
             portfolio_model: None,
         }
@@ -1202,6 +1207,17 @@ pub fn run_shared(
                             // Ascending by expiry, so the first is the front month.
                             if config.expiry_choice == ExpiryChoice::Front {
                                 open.truncate(1);
+                            }
+                            // Entries choose on the fresh quotes only.
+                            let fresh: Vec<(&ChainSeries, ChainSnapshot)> = match config.max_entry_quote_age_secs {
+                                None => Vec::new(),
+                                Some(age) => open
+                                    .iter()
+                                    .filter_map(|&(series, bar)| Some((series, series.snapshot_fresh_at(bar.ts, age)?)))
+                                    .collect(),
+                            };
+                            if config.max_entry_quote_age_secs.is_some() {
+                                open = fresh.iter().map(|(series, bar)| (*series, bar)).collect();
                             }
                             if let Some((choice, bounds, expiry)) = ranked_choose(
                                 ranked,
