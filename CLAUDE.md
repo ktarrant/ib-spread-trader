@@ -59,13 +59,30 @@ cargo build
 cargo test
 cargo run -- catalog            # what is backtestable
 cargo run -- catalog --all      # including chains too thin to trade
+scripts/quick_check.sh          # ~5 min: does a change help, against IB? (below)
+scripts/quick_check.sh vol_timing --label wider-stop   # one strategy, a named check
 scripts/run_frontier.sh         # rerun the frontier into out/, archive the rest
 scripts/run_frontier.sh --db D:/ib-research/research-YYYY-MM-DD.sqlite3   # on a research DB
+scripts/run_frontier.sh --only vol_timing --db ...   # rerun one strategy's rows
 python scripts/history_datasets.py <research DB>   # datasets/history.toml: every monthly, 2023-11 on
 scripts/publish-results.sh      # out/ (with a bundle per run) to the server's LAN visualizer
 ```
 
 Backtests run on the Windows PC (or the Mac), never on the capture server.
+
+**The quick check is the loop for changes; the frontier is for publishing.**
+A backtest is one core, and the PC has 16 threads, so both scripts run in
+parallel. `quick_check.sh` runs the frontier strategies on all.toml's
+monthlies (etf-all for the condor) on the IB capture alone and on the full
+research DB at once, in ~5 minutes, into `out_check/<stamp>[-label]/`. Then
+`seam_compare.py` prints, per strategy, the average trade (and count) on IB
+alone, the full run inside IB's entry window, the full run whole and either
+side of the 2026-06-17 seam, with the previous check's line under it. IB alone
+is the reference: a change helps when the full run's in-window average moves
+toward it without losing trades, and the IB column itself shouldn't drop.
+Only the history (37 monthlies) answers whether a strategy works over three
+years, and `run_frontier.sh` (4 jobs, longest first, ~35 minutes; `--only` for
+the strategies a change touched) is for when a change is worth publishing.
 The research DB that ib-option-calc's `scripts/refresh-research.sh` builds holds
 IB's data plus UW's tape for 56 symbols back to 2023-11. The server only shows
 the published results (ib-option-calc's `docs/server.md`, "The visualizer, and
