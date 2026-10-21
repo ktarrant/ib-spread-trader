@@ -60,7 +60,16 @@ cargo test
 cargo run -- catalog            # what is backtestable
 cargo run -- catalog --all      # including chains too thin to trade
 scripts/run_frontier.sh         # rerun the frontier into out/, archive the rest
+scripts/run_frontier.sh --db D:/ib-research/research-YYYY-MM-DD.sqlite3   # on a research DB
+python scripts/history_datasets.py <research DB>   # datasets/history.toml: every monthly, 2023-11 on
+scripts/publish-results.sh      # out/ (with a bundle per run) to the server's LAN visualizer
 ```
+
+Backtests run on the Windows PC (or the Mac), never on the capture server.
+The research DB that ib-option-calc's `scripts/refresh-research.sh` builds holds
+IB's data plus UW's tape for 56 symbols back to 2023-11. The server only shows
+the published results (ib-option-calc's `docs/server.md`, "The visualizer, and
+publishing results").
 
 Headlines are scored by an LLM on the capture server, not here:
 ib-option-calc's `news-score` runs after each daily headline sync, scoring only
