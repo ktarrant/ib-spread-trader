@@ -38,6 +38,17 @@ impl PriceDistribution {
             .sum()
     }
 
+    /// `expected` with the grid index too, `Σ pᵢ · f(i, priceᵢ)`, summed in the
+    /// same order: for a caller holding `f` precomputed per grid point.
+    pub fn expected_indexed<F: Fn(usize, f64) -> f64>(&self, f: F) -> f64 {
+        self.prices
+            .iter()
+            .zip(&self.probs)
+            .enumerate()
+            .map(|(i, (&price, &p))| p * f(i, price))
+            .sum()
+    }
+
     pub fn mean(&self) -> f64 {
         self.expected(|s| s)
     }

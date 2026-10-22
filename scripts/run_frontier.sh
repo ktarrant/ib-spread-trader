@@ -29,7 +29,8 @@ done
 # 2023-11 from UW's tape (scripts/history_datasets.py); run them with --db on
 # one. On a capture snapshot they have only the captured chains.
 # Longest first, so the short runs fill in behind the long ones (minutes on a
-# research DB, 2026-10-21: 34, 20, 20, 3, 10, 4, 3, 1).
+# research DB, serially, before GridPricer, 2026-10-21: 34, 20, 20, 3, 10, 4,
+# 3, 1; vol_timing_history is 14 after it).
 FRONTIER="
 vol_timing     history
 mean_reversion history

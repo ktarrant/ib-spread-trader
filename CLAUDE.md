@@ -59,7 +59,7 @@ cargo build
 cargo test
 cargo run -- catalog            # what is backtestable
 cargo run -- catalog --all      # including chains too thin to trade
-scripts/quick_check.sh          # ~5 min: does a change help, against IB? (below)
+scripts/quick_check.sh          # ~2 min: does a change help, against IB? (below)
 scripts/quick_check.sh vol_timing --label wider-stop   # one strategy, a named check
 scripts/run_frontier.sh         # rerun the frontier into out/, archive the rest
 scripts/run_frontier.sh --db D:/ib-research/research-YYYY-MM-DD.sqlite3   # on a research DB
@@ -74,14 +74,14 @@ Backtests run on the Windows PC (or the Mac), never on the capture server.
 A backtest is one core, and the PC has 16 threads, so both scripts run in
 parallel. `quick_check.sh` runs the frontier strategies on all.toml's
 monthlies (etf-all for the condor) on the IB capture alone and on the full
-research DB at once, in ~5 minutes, into `out_check/<stamp>[-label]/`. Then
+research DB at once, in ~2 minutes, into `out_check/<stamp>[-label]/`. Then
 `seam_compare.py` prints, per strategy, the average trade (and count) on IB
 alone, the full run inside IB's entry window, the full run whole and either
 side of the 2026-06-17 seam, with the previous check's line under it. IB alone
 is the reference: a change helps when the full run's in-window average moves
 toward it without losing trades, and the IB column itself shouldn't drop.
 Only the history (37 monthlies) answers whether a strategy works over three
-years, and `run_frontier.sh` (4 jobs, longest first, ~35 minutes; `--only` for
+years, and `run_frontier.sh` (4 jobs, longest first, ~15–20 minutes; `--only` for
 the strategies a change touched) is for when a change is worth publishing.
 The research DB that ib-option-calc's `scripts/refresh-research.sh` builds holds
 IB's data plus UW's tape for 56 symbols back to 2023-11. The server only shows
@@ -193,6 +193,19 @@ context on *every bar*, which is O(n²) over ~1M rows.
 A full chain loads in ~100 ms (SPY: 581 bars, 48 660 quote rows). IV and delta
 are resolved lazily in `ChainSeries::snapshot`, one pass per bar, so the engine
 pays for exactly the bars it visits.
+
+**Where a run's time goes** (`vol_timing` on all.toml, full research DB,
+2026-10-21; measured with temporary timers): loading 18 s, the simulation 96 s.
+Of that, resolving snapshots takes 36 s (mostly the 100-step bisection
+`implied_vol`, kept because it is the Python reference's), choosing entries 53 s
+(enumerating 21 s, the scorer evaluation 13 s, ranking ~20 s), and everything
+else is under a second. Ranking was 204 s before `GridPricer`: each candidate
+priced both its legs at all 101 grid points, and every candidate on a bar shares
+those legs. The cache keys a leg by its exact strike, vol and right and sums the
+same prices in the same order, so the outputs stayed byte-identical (all eight
+quick-check runs, and `vol_timing_history`). Keep any further speed-up to that
+bar: a faster IV solver or a GPU would change the numbers, and consumer GPUs
+are slow at the f64 this maths needs.
 
 ## Losses are counted, never hidden
 

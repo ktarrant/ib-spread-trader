@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The quick check: does a change help, measured against IB? ~6 minutes.
+# The quick check: does a change help, measured against IB? ~2 minutes.
 #
 #   scripts/quick_check.sh [--research DB] [--capture DB] [--label NAME] [STRATEGY[:DATASET] ...]
 #

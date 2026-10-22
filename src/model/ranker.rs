@@ -10,8 +10,12 @@
 //! the interim worst case: it is the capital genuinely committed, and it does not
 //! move with the horizon.
 
+use std::collections::HashMap;
+
 use super::candidates::{Candidate, RankingFunnel};
 use super::distribution::PriceDistribution;
+use crate::pricing::black76;
+use crate::spread::{Leg, Spread};
 
 /// What the ranker maximises when it picks among the candidates that clear the
 /// floors. Both read the same de-biased mark-to-model.
@@ -95,12 +99,92 @@ pub fn expected_pl_and_score(
     forward_scale: f64,
     forecast_target_quantile: Option<f64>,
 ) -> (f64, f64) {
-    let value_at = |s: f64| {
-        candidate
-            .spread
-            .model_value(s * forward_scale, remaining_years, &candidate.leg_vols)
-    };
+    let values = GridPricer::new(dist, remaining_years, forward_scale)
+        .values(&candidate.spread, &candidate.leg_vols);
+    score_from_values(
+        candidate,
+        dist,
+        &values,
+        remaining_years,
+        forward_scale,
+        forecast_target_quantile,
+    )
+}
 
+/// Every leg's Black-76 price at every point of one distribution's grid, at one
+/// horizon, priced once and shared by every candidate on the bar.
+///
+/// The ranker scores hundreds of candidates a bar against a 101-point grid,
+/// and a candidate is two to four legs off one strike ladder, so the same leg
+/// was priced again for each spread it is in: three quarters of a run's time
+/// (2026-10-21). A leg is keyed by its exact strike, vol and right, and
+/// `Spread::value_from_leg_prices` sums the cached prices exactly as
+/// `model_value` sums fresh ones, so the scores are bit for bit the same.
+pub struct GridPricer<'a> {
+    dist: &'a PriceDistribution,
+    remaining_years: f64,
+    forward_scale: f64,
+    legs: HashMap<(u64, u64, bool), Vec<f64>>,
+}
+
+impl<'a> GridPricer<'a> {
+    pub fn new(dist: &'a PriceDistribution, remaining_years: f64, forward_scale: f64) -> Self {
+        Self {
+            dist,
+            remaining_years,
+            forward_scale,
+            legs: HashMap::new(),
+        }
+    }
+
+    /// The spread's model value at each grid point: `model_value(sᵢ ·
+    /// forward_scale, remaining_years, leg_vols)` for every `sᵢ`.
+    pub fn values(&mut self, spread: &Spread, leg_vols: &[f64]) -> Vec<f64> {
+        debug_assert_eq!(
+            spread.legs.len(),
+            leg_vols.len(),
+            "one vol per leg is required"
+        );
+        let (dist, remaining_years, forward_scale) =
+            (self.dist, self.remaining_years, self.forward_scale);
+        let key = |leg: &Leg, vol: f64| (leg.strike.to_bits(), vol.to_bits(), leg.right.is_call());
+        for (leg, &vol) in spread.legs.iter().zip(leg_vols) {
+            self.legs.entry(key(leg, vol)).or_insert_with(|| {
+                dist.prices()
+                    .iter()
+                    .map(|&s| {
+                        black76(
+                            s * forward_scale,
+                            leg.strike,
+                            remaining_years,
+                            vol,
+                            leg.right.is_call(),
+                        )
+                    })
+                    .collect()
+            });
+        }
+        let columns: Vec<&[f64]> = spread
+            .legs
+            .iter()
+            .zip(leg_vols)
+            .map(|(leg, &vol)| self.legs[&key(leg, vol)].as_slice())
+            .collect();
+        (0..dist.prices().len())
+            .map(|g| spread.value_from_leg_prices(|i, _| columns[i][g]))
+            .collect()
+    }
+}
+
+/// `expected_pl_and_score` from the candidate's value at each grid point.
+fn score_from_values(
+    candidate: &Candidate,
+    dist: &PriceDistribution,
+    values: &[f64],
+    remaining_years: f64,
+    forward_scale: f64,
+    forecast_target_quantile: Option<f64>,
+) -> (f64, f64) {
     // When a forecast-target exit is configured, score the trade the way it is
     // actually managed: we take profit at the target, so the payoff is capped at
     // the target's value for any outcome that reaches it, and read at the horizon
@@ -110,14 +194,18 @@ pub fn expected_pl_and_score(
     // reads a direction it does not have.
     let target_quantile = forecast_target_quantile.filter(|_| !candidate.spread.is_direction_neutral());
     let expected_value = match target_quantile {
-        None => dist.expected(value_at),
+        None => dist.expected_indexed(|g, _| values[g]),
         Some(q) => {
             let bullish = candidate.spread.profits_from_a_rise();
             let target = dist.quantile(if bullish { q } else { 1.0 - q });
-            let value_at_target = value_at(target);
-            dist.expected(|s| {
+            let value_at_target = candidate.spread.model_value(
+                target * forward_scale,
+                remaining_years,
+                &candidate.leg_vols,
+            );
+            dist.expected_indexed(|g, s| {
                 let reached = if bullish { s >= target } else { s <= target };
-                if reached { value_at_target } else { value_at(s) }
+                if reached { value_at_target } else { values[g] }
             })
         }
     };
@@ -128,22 +216,11 @@ pub fn expected_pl_and_score(
 }
 
 /// Model probability the candidate is worth more than its cost basis at the
-/// horizon. Its own pass over the grid, computed only for a candidate worth
-/// keeping.
-fn prob_profit(
-    candidate: &Candidate,
-    dist: &PriceDistribution,
-    remaining_years: f64,
-    forward_scale: f64,
-) -> f64 {
-    prob_profit_of(
-        &candidate.spread,
-        candidate.cost_basis + candidate.exit_spread_cost,
-        &candidate.leg_vols,
-        dist,
-        remaining_years,
-        forward_scale,
-    )
+/// horizon, from its value at each grid point. Computed only for a candidate
+/// worth keeping. `prob_profit_of` with the values precomputed.
+fn prob_profit(candidate: &Candidate, dist: &PriceDistribution, values: &[f64]) -> f64 {
+    let breakeven = candidate.cost_basis + candidate.exit_spread_cost;
+    dist.expected_indexed(|g, _| f64::from(values[g] > breakeven))
 }
 
 /// Model probability a spread is worth more than `breakeven` at the horizon —
@@ -176,16 +253,19 @@ pub fn ranking_key(
     forward_scale: f64,
     cfg: &RankingConfig,
 ) -> (f64, f64) {
-    let (expected_pl, score) = expected_pl_and_score(
+    let values = GridPricer::new(dist, remaining_years, forward_scale)
+        .values(&candidate.spread, &candidate.leg_vols);
+    let (expected_pl, score) = score_from_values(
         candidate,
         dist,
+        &values,
         remaining_years,
         forward_scale,
         cfg.forecast_target_quantile,
     );
     let key = match cfg.metric {
         RankMetric::ExpectedValue => score,
-        RankMetric::ProbProfit => prob_profit(candidate, dist, remaining_years, forward_scale),
+        RankMetric::ProbProfit => prob_profit(candidate, dist, &values),
     };
     (expected_pl, key)
 }
@@ -209,11 +289,14 @@ pub fn rank(
     funnel: &mut RankingFunnel,
 ) -> Option<RankedChoice> {
     let mut best: Option<RankedChoice> = None;
+    let mut pricer = GridPricer::new(dist, remaining_years, forward_scale);
 
     for candidate in candidates {
-        let (expected_pl, score) = expected_pl_and_score(
+        let values = pricer.values(&candidate.spread, &candidate.leg_vols);
+        let (expected_pl, score) = score_from_values(
             &candidate,
             dist,
+            &values,
             remaining_years,
             forward_scale,
             cfg.forecast_target_quantile,
@@ -228,7 +311,7 @@ pub fn rank(
         }
         funnel.above_min_score += 1;
 
-        let prob_profit = prob_profit(&candidate, dist, remaining_years, forward_scale);
+        let prob_profit = prob_profit(&candidate, dist, &values);
         if cfg.min_prob_profit.is_some_and(|floor| prob_profit < floor) {
             continue;
         }

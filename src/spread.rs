@@ -98,18 +98,27 @@ impl Spread {
             leg_vols.len(),
             "one vol per leg is required"
         );
+        self.value_from_leg_prices(|i, leg| {
+            crate::pricing::black76(
+                forward,
+                leg.strike,
+                remaining_years,
+                leg_vols[i],
+                leg.right.is_call(),
+            )
+        })
+    }
+
+    /// The structure's value from each leg's per-contract price (`price(i,
+    /// leg)` for `legs[i]`): side-signed, times quantity and the multiplier.
+    /// `model_value` is this with Black-76 prices; the ranker's grid cache
+    /// passes prices it already computed, and gets the same sum bit for bit.
+    pub fn value_from_leg_prices(&self, price: impl Fn(usize, &Leg) -> f64) -> f64 {
         self.legs
             .iter()
-            .zip(leg_vols)
-            .map(|(leg, &vol)| {
-                let price = crate::pricing::black76(
-                    forward,
-                    leg.strike,
-                    remaining_years,
-                    vol,
-                    leg.right.is_call(),
-                );
-                leg.side.sign() * price * leg.quantity as f64 * CONTRACT_MULTIPLIER
+            .enumerate()
+            .map(|(i, leg)| {
+                leg.side.sign() * price(i, leg) * leg.quantity as f64 * CONTRACT_MULTIPLIER
             })
             .sum()
     }
