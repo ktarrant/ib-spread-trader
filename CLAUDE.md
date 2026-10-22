@@ -2439,7 +2439,7 @@ staged pipeline) as a new drift term, validated on the same null-beating gate.
 
 ## The frontier on three years of tape: measured 2026-10-21, not yet trustworthy
 
-The frontier ran on the research DB built 2026-10-21 (IB plus UW's tape, `history.toml`: 37 monthlies, 2023-11-17 → 2026-11-20). It took 96 minutes and peaked at ~5 GB once a symbol's stock tape was shared across its chains (`UnderlyingCache`). Every strategy loses:
+The frontier ran on the research DB built 2026-10-21 (IB plus UW's tape, `history.toml`: 37 monthlies, 2023-11-17 → 2026-11-20). It took 96 minutes and peaked at ~5 GB once a symbol's stock tape was shared across its chains (`UnderlyingCache`). These are the results **before the stale-quote rule** (below, with the results after it). Every strategy loses:
 
 | Run | Trades | Avg P&L | Win |
 |---|---|---|---|
@@ -2461,7 +2461,31 @@ The frontier ran on the research DB built 2026-10-21 (IB plus UW's tape, `histor
 - **all.toml on a research DB is a different backtest.** It lists three monthlies, so with the tape's history behind them the front month is months out (median 79–135 DTE at entry outside the IB window, which capture data never offered). On a research DB, compare with the `history` rows.
 - **The shared account trades through ruin.** Sizing bounds capital *at risk* by `initial_cash`, not equity, so mean reversion's equity ends near −$634k and it is still opening trades. Per-trade averages and win rates are the meaningful numbers there; cumulative dollars aren't.
 
-What would make the tape usable for ranked strategies: keep each tape quote's staleness (minutes from its last print to the bar's close; the Parquet has it) and refuse entries on stale quotes, or validate every tape-era finding against the IB era before trusting it. The condor's result is the one closest to source-independent.
+### Stale tape quotes: entries decide on quotes under a minute old
+
+A tape quote is the NBBO at its bar's last print, and its error against IB's quote for the same contract-bar grows with how long before the bar's end that print came: a median 0.25 IB spreads within the last minute, 0.65 at 10–15 minutes. The median tape quote is 4 minutes old (ib-option-calc's `docs/research-db.md`). The research DB carries each tape quote's `age` (UW quotes v3), and `execution.max_entry_quote_age_secs` decides entries on a view of the bar without the older ones (`ChainSeries::snapshot_fresh_at`). A dropped strike is interpolated from the bar's fresh quotes like any strike that didn't print. Exits, marks and fills still read every quote, and IB's quotes are never stale, so a run on a capture snapshot is unchanged.
+
+Dropping stale quotes from the build instead (`research.py --max-tape-age`) starves the smile everywhere, exits included, and hurt the condor most. In the seam check, inside IB's window (average trade, trades):
+
+| Strategy | IB only | Full, no rule | Full, entries ≤ 180 s | Full, entries ≤ 60 s |
+|---|---|---|---|---|
+| `vol_timing` | +103 (21) | +17 (41) | +62 (29) | **+70 (27)** |
+| `skewed_condor` | +43 (31) | **+25 (40)** | +8 (41) | −4 (39) |
+| `mean_reversion` | −41 (101) | −173 (134) | −29 (116) | **−32 (108)** |
+| `mean_reversion_prevailing` | +243 (39) | −305 (76) | −27 (50) | **+95 (45)** |
+
+So the three ranked strategies set it to 60 s (`strategies/*.toml`), and the condor, which picks a fixed structure and needs real wing quotes, doesn't. The rule closes most of the gap, not all of it: `mean_reversion_prevailing` still makes 95 a trade where IB alone makes 243.
+
+**The history with the rule** (2026-10-21, same research DB, ages on):
+
+| Run | Trades | Avg P&L | Win | Tape era | IB era | Before the rule |
+|---|---|---|---|---|---|---|
+| `vol_timing_history` | 373 | −28 | 32% | −38 (342) | +86 (31) | 974, −65 |
+| `skewed_condor_etf-history` | 444 | −46 | 45% | −56 (402) | +50 (42) | unchanged |
+| `mean_reversion_history` | 1 371 | −149 | 39% | −152 (1 225) | −120 (146) | 2 221, −293 |
+| `mean_reversion_prevailing_history` | 772 | −237 | 39% | −232 (689) | −275 (83) | 1 896, −391 |
+
+Every strategy still loses before 2026-06, in every year (2023 is the worst for all four). The rule roughly halves the ranked strategies' losses and their trade counts, which is the stale-quote selection going away. What's left is either a real absence of edge or tape bias the rule doesn't reach. One sign of the second: `mean_reversion_prevailing` makes +82 (47) in the IB era on all.toml's three IB-captured chains, and loses −275 (83) in the IB era of the history, whose extra chains (06-18, 07-17, 09-18) only the tape quotes. Until a tape-era finding is checked against IB-era chains IB captured, treat it as unconfirmed; the condor's result is the closest to source-independent.
 
 ## The account model: one shared pool is the default
 
